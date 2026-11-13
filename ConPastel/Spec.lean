@@ -91,7 +91,8 @@ def verdictBytes (accepted : Bool) : List (BitVec 8) :=
 
 /-! ## The statement -/
 
-/-- **The con-pastel correctness statement** for a CakeML program `prog`.
+/-- **The con-pastel correctness statement** for a CakeML program `prog`,
+against a reference checker `ref` (con-leche's is `Implements` below).
 
 For every input file, starting from the primitive environment:
 1. the program has a terminating behaviour whose written bytes are
@@ -102,14 +103,17 @@ For every input file, starting from the primitive environment:
 The CakeML source semantics is idealised (unbounded memory, bignums), so
 this says nothing about resource limits; flapjack's compiler theorems
 handle those separately. -/
-def Implements (prog : List Dec) : Prop :=
+def ImplementsRef (ref : ByteArray → Bool) (prog : List Dec) : Prop :=
   ∀ input : ByteArray, ∃ st env,
     PrimTypesHOL.primSemEnv (initFfi input) = some (st, env) ∧
     (∃ events, semanticsProg st env prog (.terminate .success events) ∧
-      writtenBytes events = verdictBytes (conLecheAccepts input)) ∧
+      writtenBytes events = verdictBytes (ref input)) ∧
     ∀ b, semanticsProg st env prog b →
       ∃ events, b = .terminate .success events ∧
-        writtenBytes events = verdictBytes (conLecheAccepts input)
+        writtenBytes events = verdictBytes (ref input)
+
+/-- The statement for con-leche's verdict. -/
+def Implements (prog : List Dec) : Prop := ImplementsRef conLecheAccepts prog
 
 /-! ## Runtime assumptions
 

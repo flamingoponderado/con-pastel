@@ -1,5 +1,6 @@
 import ConPastel.Spec
 import Flapjack.SemanticsProps.Determinism
+import ConPastel.Semantics.Init
 
 /-!
 # From one completed evaluation to `Implements`
@@ -44,16 +45,15 @@ theorem Completes.unique {σ : Type} {st : State σ} {env : SemEnv Value} {prog 
     (hb : semanticsProg st env prog b) : b = .terminate .success events :=
   SemanticsProps.semanticsProg_deterministic st env prog b _ ⟨hb, h.terminate⟩
 
-/-- `Implements` from a completed run with the right output, for every input. -/
-theorem implements_of_completes (prog : List Dec)
-    (h : ∀ input : ByteArray, ∃ st env,
-      PrimTypesHOL.primSemEnv (initFfi input) = some (st, env) ∧
-      ∃ events, Completes st env prog events ∧
-        writtenBytes events = verdictBytes (conLecheAccepts input)) :
-    Implements prog := by
+/-- `ImplementsRef` from a completed run with the right output, for every input. -/
+theorem implementsRef_of_completes (ref : ByteArray → Bool) (prog : List Dec)
+    (h : ∀ input : ByteArray, ∃ events,
+      Completes (initState (initFfi input)) initEnv prog events ∧
+        writtenBytes events = verdictBytes (ref input)) :
+    ImplementsRef ref prog := by
   intro input
-  obtain ⟨st, env, hprim, events, hc, hout⟩ := h input
-  refine ⟨st, env, hprim, ⟨events, hc.terminate, hout⟩, ?_⟩
+  obtain ⟨events, hc, hout⟩ := h input
+  refine ⟨initState (initFfi input), initEnv, primSemEnv_eq _, ⟨events, hc.terminate, hout⟩, ?_⟩
   intro b hb
   exact ⟨events, hc.unique b hb, hout⟩
 
