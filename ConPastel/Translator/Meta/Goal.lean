@@ -389,12 +389,23 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         hf, ← instantiateMVars (mkMVar gx), ihy])
       return
   -- applications of locals and globals: peel the last argument
+  -- fully applied tupled global units: call the tupled closure with a tuple
+  if let .const c _ := fn then
+    if let some u := getUnit? (← getEnv) c then
+      if let .recursive _ _ true := u.kind then
+        let tupName := c ++ `cake_tupled
+        let arity ← forallTelescope (← inferType fn) fun xs _ => pure xs.size
+        if args.size == arity then
+          let tup ← args.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) args.back!
+          let t' := mkApp (mkConst tupName) tup
+          let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+          return ← solve g'
   if fn.isFVar || fn.isConst then
     if args.isEmpty then
       if fn.isConst then
         let .const c _ := fn | unreachable!
         let some gv := ctx.globals.find? c | throwError "constant {c} has not been translated"
-        let hl ← ctx.globalLookup env gv.cname
+        let hl ← proveLookupG env gv.cname gv.value
         assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv fn, hl, gv.cert])
         return
     else
