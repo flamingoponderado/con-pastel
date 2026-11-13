@@ -1,4 +1,5 @@
 import ConPastel.Translator.Meta.RecCommand
+import ConPastel.Translator.Meta.Keys
 
 /-!
 # `cake_unit`: translate one Lean constant as an entry of the program's
@@ -29,22 +30,15 @@ open Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL
 
 /-- The Lean term a unit refines, and its invariant. -/
 def unitTarget (u : UnitInfo) : MetaM (Expr × Expr) := do
-  let c := mkConst u.const
   match u.kind with
   | .function _ _ true =>
-    let t := mkConst (u.const ++ `cake_tupled)
+    let t := mkConst (u.name ++ `tupled)
     return (t, ← invOf (← inferType t))
-  | .function _ _ false => return (c, ← invOf (← inferType c))
+  | .function _ _ false => return (u.key, ← invOf (← inferType u.key))
   | .thunk _ _ =>
-    let ty ← inferType c
-    let t ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] c
+    let ty ← inferType u.key
+    let t ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] u.key
     return (t, ← mkAppM ``Arrow #[mkConst ``UNIT, ← invOf ty])
-
-/-- Registered units mentioned in `e`. -/
-def unitDeps (self : Name) (e : Expr) : MetaM (Array Name) := do
-  let env ← getEnv
-  let cs := e.getUsedConstants.filter fun c => c != self && (getUnit? env c).isSome
-  return cs.toList.eraseDups.toArray
 
 def datatypeNames : MetaM (Array Name) := do
   return ((datatypeExt.getState (← getEnv)).toList.map (·.1)).toArray
@@ -63,7 +57,7 @@ def groupLookupTy (envC funs : Expr) (n : String) : MetaM Expr := do
 /-- Introduce the hypotheses of a unit certificate (see the module doc) and
 run `k` with them. `body` is the unit's (metavariable) body. -/
 def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (body : Expr)
-    (deps : Array Name)
+    (deps : Array Expr)
     (k : Expr → Expr → Expr → Expr → Array Expr → GCtx → MetaM α) : MetaM α := do
   withLocalDeclD `envC (mkApp (mkConst ``SemEnv) (mkConst ``Value)) fun envC => do
   let fty ← funTy
@@ -81,7 +75,7 @@ def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (b
   withLocalDeclsDND (dts.toArray.map fun T => (`hc, mkApp (mkConst (T ++ `cakeHasCons)) envCc)) fun hcs => do
   let hasCons : NameMap Expr := (dts.zip hcs.toList).foldl (fun m (T, h) => m.insert T h) {}
   withLocalDeclD `hself (← groupLookupTy envC funs self) fun hself => do
-  let rec go : List Name → Array Expr → NameMap GlobalVar → MetaM α
+  let rec go : List Expr → Array Expr → Std.HashMap Expr GlobalVar → MetaM α
     | [], acc, globals =>
       k envC funs hnodup hfind (#[envC, funs, hnodup, hfind, hbool, hlist] ++ hcs ++ #[hself] ++ acc)
         { hbool, hlist, hasCons, globals, unfoldRec := false }
@@ -95,37 +89,44 @@ def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (b
   go deps.toList #[] {}
 
 /-- Finish a unit: name the body, state and check the certificate, register. -/
-def finishUnit (c : Name) (cname param : String) (kind : UnitKind) (deps : Array Name)
+def finishUnit (key : Expr) (uname : Name) (cname : String) (kind : UnitKind) (deps : Array Expr)
     (body : Expr) (hyps : Array Expr) (envC funs : Expr) (pf : Expr) (target inv : Expr) : MetaM Unit := do
-  let _ := param
   let bodyI ← instantiateMVars body
-  let bodyName := c ++ `cake_body
+  let bodyName := uname ++ `body
   addDecl (Declaration.defnDecl (mkDefinitionValEx bodyName [] (mkConst ``Exp) bodyI .abbrev .safe []))
   let cl ← mkAppM ``Value.recclosure #[envC, funs, mlString cname]
   let stmt ← instantiateMVars (← mkForallFVars hyps (mkApp2 inv target cl))
-  -- refer to the body by its name in the statement
   let stmt := stmt.replace fun e => if e == bodyI then some (mkConst bodyName) else none
   let pf ← instantiateMVars (← mkLambdaFVars hyps pf)
-  unless ← isDefEq (← inferType pf) stmt do throwError "certificate type mismatch for {c}"
-  addDecl (Declaration.thmDecl (mkTheoremValEx (c ++ `cake_cert) [] stmt pf []))
-  addUnit (UnitInfo.mk c cname kind (c ++ `cake_cert) (← datatypeNames) deps)
+  unless ← isDefEq (← inferType pf) stmt do throwError "certificate type mismatch for {key}"
+  addDecl (Declaration.thmDecl (mkTheoremValEx (uname ++ `cert) [] stmt pf []))
+  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := ← datatypeNames, deps }
 
 /-- The body environment of a group entry. -/
 def bodyEnv (envC funs : Expr) (param : String) (xv : Expr) : MetaM Expr :=
   mkAppM ``recBodyEnv #[envC, funs, mlString param, xv]
 
-/-- A non-recursive function unit: `c = fun x => e`. -/
-def translateFunction (c : Name) : MetaM Unit := do
+/-- Fresh unit names. -/
+def freshUnit : MetaM (Name × String) := do
+  let k := unitCount (← getEnv)
+  return (Name.mkStr `ConPastel.Cake s!"u{k}", s!"%{k}")
+
+/-- The definition of a unit key `f static…`. -/
+def keyValue (key : Expr) : MetaM Expr := do
+  let .const c lvls := key.getAppFn | throwError "unit key {key} is not a constant application"
   let ci ← getConstInfo c
-  let some val := ci.value? | throwError "{c} has no definition"
-  let val ← etaExpand val
-  let .lam xn xty _ _ := val | throwError "{c} is not a function"
-  let deps ← unitDeps c val
-  let cname := s!"%{unitCount (← getEnv)}"
+  unless ci.hasValue do throwError "{c} has no definition"
+  return (mkAppN (← instantiateValueLevelParams ci lvls) key.getAppArgs).headBeta
+
+/-- A non-recursive function unit: `key = fun x => e`. -/
+def translateFunction (key : Expr) : MetaM Unit := do
+  let val ← etaExpand (← keyValue key)
+  let .lam xn xty _ _ := val | throwError "{key} is not a function"
+  let deps ← unitDepsOf key val
+  let (uname, cname) ← freshUnit
   let param := "p"
-  let target := mkConst c
-  let inv ← invOf ci.type
-  let (``Arrow, #[_, _, invA, invB]) := inv.getAppFnArgs | throwError "unexpected invariant for {c}"
+  let inv ← invOf (← inferType key)
+  let (``Arrow, #[_, _, invA, invB]) := inv.getAppFnArgs | throwError "unexpected invariant for {key}"
   let body ← mkFreshExprMVar (mkConst ``Exp)
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx => do
     let pf ← withLocalDeclD xn xty fun x => do
@@ -136,19 +137,18 @@ def translateFunction (c : Name) : MetaM Unit := do
         let gst : GSt := { locals := #[{ fvar := x, cname := param, value := xv, rel := hx }] }
         let _ ← (solve g.mvarId!).run gst |>.run gctx
         let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
-          mkApp invB (mkApp target x), hnodup, hfind, g]
+          mkApp invB (mkApp key x), hnodup, hfind, g]
         mkLambdaFVars #[x, xv, hx] app
-    finishUnit c cname param (.function param (c ++ `cake_body) false) deps body hyps envC funs pf target inv
+    finishUnit key uname cname (.function param (uname ++ `body) false) deps body hyps envC funs pf key inv
 
 /-- A constant unit, as a thunk. -/
-def translateThunk (c : Name) : MetaM Unit := do
-  let ci ← getConstInfo c
-  let some val := ci.value? | throwError "{c} has no definition"
-  let deps ← unitDeps c val
-  let cname := s!"%{unitCount (← getEnv)}"
+def translateThunk (key : Expr) : MetaM Unit := do
+  let val ← keyValue key
+  let deps ← unitDepsOf key val
+  let (uname, cname) ← freshUnit
   let param := "p"
-  let invT ← invOf ci.type
-  let target ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] (mkConst c)
+  let invT ← invOf (← inferType key)
+  let target ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] key
   let inv ← mkAppM ``Arrow #[mkConst ``UNIT, invT]
   let body ← mkFreshExprMVar (mkConst ``Exp)
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx => do
@@ -159,36 +159,38 @@ def translateThunk (c : Name) : MetaM Unit := do
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invT val])
         let _ ← (solve g.mvarId!).run {} |>.run gctx
         let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
-          mkApp invT (mkConst c), hnodup, hfind, g]
+          mkApp invT key, hnodup, hfind, g]
         mkLambdaFVars #[x, xv, hx] app
-    finishUnit c cname param (.thunk param (c ++ `cake_body)) deps body hyps envC funs pf target inv
+    finishUnit key uname cname (.thunk param (uname ++ `body)) deps body hyps envC funs pf target inv
 
 /-- A recursive function unit, by well-founded induction on the structural
 argument (several arguments: tupled). -/
-def translateRecursive (c : Name) : MetaM Unit := do
-  let ci ← getConstInfo c
+def translateRecursive (key : Expr) : MetaM Unit := do
+  let .const c lvls := key.getAppFn | throwError "bad key"
+  let static := key.getAppArgs
   let some eqn ← getUnfoldEqnFor? c (nonRec := true) | throwError "no unfold equation for {c}"
-  let eqnTy ← inferType (mkConst eqn (ci.levelParams.map mkLevelParam))
-  let deps ← unitDeps c eqnTy
-  let cname := s!"%{unitCount (← getEnv)}"
+  let eqnApp (as : Array Expr) : MetaM Expr := pure (mkAppN (mkConst eqn lvls) (static ++ as))
+  let deps ← forallTelescope (← inferType key) fun xs _ => do
+    unitDepsOf key (← inferType (← eqnApp xs))
+  let (uname, cname) ← freshUnit
   let param := "p"
-  forallTelescope ci.type fun xs resTy => do
+  forallTelescope (← inferType key) fun xs resTy => do
   let n := xs.size
   let tys ← xs.mapM inferType
   let tupled := n > 1
   let τ ← tupleTy tys.toList
   let invT ← invOf τ
   let invB ← invOf resTy
-  let f := mkConst c
+  let f := key
   let ft ← if tupled then do
-      let tupName := c ++ `cake_tupled
+      let tupName := uname ++ `tupled
       let tupVal ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (mkAppN f (← tupleProjs p n).toArray)
       addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
       pure (mkConst tupName)
     else pure f
   let recArg ← if tupled then do
       let some k ← structRecArg? c | throwError "{c}: only structural recursion is supported for now"
-      pure k
+      pure (k - static.size)
     else pure 0
   let body ← mkFreshExprMVar (mkConst ``Exp)
   let inv ← mkAppM ``Arrow #[invT, invB]
@@ -209,31 +211,34 @@ def translateRecursive (c : Name) : MetaM Unit := do
       withLocalDeclD `hp (mkApp2 invT p pv) fun hp => do
         let env ← bodyEnv envC funs param pv
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invB (mkApp ft p)])
-        let gctx := { gctx₀ with rec? := some { head := c, static := #[], ih, cl, cname, arity := n } }
+        let gctx := { gctx₀ with rec? := some { head := c, static, ih, cl, cname, arity := n } }
         let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
-        let _ ← (destructAndSolve g.mvarId! env invB f eqn #[] p n).run gst |>.run gctx
+        let _ ← (destructAndSolve g.mvarId! env invB f eqnApp #[] p n).run gst |>.run gctx
         let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, pv,
           mkApp invB (mkApp ft p), hnodup, hfind, g]
         mkLambdaFVars #[p, ih, pv, hp] app
     let pf ← mkAppOptM ``arrow_of_wf #[τ, resTy, invT, invB, r, hwf, ft, cl, pfH]
-    finishUnit c cname param (.function param (c ++ `cake_body) tupled) deps body hyps envC funs pf ft inv
+    finishUnit key uname cname (.function param (uname ++ `body) tupled) deps body hyps envC funs pf ft inv
 
 /-- Is `c` defined by recursion (structural or well-founded)? -/
 def isRecursiveDef (c : Name) : MetaM Bool := do
   let env ← getEnv
   return (Lean.Elab.Structural.eqnInfoExt.find? env c).isSome || (Lean.Elab.WF.eqnInfoExt.find? env c).isSome
 
-def translateUnit (c : Name) : MetaM Unit := do
-  if (getUnit? (← getEnv) c).isSome then return
-  let ci ← getConstInfo c
-  let isFn : Bool ← forallTelescope ci.type fun xs _ => pure (decide (xs.size > 0))
-  if ← isRecursiveDef c then translateRecursive c
-  else if isFn then translateFunction c
-  else translateThunk c
+def translateUnit (key : Expr) : MetaM Unit := do
+  if (getUnit? (← getEnv) key).isSome then return
+  let .const c _ := key.getAppFn | throwError "unit key {key} is not a constant application"
+  let isFn : Bool ← forallTelescope (← inferType key) fun xs _ => pure (decide (xs.size > 0))
+  if ← isRecursiveDef c then translateRecursive key
+  else if isFn then translateFunction key
+  else translateThunk key
 
-elab "cake_unit " ids:ident+ : command => do
-  for id in ids do
-    let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo id
-    liftTermElabM <| translateUnit c
+elab "cake_unit " ts:term+ : command => do
+  for t in ts do
+    liftTermElabM do
+      let key ← instantiateMVars (← Term.elabTerm t none)
+      Term.synthesizeSyntheticMVarsNoPostponing
+      let key ← instantiateMVars key
+      translateUnit key
 
 end ConPastel.Translator.Meta

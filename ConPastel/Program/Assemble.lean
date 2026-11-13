@@ -61,7 +61,7 @@ theorem program_completes (funs : List (VarN × VarN × Exp)) (entryName revName
     (hcon : funs.all (fun (_, _, e) => everyExp (oneConCheck ConPastel.initEnv.c) e) = true)
     (hmemE : ofString entryName ∈ funs.map (·.1)) (hmemR : ofString revName ∈ funs.map (·.1))
     (he : Arrow (LIST NAT) BOOL entry (.recclosure ConPastel.initEnv funs (ofString entryName)))
-    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revAppT
       (.recclosure ConPastel.initEnv funs (ofString revName)))
     (hn₁ : ofString entryName ≠ ofString bufName) (hn₂ : ofString entryName ≠ ofString readAllName)
     (hn₃ : ofString revName ≠ ofString bufName) (hn₄ : ofString revName ≠ ofString readAllName)
@@ -123,7 +123,7 @@ theorem group_main_run (E₀ : SemEnv Value) (funs : List (VarN × VarN × Exp))
     (hcon : funs.all (fun (_, _, e) => everyExp (oneConCheck E₀.c) e) = true)
     (hmemE : ofString entryName ∈ funs.map (·.1)) (hmemR : ofString revName ∈ funs.map (·.1))
     (he : Arrow (LIST NAT) BOOL entry (.recclosure E₀ funs (ofString entryName)))
-    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revAppT
       (.recclosure E₀ funs (ofString revName)))
     (hlist : HasListCons E₀.c)
     (hn₁ : ofString entryName ≠ ofString bufName) (hn₂ : ofString entryName ≠ ofString readAllName)
@@ -158,7 +158,7 @@ theorem program_completes_dt (tds : TypeDef) (funs : List (VarN × VarN × Exp))
     (hcon : funs.all (fun (_, _, e) => everyExp (oneConCheck (dtEnv tds).c) e) = true)
     (hmemE : ofString entryName ∈ funs.map (·.1)) (hmemR : ofString revName ∈ funs.map (·.1))
     (he : Arrow (LIST NAT) BOOL entry (.recclosure (dtEnv tds) funs (ofString entryName)))
-    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revAppT
       (.recclosure (dtEnv tds) funs (ofString revName)))
     (hlist : HasListCons (dtEnv tds).c)
     (hn₁ : ofString entryName ≠ ofString bufName) (hn₂ : ofString entryName ≠ ofString readAllName)

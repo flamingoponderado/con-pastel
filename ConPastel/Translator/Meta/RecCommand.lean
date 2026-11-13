@@ -106,12 +106,12 @@ def structRecArg? (c : Name) : MetaM (Option Nat) := do
 
 /-- Destructure the tuple local `p` (with `m` components) into locals, then
 solve the goal for `f a₁ … aₙ`, unfolded. -/
-partial def destructAndSolve (g : MVarId) (env invB : Expr) (f : Expr) (eqn : Name)
+partial def destructAndSolve (g : MVarId) (env invB : Expr) (f : Expr) (eqnApp : Array Expr → MetaM Expr)
     (pre : Array Expr) (p : Expr) (m : Nat) : GoalM Unit := do
   if m == 1 then
     let as := pre.push p
     let t := mkAppN f as
-    let eqPf ← mkAppM eqn as
+    let eqPf ← eqnApp as
     let rhs := (← inferType eqPf).appArg!
     let ce ← evalGoalCe g
     let motive ← withLocalDeclD `t (← inferType t) fun tt => do
@@ -144,7 +144,7 @@ partial def destructAndSolve (g : MVarId) (env invB : Expr) (f : Expr) (eqn : Na
       let la : GLVar := { fvar := a, cname := xn, value := av, rel := hav }
       let lb : GLVar := { fvar := b, cname := yn, value := bv, rel := hbv }
       modify fun s => { s with locals := s.locals.push la |>.push lb }
-      destructAndSolve gb.mvarId! env' invB f eqn (pre.push a) b (m - 1)
+      destructAndSolve gb.mvarId! env' invB f eqnApp (pre.push a) b (m - 1)
       modify fun s => { s with locals := saved }
       mkLambdaFVars #[a, b, heq, av, bv, hav, hbv] (← instantiateMVars gb)
   let pf ← mkAppOptM ``Eval_mat_pair #[aty, bty, none, invA, invRest, invB, env, none, body,
@@ -204,7 +204,7 @@ def translateRecTupled (c : Name) : MetaM Unit := do
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invB (mkApp ft p)])
         let gctx : GCtx := { hbool, hasCons, rec? := some { head := c, static := #[], ih, cl, cname := fname, arity := n } }
         let gst : GSt := { locals := #[{ fvar := p, cname := pname, value := pv, rel := hp }] }
-        let _ ← (destructAndSolve g.mvarId! env invB f eqn #[] p n).run gst |>.run gctx
+        let _ ← (destructAndSolve g.mvarId! env invB f (fun as => mkAppM eqn as) #[] p n).run gst |>.run gctx
         let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString fname, mlString pname, body, pv,
           mkApp invB (mkApp ft p), hnodup, hfind, g]
         mkLambdaFVars #[p, ih, pv, hp] app

@@ -21,6 +21,9 @@ def revApp : List Nat → List Nat → List Nat
   | [], acc => acc
   | x :: xs, acc => revApp xs (x :: acc)
 
+/-- `revApp` on a pair (the shape the translated unit takes). -/
+def revAppT (p : List Nat × List Nat) : List Nat := revApp p.1 p.2
+
 def bufName : String := "con-pastel.buf"
 def readAllName : String := "con-pastel.readAll"
 def resultName : String := "con-pastel.result"

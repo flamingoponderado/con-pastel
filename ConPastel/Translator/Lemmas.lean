@@ -171,4 +171,42 @@ theorem findRecFun_mem {α β : Type} {n : VarN} :
     · simp only [hf, ite_false] at h
       exact List.mem_cons_of_mem _ (findRecFun_mem h)
 
+/-! ## Dependent function invariants, with erased proof arguments -/
+
+/-- Functions taking a proof: the CakeML value takes no argument for it. -/
+def PIPROP {p : Prop} {β : p → Type} (B : (h : p) → RefInv (β h)) : RefInv ((h : p) → β h) :=
+  fun f v => ∀ h, B h (f h) v
+
+/-- Dependent functions on data. -/
+def DARROW {α : Type} {β : α → Type} (A : RefInv α) (B : (x : α) → RefInv (β x)) :
+    RefInv ((x : α) → β x) :=
+  fun f v => ∀ x xv, A x xv → AppReturns v xv (B x (f x))
+
+theorem Eval_piprop_elim {p : Prop} {β : p → Type} {B : (h : p) → RefInv (β h)} {env : SemEnv Value}
+    {e : Exp} {f : (h : p) → β h} (hf : Eval env e (PIPROP B f)) (h : p) : Eval env e (B h (f h)) :=
+  Eval_weaken hf fun _ hv => hv h
+
+theorem Eval_piprop_intro {p : Prop} {β : p → Type} {B : (h : p) → RefInv (β h)} {env : SemEnv Value}
+    {e : Exp} {f : (h : p) → β h} (hf : ∀ h, Eval env e (B h (f h))) [Nonempty p] :
+    Eval env e (PIPROP B f) := by
+  intro σ s
+  obtain ⟨h⟩ := ‹Nonempty p›
+  obtain ⟨v, refs, hrel, hv⟩ := hf h σ s
+  exact ⟨v, refs, hrel, fun h' => by simpa using hv⟩
+
+theorem Eval_app_darrow {α : Type} {β : α → Type} {A : RefInv α} {B : (x : α) → RefInv (β x)}
+    {env : SemEnv Value} {ef ex : Exp} {f : (x : α) → β x} {x : α}
+    (hf : Eval env ef (DARROW A B f)) (hx : Eval env ex (A x)) :
+    Eval env (.app .opapp [ef, ex]) (B x (f x)) :=
+  Eval_app hf hx fun _ _ hfv hxv => hfv x _ hxv
+
+theorem Eval_fn_darrow {α : Type} {β : α → Type} {A : RefInv α} {B : (x : α) → RefInv (β x)}
+    {env : SemEnv Value} {n : VarN} {body : Exp} {f : (x : α) → β x}
+    (h : ∀ x xv, A x xv → Eval { env with v := nsBind n xv env.v } body (B x (f x))) :
+    Eval env (.fn n body) (DARROW A B f) := by
+  apply Eval_fn
+  intro x xv hx σ s
+  obtain ⟨v, refs, hrel, hv⟩ := h x xv hx σ s
+  exact ⟨_, _, rfl, v, refs, hrel, hv⟩
+
 end ConPastel.Translator

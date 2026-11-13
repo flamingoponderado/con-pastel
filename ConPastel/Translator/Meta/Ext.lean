@@ -37,10 +37,14 @@ inductive UnitKind where
   | thunk (param : String) (body : Name)
   deriving Inhabited
 
-/-- A translated Lean constant. -/
+/-- A translated unit: a Lean constant applied to its static (type, instance
+and implicit) arguments. -/
 structure UnitInfo where
-  const : Name
-  /-- CakeML variable the unit is bound to. -/
+  /-- The unit's Lean term, e.g. `@List.length Nat`. -/
+  key : Expr
+  /-- Namespace of the unit's generated declarations (`body`, `cert`, `tupled`). -/
+  name : Name
+  /-- CakeML variable the unit is bound to (`%k`). -/
   cname : String
   kind : UnitKind
   /-- The certificate theorem. Its hypotheses, in order: the closure
@@ -50,19 +54,22 @@ structure UnitInfo where
   dependency its lookup and its certificate. -/
   cert : Name
   datatypes : Array Name
-  deps : Array Name
+  deps : Array Expr
   deriving Inhabited
 
-initialize unitExt : SimplePersistentEnvExtension UnitInfo (NameMap UnitInfo) ←
+initialize unitExt : SimplePersistentEnvExtension UnitInfo (Std.HashMap Expr UnitInfo) ←
   registerSimplePersistentEnvExtension {
-    addEntryFn := fun m d => m.insert d.const d
-    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m d => m.insert d.const d) m) {}
+    addEntryFn := fun m d => m.insert d.key d
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m d => m.insert d.key d) m) {}
   }
 
-def getUnit? (env : Environment) (n : Name) : Option UnitInfo :=
-  (unitExt.getState env).find? n
+def getUnit? (env : Environment) (key : Expr) : Option UnitInfo :=
+  (unitExt.getState env).get? key
 
 def unitCount (env : Environment) : Nat :=
   (unitExt.getState env).size
+
+def allUnits (env : Environment) : Array UnitInfo :=
+  (unitExt.getState env).toArray.map (·.2)
 
 end ConPastel.Translator.Meta

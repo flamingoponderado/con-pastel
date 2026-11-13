@@ -20,9 +20,8 @@ open Lean Meta Elab Command ConPastel.Translator.Meta
 open Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL
 
 def unitsInOrder (env : Environment) : Array UnitInfo :=
-  let us := (unitExt.getState env).toList.map (·.2)
   let key (u : UnitInfo) : Nat := (u.cname.drop 1).toNat!
-  us.toArray.qsort (fun a b => key a < key b)
+  (allUnits env).qsort (fun a b => key a < key b)
 
 def addThm (n : Name) (pf : Expr) : MetaM Unit := do
   let pf ← instantiateMVars pf
@@ -34,8 +33,8 @@ def addDef (n : Name) (ty val : Expr) : MetaM Unit :=
 def cakeProgram (P entry : Name) : MetaM Unit := do
   let env ← getEnv
   let us := unitsInOrder env
-  let some eu := us.find? (·.const == entry) | throwError "{entry} is not a unit"
-  let some ru := us.find? (·.const == ``ConPastel.Main.revApp) | throwError "revApp is not a unit"
+  let some eu := us.find? (·.key == mkConst entry) | throwError "{entry} is not a unit"
+  let some ru := us.find? (·.key == mkConst ``ConPastel.Main.revApp) | throwError "revApp is not a unit"
   -- the datatypes, in stamp order
   let dts := ((datatypeExt.getState env).toList.map (·.2)).toArray.qsort (fun a b => a.stamp < b.stamp)
   let astT := mkConst ``AstT
@@ -72,15 +71,15 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   addThm (P ++ `nodup) (← closeWith nodupTy (← `(tactic| decide)))
   let nodup := mkConst (P ++ `nodup)
   -- certificates, in registration order
-  let mut certs : NameMap Expr := {}
-  let mut lookups : NameMap Expr := {}
+  let mut certs : Std.HashMap Expr Expr := {}
+  let mut lookups : Std.HashMap Expr Expr := {}
   for u in us do
     let tag := u.cname.drop 1
     let lk ← closeWith (← groupLookupTy envC funs u.cname)
       (← `(tactic| exact ConPastel.Translator.nsLookup_buildRecEnv (by decide)))
     addThm (P ++ Name.mkSimple s!"lookup_{tag}") lk
     let lkC := mkConst (P ++ Name.mkSimple s!"lookup_{tag}")
-    lookups := lookups.insert u.const lkC
+    lookups := lookups.insert u.key lkC
     let (param, body) := match u.kind with
       | .function p b _ => (p, b)
       | .thunk p b => (p, b)
@@ -92,11 +91,11 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
       closeWith (mkApp (mkConst (T ++ `cakeHasCons)) envCc) (← `(tactic| (unfold $nm:ident; decide)))
     let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC]
     for d in u.deps do
-      let some dl := lookups.find? d | throwError "dependency {d} of {u.const} not assembled"
-      let some dc := certs.find? d | throwError "dependency {d} of {u.const} not assembled"
+      let some dl := lookups.get? d | throwError "dependency {d} of {u.key} not assembled"
+      let some dc := certs.get? d | throwError "dependency {d} of {u.key} not assembled"
       args := args ++ #[dl, dc]
     addThm (P ++ Name.mkSimple s!"cert_{tag}") (mkAppN (mkConst u.cert) args)
-    certs := certs.insert u.const (mkConst (P ++ Name.mkSimple s!"cert_{tag}"))
+    certs := certs.insert u.key (mkConst (P ++ Name.mkSimple s!"cert_{tag}"))
   -- the program and its correctness
   let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
   let loc := mkConst ``Flapjack.Misc.Location.unknownLoc
@@ -122,8 +121,8 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let hmemE ← closeWith (← memTy eu.cname) (← `(tactic| decide))
   let hmemR ← closeWith (← memTy ru.cname) (← `(tactic| decide))
   let ne (a b : String) : MetaM Expr := do closeWith (mkNot (← mkEq (mlString a) (mlString b))) (← `(tactic| decide))
-  let some ce := certs.find? eu.const | unreachable!
-  let some cr := certs.find? ru.const | unreachable!
+  let some ce := certs.get? eu.key | unreachable!
+  let some cr := certs.get? ru.key | unreachable!
   let pf ← mkAppOptM ``program_completes_dt #[tds, funs, toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup,
     nodup, hcon, hmemE, hmemR, ce, cr, hlist, ← ne eu.cname ConPastel.Main.bufName,
     ← ne eu.cname ConPastel.Main.readAllName, ← ne ru.cname ConPastel.Main.bufName,

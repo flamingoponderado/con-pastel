@@ -214,7 +214,7 @@ theorem runs_main3 (entryName revName : String) (entry : List Nat → Bool) (E�
     (hlk : nsLookup E₂.v (.short (ofString readAllName)) = some (readAllClosure E₁))
     (hentry : nsLookup E₂.v (.short (ofString entryName)) = some ve) (he : Arrow (LIST NAT) BOOL entry ve)
     (hrev : nsLookup E₂.v (.short (ofString revName)) = some vr)
-    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled vr)
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revAppT vr)
     (s : State Stdio) (input : List (BitVec 8)) (c d : BitVec 8)
     (hst : s.refs[ℓ]? = some (.w8array [c, d])) (hor : s.ffi.oracle = stdioOracle)
     (hin : s.ffi.ffiState.input = input) :
@@ -247,7 +247,7 @@ theorem runs_main3 (entryName revName : String) (entry : List Nat → Bool) (E�
     (Runs.cons hrevRun (Runs.var s₂ E₂ entryName ve hentry)) (he _ vrev hvrev)
   refine ⟨refs₁ ++ rr ++ re, reads, ?_, hreads, c₁, d₁, ?_⟩
   · have hb : vb = boolValue (entry (byteNats input)) := by
-      simpa [BOOL, revApp_eq, byteNats, revApp.cake_tupled] using hvb
+      simpa [BOOL, revApp_eq, byteNats, revAppT] using hvb
     subst hb
     exact hentryRun
   · have hlt : ℓ < refs₁.length := by
@@ -263,7 +263,7 @@ theorem mainRun (entryName revName : String) (entry : List Nat → Bool) (E : Se
     (ve vr : Value)
     (hentry : nsLookup E.v (.short (ofString entryName)) = some ve) (he : Arrow (LIST NAT) BOOL entry ve)
     (hrev : nsLookup E.v (.short (ofString revName)) = some vr)
-    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled vr)
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revAppT vr)
     (hlist : HasListCons E.c)
     (hn₁ : ofString entryName ≠ ofString bufName) (hn₂ : ofString entryName ≠ ofString readAllName)
     (hn₃ : ofString revName ≠ ofString bufName) (hn₄ : ofString revName ≠ ofString readAllName)

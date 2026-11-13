@@ -3,6 +3,7 @@ import ConPastel.Translator.Lemmas
 import ConPastel.Translator.Tuple
 import ConPastel.Translator.Meta.Core
 import ConPastel.Translator.Meta.Ext
+import ConPastel.Translator.Meta.Keys
 
 /-!
 # The proof-producing translator, goal-directed
@@ -45,7 +46,7 @@ structure GCtx where
   hlist : Expr := default
   /-- For each registered datatype, a proof of `T.cakeHasCons env.c`. -/
   hasCons : NameMap Expr := {}
-  globals : NameMap GlobalVar := {}
+  globals : Std.HashMap Expr GlobalVar := {}
   globalLookup : Expr → String → MetaM Expr := fun _ n => throwError "no global {n}"
   rec? : Option RecFn := none
   /-- Unfold singleton recursive groups in lookups (the older commands). -/
@@ -446,7 +447,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   | _ => pure ()
   -- recursive calls
   if let some r := ctx.rec? then
-    if fn.isConstOf r.head && args.size == r.static.size + r.arity then
+    if fn.isConstOf r.head && args.size == r.static.size + r.arity &&
+        (args[:r.static.size].toArray == r.static) then
       let ys := args[r.static.size:].toArray
       let y ← if r.arity == 1 then pure ys[0]! else
         ys.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) ys.back!
@@ -477,52 +479,61 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     assignProof g (← mkAppM ``Eval_unit #[env])
     return
   -- constants translated as thunks: `c ()`
-  if let .const c _ := fn then
-    if args.isEmpty then
-      if let some u := getUnit? (← getEnv) c then
-        if let .thunk _ _ := u.kind then
-          let some gv := ctx.globals.find? c | throwError "constant {c} not in scope"
-          let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
-          let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] fn
-          let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
-          let hx ← mkAppM ``Eval_unit #[env]
-          assignProof g (← mkAppM ``Eval_app_arrow #[hf, hx])
-          return
+  if fn.isConst then
+    if let some (key, dargs) ← splitKey t then
+      if dargs.isEmpty then
+        if let some u := getUnit? (← getEnv) key then
+          if let .thunk _ _ := u.kind then
+            let some gv := ctx.globals.get? key | throwError "constant {key} not in scope"
+            let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
+            let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] key
+            let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
+            let hx ← mkAppM ``Eval_unit #[env]
+            assignProof g (← mkAppM ``Eval_app_arrow #[hf, hx])
+            return
   -- fully applied tupled global units: call the tupled closure with a tuple
-  if let .const c _ := fn then
-    if let some u := getUnit? (← getEnv) c then
-      if let .function _ _ true := u.kind then
-        let tupName := c ++ `cake_tupled
-        let arity ← forallTelescope (← inferType fn) fun xs _ => pure xs.size
-        if args.size == arity then
-          let tup ← args.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) args.back!
-          let some gv := ctx.globals.find? c | throwError "unit {c} not in scope"
-          let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
-          let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv (mkConst tupName),
-            hl, gv.cert]
-          let (``Arrow, #[_, _, invT, _]) := gv.inv.getAppFnArgs | throwError "tupled unit invariant"
-          let (_, gt) ← newEvalGoal env (mkApp invT tup)
-          solve gt
-          assignProof g (← mkAppM ``Eval_app_arrow #[hf, ← instantiateMVars (mkMVar gt)])
-          return
-  if fn.isFVar || fn.isConst then
-    if args.isEmpty then
-      if fn.isConst then
-        let .const c _ := fn | unreachable!
-        let some gv := ctx.globals.find? c | throwError "constant {c} has not been translated"
+  if fn.isConst then
+    if let some (key, dargs) ← splitKey t then
+      if let some u := getUnit? (← getEnv) key then
+        if let .function _ _ true := u.kind then
+          let tupFn := mkConst (u.name ++ `tupled)
+          let arity ← forallTelescope (← inferType key) fun xs _ => pure xs.size
+          if dargs.size == arity then
+            let tup ← dargs.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) dargs.back!
+            let some gv := ctx.globals.get? key | throwError "unit {key} not in scope"
+            let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
+            let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tupFn, hl, gv.cert]
+            let (``Arrow, #[_, _, invT, _]) := gv.inv.getAppFnArgs | throwError "tupled unit invariant"
+            let (_, gt) ← newEvalGoal env (mkApp invT tup)
+            solve gt
+            assignProof g (← mkAppM ``Eval_app_arrow #[hf, ← instantiateMVars (mkMVar gt)])
+            return
+  -- applications of global units: the key, then the data arguments
+  if fn.isConst then
+    if let some (key, dargs) ← splitKey t then
+      if dargs.isEmpty then
+        let some gv := ctx.globals.get? key | throwError "{key} has not been translated (or is not in scope)"
         let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
-        assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv fn, hl, gv.cert])
+        assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv key, hl, gv.cert])
         return
-    else
-      let fpart := mkAppN fn args.pop
-      let x := args.back!
-      let xty ← inferType x
-      let invA ← invOf xty
+      let fpart := mkAppN key dargs.pop
+      let x := dargs.back!
+      let invA ← invOf (← inferType x)
       let (_, gf) ← newEvalGoal env (mkApp (← mkAppM ``Arrow #[invA, inv]) fpart)
       let (_, gx) ← newEvalGoal env (mkApp invA x)
       solve gf; solve gx
       assignProof g (← mkAppM ``Eval_app_arrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
       return
+  -- applications of local functions
+  if fn.isFVar && args.size > 0 then
+    let fpart := mkAppN fn args.pop
+    let x := args.back!
+    let invA ← invOf (← inferType x)
+    let (_, gf) ← newEvalGoal env (mkApp (← mkAppM ``Arrow #[invA, inv]) fpart)
+    let (_, gx) ← newEvalGoal env (mkApp invA x)
+    solve gf; solve gx
+    assignProof g (← mkAppM ``Eval_app_arrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
+    return
   throwError "cannot translate {t}"
 
 end
