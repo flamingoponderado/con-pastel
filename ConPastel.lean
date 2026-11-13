@@ -14,3 +14,4 @@ import ConPastel.Translator.Lemmas
 import ConPastel.Translator.Tuple
 import ConPastel.Main.Code
 import ConPastel.Main.ReadAll
+import ConPastel.Program.Decls
