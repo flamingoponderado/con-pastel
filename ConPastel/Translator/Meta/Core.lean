@@ -80,7 +80,7 @@ def newtypeInfo? (ty : Expr) : MetaM (Option (Name × Nat × Expr)) := do
     return some (I, j, fty)
 
 partial def invOf (ty : Expr) : MetaM Expr := do
-  let ty ← whnfR ty
+  let ty ← whnfR (← instantiateMVars ty).headBeta
   if ty.isConstOf ``Nat then return mkConst ``NAT
   if ty.isConstOf ``Int then return mkConst ``INT
   if ty.isConstOf ``Bool then return mkConst ``BOOL

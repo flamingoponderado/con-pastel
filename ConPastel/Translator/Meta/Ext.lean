@@ -67,6 +67,9 @@ structure UnitInfo where
   cert : Name
   datatypes : Array Name
   deps : Array Expr
+  /-- Runtime assumptions (propositions) the certificate takes after the
+  lookup of the unit itself (primitives only). -/
+  assumes : Array Expr := #[]
   deriving Inhabited
 
 initialize unitExt : SimplePersistentEnvExtension UnitInfo (Std.HashMap Expr UnitInfo) ←

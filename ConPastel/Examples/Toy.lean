@@ -23,8 +23,8 @@ namespace ConPastel.Examples.Toy
 /-- The toy reference checker on byte arrays. -/
 def toyRef (input : ByteArray) : Bool := evenLen (input.toList.map UInt8.toNat)
 
-theorem toy_implements : ConPastel.ImplementsRef toyRef toy.prog :=
-  ConPastel.implementsRef_of_completes toyRef toy.prog toy.correct
+theorem toy_implements (h : ConPastel.RuntimeAssumptions) : ConPastel.ImplementsRef toyRef toy.prog :=
+  ConPastel.implementsRef_of_completes toyRef toy.prog (toy.correct h)
 
 #print axioms toy_implements
 

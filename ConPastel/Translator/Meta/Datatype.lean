@@ -31,8 +31,9 @@ def runCmd (src : String) : CommandElabM Unit := do
   | .error e => throwError "generated source does not parse: {e}\n{src}"
   | .ok stx => elabCommand stx
 
-def addAbbrev (n : Name) (ty val : Expr) : MetaM Unit :=
+def addAbbrev (n : Name) (ty val : Expr) : MetaM Unit := do
   addDecl (Declaration.defnDecl (mkDefinitionValEx n [] ty val .abbrev .safe []))
+  setReducibleAttribute n
 
 /-- Fields of each constructor of `τ`: per field, its type and whether it is data. -/
 def ctorFields (τ : Expr) : MetaM (Array (Name × Array (Expr × Bool))) := do
@@ -46,7 +47,7 @@ def ctorFields (τ : Expr) : MetaM (Array (Name × Array (Expr × Bool))) := do
     let cty ← instantiateForall cty params
     forallTelescope cty fun fs _ => do
       let infos ← fs.mapM fun f => do
-        let fty ← inferType f
+        let fty := (← instantiateMVars (← inferType f)).headBeta
         let data := !(← isErasedType fty)
         if data && fty.hasAnyFVar (fs.contains <| .fvar ·) then
           throwError "field of {c} has a dependent type {fty}"
@@ -54,6 +55,14 @@ def ctorFields (τ : Expr) : MetaM (Array (Name × Array (Expr × Bool))) := do
       return (c, infos)
 
 def strLit (s : String) : String := s.quote
+
+/-- A name for generated source, every component escaped (constructor names
+may be keywords, e.g. `opaque`). -/
+def escName (n : Name) : String :=
+  ".".intercalate (n.components.map fun c => match c with
+    | .str _ s => "«" ++ s ++ "»"
+    | .num _ k => toString k
+    | .anonymous => "")
 
 partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElabM Unit := do
   if (getDatatypeByType? (← getEnv) τ).isSome then return
@@ -74,6 +83,7 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
             | none => throw e
   let env ← getEnv
   let stamp := nextStamp env
+  logInfo m!"cake datatype t{stamp}: {τ} ({(← liftTermElabM (ctorFields τ)).size} constructors)"
   let N := Name.mkStr `ConPastel.CakeT s!"t{stamp}"
   let .const I _ := τ.getAppFn | throwError "{τ} is not an inductive type"
   let some (.inductInfo ii) := env.find? I | throwError "{τ} is not an inductive type"
@@ -96,7 +106,7 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
   let under := String.join (List.replicate np "_ ")
   let pat (i : Nat) : String :=
     let (c, fs) := ctors[i]!
-    s!"@{c} {under}{" ".intercalate ((List.range fs.size).map (s!"a{·}"))}"
+    s!"@{escName c} {under}{" ".intercalate ((List.range fs.size).map (s!"a{·}"))}"
   let convText (i : Nat) : String :=
     s!".conv (some (.typeStamp {ms (cname ctors[i]!.1)} {stamp})) [{", ".intercalate ((dataIdx i).map (s!"w{·}"))}]"
   -- the invariant
@@ -132,7 +142,8 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
       s!"by subst hv; simp only [{N}.cakeInv]; exact ⟨{", ".intercalate (ds.map (s!"w{·}"))}, {", ".intercalate (ds.map (s!"h{·}'"))}, by simp⟩"
     let allA := if fs.size == 0 then "" else "{" ++ " ".intercalate ((List.range fs.size).map (s!"a{·}")) ++ " : _}"
     let es := if n == 0 then "" else "{" ++ " ".intercalate (ds.map (s!"e{·}")) ++ " : Exp}"
-    runCmd s!"open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
+    runCmd s!"set_option maxHeartbeats 0 in
+open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
 theorem _root_.{N}.con{i} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c) {es} {allA}
     {" ".intercalate hyps} :
     Eval env (.con (some (.short {ms (cname ctors[i]!.1)})) [{", ".intercalate (ds.map (s!"e{·}"))}])
@@ -159,7 +170,7 @@ theorem _root_.{N}.con{i} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env
     params := params.push s!"(h{k} : {quant}x = {pat k} → {quantW}{invHyps}Eval (clauseEnv env ([{", ".intercalate ns}] : List VarN) ([{", ".intercalate (ds.map (s!"w{·}"))}] : List Value)) b{k} (Q ({pat k})))"
     casesL := casesL.push s!"({ms (cname c)}, ([{", ".intercalate ns}] : List VarN), b{k})"
     let obtainPat := if ds.isEmpty then "rfl" else s!"⟨{", ".intercalate (ds.map (s!"w{·}"))}, {", ".intercalate (ds.map (s!"hw{·}"))}, rfl⟩"
-    arms2 := arms2.push s!"  | {c.componentsRev.head!} {" ".intercalate as} =>
+    arms2 := arms2.push s!"  | {escName (Name.mkSimple (c.componentsRev.head!.toString))} {" ".intercalate as} =>
     simp only [{N}.cakeInv] at hv
     obtain {obtainPat} := hv
     exact ⟨_, _, _, ([{", ".intercalate (ds.map (s!"w{·}"))}] : List Value), by simp, rfl, rfl,
@@ -167,7 +178,8 @@ theorem _root_.{N}.con{i} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env
   let lookupArms := String.join ((List.range nC).map fun k => s!"\n      · exact {proj k}")
   let nodupArms := String.join ((List.range nC).map fun k => s!"\n      · exact hnd{k}")
   let rcasesPat := " | ".intercalate ((List.range nC).map fun _ => "⟨rfl, rfl, rfl⟩")
-  runCmd s!"open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
+  runCmd s!"set_option maxHeartbeats 0 in
+open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
 theorem _root_.{N}.cake_mat {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c)
     {"{"}e : Exp{"}"} {"{"}x : {N}.ty{"}"} (he : Eval env e ({N}.cakeInv x)) {"{"}Q : {N}.ty → Value → Prop{"}"}
     {" ".intercalate params.toList} :

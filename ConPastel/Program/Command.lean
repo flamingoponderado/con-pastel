@@ -70,7 +70,8 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p]), funs]]
   addThm (P ++ `nodup) (← closeWith nodupTy (← `(tactic| decide)))
   let nodup := mkConst (P ++ `nodup)
-  -- certificates, in registration order
+  -- certificates, in registration order, all under `h : RuntimeAssumptions`
+  withLocalDeclD `h (mkConst ``ConPastel.RuntimeAssumptions) fun hrt => do
   let mut certs : Std.HashMap Expr Expr := {}
   let mut lookups : Std.HashMap Expr Expr := {}
   for u in us do
@@ -89,13 +90,18 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     let hcs ← u.datatypes.mapM fun T => do
       let nm := mkIdent (T ++ `cakeHasCons)
       closeWith (mkApp (mkConst (T ++ `cakeHasCons)) envCc) (← `(tactic| (unfold $nm:ident; decide)))
-    let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC]
+    let has ← u.assumes.mapM fun a => do
+      let i1 := mkIdent `h.numBits
+      let i2 := mkIdent `h.mixHash
+      let i3 := mkIdent `h.stringHash
+      closeWith a (← `(tactic| first | exact $i1:ident | exact $i2:ident | exact $i3:ident))
+    let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC] ++ has
     for d in u.deps do
       let some dl := lookups.get? d | throwError "dependency {d} of {u.key} not assembled"
       let some dc := certs.get? d | throwError "dependency {d} of {u.key} not assembled"
       args := args ++ #[dl, dc]
-    addThm (P ++ Name.mkSimple s!"cert_{tag}") (mkAppN (mkConst u.cert) args)
-    certs := certs.insert u.key (mkConst (P ++ Name.mkSimple s!"cert_{tag}"))
+    addThm (P ++ Name.mkSimple s!"cert_{tag}") (← mkLambdaFVars #[hrt] (mkAppN (mkConst u.cert) args))
+    certs := certs.insert u.key (mkApp (mkConst (P ++ Name.mkSimple s!"cert_{tag}")) hrt)
   -- the program and its correctness
   let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
   let loc := mkConst ``Flapjack.Misc.Location.unknownLoc
@@ -127,7 +133,7 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     nodup, hcon, hmemE, hmemR, ce, cr, hlist, ← ne eu.cname ConPastel.Main.bufName,
     ← ne eu.cname ConPastel.Main.readAllName, ← ne ru.cname ConPastel.Main.bufName,
     ← ne ru.cname ConPastel.Main.readAllName]
-  addThm (P ++ `correct) pf
+  addThm (P ++ `correct) (← mkLambdaFVars #[hrt] pf)
 
 elab "cake_program " P:ident entry:ident : command => do
   let e ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo entry

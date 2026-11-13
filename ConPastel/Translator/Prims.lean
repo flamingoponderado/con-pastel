@@ -195,3 +195,12 @@ by
       simp only [INT] at hw
       show NAT (x % y) w
       simp only [NAT, hw, hfm]
+
+/-! ## The platform word size (a runtime assumption) -/
+
+open ConPastel.Translator Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL in
+cake_primitive System.Platform.numBits (Exp.lit (.intLit 64)) assuming (System.Platform.numBits = 64) by
+  intro envC funs hnodup hfind _ _ _ hnb
+  intro x xv hx
+  apply AppReturns_recclosure hnodup hfind
+  exact Eval_lit _ _ _ (by simp [NAT, hnb])

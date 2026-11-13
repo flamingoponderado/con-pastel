@@ -147,6 +147,15 @@ def splitInv (p : Expr) : MetaM (Expr × Expr) := do
 mutual
 
 partial def solve (g : MVarId) : GoalM Unit := do
+  try solveCore g
+  catch e =>
+    let msg ← e.toMessageData.toString
+    if (msg.splitOn needUnitTag).length > 1 || (msg.splitOn "[in ").length > 1 ||
+        (msg.splitOn "cake: need datatype").length > 1 then throw e
+    let (_, p) ← evalGoalParts g
+    throwError "{e.toMessageData} [in {p}]"
+
+partial def solveCore (g : MVarId) : GoalM Unit := do
   let (env, p) ← evalGoalParts g
   let (inv, t) ← splitInv p
   let t := (← instantiateMVars t).headBeta
@@ -175,6 +184,48 @@ partial def solve (g : MVarId) : GoalM Unit := do
       if I' == I && j' == j then
         let invS ← invOf (← inferType sExp)
         let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp invS sExp])
+        return ← solve g'
+    if I == ``Prod then
+      -- `case s of (x, y) => x` (or `y`)
+      let sty ← whnfR (← inferType sExp)
+      let (``Prod, #[aty, bty]) := sty.getAppFnArgs | throwError "bad pair projection {t}"
+      let invP ← invOf sty
+      let (``PAIR, #[_, _, invA, invB]) := invP.getAppFnArgs | throwError "bad pair invariant"
+      let (_, gs) ← newEvalGoal env (mkApp invP sExp)
+      solve gs
+      let xn ← freshCName "t"
+      let yn ← freshCName "t"
+      let hxy ← closeWith (mkNot (← mkEq (mlString xn) (mlString yn))) (← `(tactic| decide))
+      let invC := if j == 0 then invA else invB
+      let f ← withLocalDeclD `a aty fun a => withLocalDeclD `b bty fun b => mkLambdaFVars #[a, b] (if j == 0 then a else b)
+      let picked := if j == 0 then xn else yn
+      let body := mkApp (mkConst ``Exp.var) (shortIdent picked)
+      let hb ← withLocalDeclD `a aty fun a => withLocalDeclD `b bty fun b => do
+        withLocalDeclD `heq (← mkEq sExp (← mkAppM ``Prod.mk #[a, b])) fun heq => do
+        withLocalDeclD `av (mkConst ``Value) fun av => withLocalDeclD `bv (mkConst ``Value) fun bv => do
+        withLocalDeclD `hav (mkApp2 invA a av) fun hav => withLocalDeclD `hbv (mkApp2 invB b bv) fun hbv => do
+          let env' ← mkAppM ``clauseEnv #[env, ← mkListLit (mkConst ``VarN) [mlString xn, mlString yn],
+            ← mkListLit (mkConst ``Value) [av, bv]]
+          let (vj, hj) := if j == 0 then (av, hav) else (bv, hbv)
+          let hl ← proveLookupG env' picked vj (← read).unfoldRec
+          let pf ← mkAppOptM ``Eval_var #[env', shortIdent picked, vj, mkApp invC (if j == 0 then a else b), hl, hj]
+          mkLambdaFVars #[a, b, heq, av, bv, hav, hbv] pf
+      assignProof g (← mkAppOptM ``Eval_mat_pair #[aty, bty, none, invA, invB, invC, env, none, body,
+        mlString xn, mlString yn, sExp, f, hxy, ← instantiateMVars (mkMVar gs), hb])
+      return
+    -- a field of a single-constructor datatype: `I.casesOn s (fun fs => f_j)` (structure eta)
+    if let some (.inductInfo ii) := (← getEnv).find? I then
+      if ii.ctors.length == 1 then
+        let sty ← whnfR (← inferType sExp)
+        let .const _ lvls := sty.getAppFn | throwError "bad projection {t}"
+        let params := sty.getAppArgs
+        let R ← inferType t
+        let cty ← instantiateForall (← instantiateTypeLevelParams (← getConstInfo ii.ctors.head!).toConstantVal lvls) params
+        let alt ← forallTelescope cty fun fs _ => mkLambdaFVars fs fs[j]!
+        let motive ← withLocalDeclD `x sty fun x => mkLambdaFVars #[x] R
+        let uR ← getLevel R
+        let t' := mkAppN (mkConst (I ++ `casesOn) (uR :: lvls)) (params ++ #[motive, sExp, alt])
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
         return ← solve g'
     throwError "unsupported projection {t}"
   | .letE n ty v b _ => solveLet g env inv n ty v b
@@ -384,9 +435,43 @@ partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) 
   assignProof g (← mkAppOptM ``list_cake_mat #[α, invA, env, ctx.hlist, none, major, he, qfun,
     bn, hn, mlString nx, mlString ny, hne, bc, hc])
 
+/-- Is `e` an application of a `casesOn` the translator handles, with a
+non-dependent motive? -/
+partial def isSupportedCases (e : Expr) : MetaM Bool := do
+  let .const cn _ := e.getAppFn | return false
+  if cn == ``Nat.casesOn || cn == ``List.casesOn || cn == ``Bool.casesOn then return true
+  let tn := cn.getPrefix
+  unless cn == tn ++ `casesOn do return false
+  let some (.inductInfo ii) := (← getEnv).find? tn | return false
+  let args := e.getAppArgs
+  unless args.size == ii.numParams + 1 + 1 + ii.ctors.length do return false
+  let major := args[ii.numParams + 1]!
+  let τ ← whnfR (← inferType major)
+  if (getDatatypeByType? (← getEnv) τ).isSome then return true
+  return (← newtypeInfo? τ).isSome
+
+/-- `T.casesOn` for the type of `d`, with a non-dependent motive returning `R`,
+whose branches are `branch (C fields)`. -/
+partial def mkCasesOn (d R : Expr) (branch : Expr → MetaM Expr) : MetaM Expr := do
+  let τ ← whnfR (← inferType d)
+  let .const I lvls := τ.getAppFn | throwError "cannot case split on {d} : {τ}"
+  let some (.inductInfo ii) := (← getEnv).find? I | throwError "cannot case split on {d} : {τ}"
+  let params := τ.getAppArgs
+  let uR ← getLevel R
+  let motive ← withLocalDeclD `x τ fun x => mkLambdaFVars #[x] R
+  let mut alts : Array Expr := #[]
+  for c in ii.ctors do
+    let cty ← instantiateForall (← instantiateTypeLevelParams (← getConstInfo c).toConstantVal lvls) params
+    let alt ← forallTelescope cty fun fs _ => do
+      mkLambdaFVars fs (← branch (mkAppN (mkAppN (mkConst c lvls) params) fs))
+    alts := alts.push alt
+  return mkAppN (mkConst (I ++ `casesOn) (uR :: lvls)) (params ++ #[motive, d] ++ alts)
+
 /-- `f x`: the function part, then the argument, with the function's own
 invariant (`Arrow` or `DARROW`). -/
 partial def solvePeel (g : MVarId) (env fpart x : Expr) : GoalM Unit := do
+  if (← isType x) || (← inferType x).isSort then
+    throwError "type argument {x} passed as data in {mkApp fpart x}"
   -- a proof argument: `F h` with `F`'s invariant `PIPROP`, or `F x h` with `DARROWP`
   if ← isProof x then
     -- `F x h` where `F`'s invariant is `DARROWP`
@@ -423,18 +508,90 @@ partial def solvePeel (g : MVarId) (env fpart x : Expr) : GoalM Unit := do
     assignProof g (← mkAppM ``Eval_app_darrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
   | _ => throwError "function {fpart} has invariant {invF}"
 
+/-- Case split the goal's term `t` on the local `d`: the term becomes
+`T.casesOn d (fun fields => reduce (t[d := C fields]))`, by the equation
+proved with `cases d` and `rfl`. -/
+partial def splitOn (g : MVarId) (env inv t d : Expr) (reduce : Expr → MetaM Expr) : GoalM Unit := do
+  let R ← inferType t
+  let q ← mkCasesOn d R fun ctorApp => reduce (t.replaceFVar d ctorApp)
+  let eqTy ← mkEq t q
+  let mv ← mkFreshExprMVar eqTy
+  let subgoals ← mv.mvarId!.cases d.fvarId!
+  for sg in subgoals do
+    sg.mvarId.refl
+  let eqPf ← instantiateMVars mv
+  let ce ← evalGoalCe g
+  let motive ← withLocalDeclD `t R fun tt => do mkLambdaFVars #[tt] (← mkAppM ``Eval #[env, ce, mkApp inv tt])
+  let g' ← g.replaceTargetEq (mkApp motive q).headBeta (← mkCongrArg motive eqPf)
+  solve g'
+
+/-- An auxiliary sparse `casesOn` (`…._sparseCasesOn_k`): split on its
+scrutinee (its first explicit argument). -/
+partial def solveSparseCases (g : MVarId) (env inv t : Expr) : GoalM Unit := do
+  let .const cn lvls := t.getAppFn | unreachable!
+  let args := t.getAppArgs
+  let ci ← getConstInfo cn
+  let some idx ← forallTelescope ci.type fun xs _ => do
+      for i in [0:xs.size] do
+        if (← xs[i]!.fvarId!.getDecl).binderInfo.isExplicit then return some i
+      return none
+    | throwError "sparse casesOn {cn} without an explicit scrutinee"
+  let d := args[idx]!
+  let replaceT (t' : Expr) : GoalM MVarId := do
+    g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+  unless d.isFVar do
+    let letT := Expr.letE `z (← inferType d) d (t.abstract #[d]) false
+    return ← solve (← replaceT letT)
+  splitOn g env inv t d fun t' => do
+    let f := t'.getAppFn
+    let .const _ lv := f | pure t'
+    let _ := lv
+    pure (← whnfCore (mkAppN (← instantiateValueLevelParams ci lvls) t'.getAppArgs).headBeta)
+
+/-- A `match`: reduce it if the discriminants decide it; use its compiled
+`casesOn` tree when that is supported; otherwise case split on a
+discriminant, with the equation `match … = casesOn …` proved by cases. -/
+partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
+  let replaceT (t' : Expr) : GoalM MVarId := do
+    g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+  if let .reduced t' ← reduceMatcher? t then
+    return ← solve (← replaceT t')
+  let .const fnName lvls := t.getAppFn | unreachable!
+  let args := t.getAppArgs
+  let mci ← getConstInfo fnName
+  let unfolded := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
+  if ← isSupportedCases unfolded then
+    return ← solve (← replaceT unfolded)
+  -- split on a discriminant
+  let some info ← getMatcherInfo? fnName | throwError "no matcher info for {fnName}"
+  let discrs := args[info.numParams + 1 : info.numParams + 1 + info.numDiscrs].toArray
+  let R ← inferType t
+  for i in [0:discrs.size] do
+    let d := discrs[i]!
+    let τ ← whnfR (← inferType d)
+    let .const I _ := τ.getAppFn | continue
+    let some (.inductInfo _) := (← getEnv).find? I | continue
+    unless d.isFVar do
+      -- bind the discriminant: `m … d …` is `let z := d; m … z …`
+      let letT := Expr.letE `z (← inferType d) d (t.abstract #[d]) false
+      return ← solve (← replaceT letT)
+    return ← splitOn g env inv t d fun t' => do
+      match ← reduceMatcher? t' with
+      | .reduced r => pure r
+      | _ => pure t'
+  throwError "cannot translate match {t}"
+
 partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
   let args := t.getAppArgs
-  -- matchers: unfold to casesOn
+  -- matchers and sparse casesOn auxiliaries
   if let .const fnName _ := fn then
     if (← Meta.isMatcher fnName) then
-      let .const _ lvls := fn | unreachable!
-      let mci ← getConstInfo fnName
-      let t' := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
-      let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, (← evalGoalCe g), mkApp inv t'.headBeta])
-      return ← solve g'
+      return ← solveMatcher g env inv t
+    if let .str _ last := fnName then
+      if last.startsWith "_sparseCasesOn" then
+        return ← solveSparseCases g env inv t
   -- Nat.add / Nat.mul as primitives (also reached after unfolding `+`, `*`)
   if (fn.isConstOf ``Nat.add || fn.isConstOf ``Nat.mul) && args.size == 2 then
     let lem := if fn.isConstOf ``Nat.add then ``Eval_nat_add else ``Eval_nat_mul
@@ -460,6 +617,72 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     let t' := Expr.proj ``Decidable 0 args[1]!
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
     return ← solve g'
+  -- casts: unfold to `Eq.rec`, which is the identity on values
+  if let .const cn lvls := fn then
+    if [``Eq.ndrec, ``Eq.mpr, ``Eq.mp, ``cast, ``Eq.ndrec_symm, ``Eq.recOn, ``Eq.casesOn].contains cn then
+      let ci ← getConstInfo cn
+      if ci.hasValue then
+        let t' := (mkAppN (← instantiateValueLevelParams ci lvls) args).headBeta
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+        return ← solve g'
+  if fn.isConstOf ``Eq.rec && args.size ≥ 6 then
+    let α := args[0]!
+    let a := args[1]!
+    let motive := args[2]!
+    let m := args[3]!
+    let b := args[4]!
+    let h := args[5]!
+    if args.size > 6 then throwError "over-applied cast {t}"
+    let I ← withLocalDeclD `b α fun bv => do
+      withLocalDeclD `h (← mkEq a bv) fun hv => do
+        mkLambdaFVars #[bv, hv] (← invOf (mkApp2 motive bv hv))
+    let (_, gm) ← newEvalGoal env (mkApp (I.beta #[a, ← mkEqRefl a]) m)
+    solve gm
+    assignProof g (← mkAppOptM ``Eval_eqrec #[α, a, motive, I, env, none, m, b, h,
+      ← instantiateMVars (mkMVar gm)])
+    return
+  -- Bool.rec / Bool.casesOn / cond with a non-dependent motive: `if b then t else f`
+  if (fn.isConstOf ``Bool.rec && args.size == 4) || (fn.isConstOf ``Bool.casesOn && args.size == 4) ||
+      (fn.isConstOf ``cond && args.size == 4) then
+    let (b, f, tt) := if fn.isConstOf ``Bool.rec then (args[3]!, args[1]!, args[2]!)
+      else if fn.isConstOf ``Bool.casesOn then (args[1]!, args[2]!, args[3]!)
+      else (args[1]!, args[3]!, args[2]!)
+    let t' ← mkAppOptM ``Bool.rec #[← withLocalDeclD `x (mkConst ``Bool) fun x => do
+      mkLambdaFVars #[x] (← inferType f), f, tt, b]
+    let (_, gb) ← newEvalGoal env (mkApp (mkConst ``BOOL) b)
+    solve gb
+    let ceT ← mkFreshExprMVar (mkConst ``Exp)
+    let ceF ← mkFreshExprMVar (mkConst ``Exp)
+    let hf ← withLocalDeclD `h (← mkEq b (mkConst ``Bool.false)) fun h => do
+      let g' ← mkFreshExprMVar (← mkAppM ``Eval #[env, ceF, mkApp inv f])
+      solve g'.mvarId!
+      mkLambdaFVars #[h] (← instantiateMVars g')
+    let ht ← withLocalDeclD `h (← mkEq b (mkConst ``Bool.true)) fun h => do
+      let g' ← mkFreshExprMVar (← mkAppM ``Eval #[env, ceT, mkApp inv tt])
+      solve g'.mvarId!
+      mkLambdaFVars #[h] (← instantiateMVars g')
+    let pf ← mkAppOptM ``Eval_bool_rec #[none, inv, env, none, ceT, ceF, b, f, tt,
+      ← instantiateMVars (mkMVar gb), hf, ht]
+    let _ := t'
+    assignProof g pf
+    return
+  -- dependent if-then-else: the branches see the condition (or its negation)
+  if fn.isConstOf ``dite && args.size == 5 then
+    let (_, gc) ← newEvalGoal env (mkApp (mkConst ``BOOL) (← mkAppOptM ``decide #[args[1]!, args[2]!]))
+    solve gc
+    let ce₁ ← mkFreshExprMVar (mkConst ``Exp)
+    let ce₂ ← mkFreshExprMVar (mkConst ``Exp)
+    let h₁ ← withLocalDeclD `h args[1]! fun h => do
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce₁, mkApp inv (args[3]!.beta #[h])])
+      solve gb.mvarId!
+      mkLambdaFVars #[h] (← instantiateMVars gb)
+    let h₂ ← withLocalDeclD `h (mkNot args[1]!) fun h => do
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce₂, mkApp inv (args[4]!.beta #[h])])
+      solve gb.mvarId!
+      mkLambdaFVars #[h] (← instantiateMVars gb)
+    assignProof g (← mkAppOptM ``Eval_dite #[args[0]!, inv, env, args[1]!, args[2]!, none, ce₁, ce₂,
+      args[3]!, args[4]!, ← instantiateMVars (mkMVar gc), h₁, h₂])
+    return
   -- if-then-else
   if fn.isConstOf ``ite && args.size == 5 then
     let (_, gc) ← newEvalGoal env (mkApp (mkConst ``BOOL) (← mkAppOptM ``decide #[args[1]!, args[2]!]))

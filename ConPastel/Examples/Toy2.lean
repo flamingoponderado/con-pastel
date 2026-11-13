@@ -29,9 +29,9 @@ cake_unit flip modeOf isEven entry2
 
 cake_program toy2 entry2
 
-theorem toy2_implements :
+theorem toy2_implements (h : ConPastel.RuntimeAssumptions) :
     ConPastel.ImplementsRef (fun input => entry2 (input.toList.map UInt8.toNat)) toy2.prog :=
-  ConPastel.implementsRef_of_completes _ _ toy2.correct
+  ConPastel.implementsRef_of_completes _ _ (toy2.correct h)
 
 #print axioms toy2_implements
 

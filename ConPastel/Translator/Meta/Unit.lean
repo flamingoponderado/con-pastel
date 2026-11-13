@@ -195,6 +195,35 @@ def translateThunk (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
         mkLambdaFVars #[x, xv, hx] app
     finishUnit key uname cname (.thunk param (uname ++ `body)) deps body hyps envC funs pf target inv
 
+/-- The termination measure of a recursive unit, as a function of the tuple of
+its arguments: `sizeOf` of the structural argument, or the measure of a
+`termination_by` definition (`WellFounded.Nat.fix` in its `_unary` form). -/
+def recursionMeasure (key : Expr) (c : Name) (static : Array Expr) (n : Nat) (τ : Expr) : MetaM Expr := do
+  let env ← getEnv
+  if let some info := Lean.Elab.WF.eqnInfoExt.find? env c then
+    withLocalDeclD `p τ fun p => do
+      let projs ← tupleProjs p n
+      -- `c`'s value applied to the arguments is `c._unary fixed… packed`
+      let v := (mkAppN (← keyValue key) projs.toArray).headBeta
+      let .const un ulvls := v.getAppFn | throwError "{c}: unexpected WF definition shape {v}"
+      unless un == info.declNameNonRec do throwError "{c}: unexpected WF definition shape {v}"
+      let uargs := v.getAppArgs
+      let fixed := uargs.pop
+      let packed := uargs.back!
+      let uci ← getConstInfo un
+      let u := (mkAppN (← instantiateValueLevelParams uci ulvls) fixed).headBeta
+      match u.getAppFnArgs with
+      | (``WellFounded.Nat.fix, args) =>
+        -- `WellFounded.Nat.fix {α} {motive} (measure) (F) …`
+        let m := args[2]!
+        mkLambdaFVars #[p] (m.beta #[packed]).headBeta
+      | _ => throwError "{c}: well-founded recursion via {u.getAppFn} is not supported yet"
+  else
+    let some k ← structRecArg? c | throwError "{c}: no recursion information"
+    withLocalDeclD `p τ fun p => do
+      let comp := (← tupleProjs p n)[k - static.size]!
+      mkLambdaFVars #[p] (← mkAppM ``SizeOf.sizeOf #[comp])
+
 /-- A recursive function unit, by well-founded induction on the structural
 argument (several arguments: tupled). -/
 def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
@@ -220,17 +249,11 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := 
       addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
       pure (mkConst tupName)
     else pure f
-  let recArg ← if tupled then do
-      let some k ← structRecArg? c | throwError "{c}: only structural recursion is supported for now"
-      pure (k - static.size)
-    else pure 0
+  let msr ← recursionMeasure key c static n τ
   let body ← mkFreshExprMVar (mkConst ``Exp)
   let inv ← mkAppM ``Arrow #[invT, invB]
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx₀ => do
     let cl ← mkAppM ``Value.recclosure #[envC, funs, mlString cname]
-    let msr ← withLocalDeclD `p τ fun p => do
-      let comp := (← tupleProjs p n)[recArg]!
-      mkLambdaFVars #[p] (← mkAppM ``SizeOf.sizeOf #[comp])
     let wfr ← mkAppOptM ``measure #[τ, msr]
     let r ← mkAppOptM ``WellFoundedRelation.rel #[τ, wfr]
     let hwf ← mkAppOptM ``WellFoundedRelation.wf #[τ, wfr]
@@ -276,7 +299,7 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
   let saved ← saveState
   needUnitRef.set none
   try
-    translateUnitOnce key extra
+    withCurrHeartbeats (translateUnitOnce key extra)
   catch e =>
     match ← needUnitRef.get with
     | some dep =>

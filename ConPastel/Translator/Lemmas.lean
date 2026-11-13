@@ -237,4 +237,21 @@ theorem Eval_fn_darrowp {α : Type} {P : α → Prop} {β : (x : α) → P x →
   obtain ⟨v, refs, hrel, hv⟩ := hb x xv hx h σ s
   exact ⟨_, _, rfl, v, refs, hrel, hv⟩
 
+/-! ## Bool case splits -/
+
+theorem Eval_bool_rec {β : Type} {B : RefInv β} {env : SemEnv Value} {eb et ef : Exp} {b : Bool}
+    {f t : β} (hb : Eval env eb (BOOL b)) (hf : b = false → Eval env ef (B f))
+    (ht : b = true → Eval env et (B t)) :
+    Eval env (.if_ eb et ef) (B (Bool.rec (motive := fun _ => β) f t b)) :=
+  Eval_if hb (fun h => by subst h; exact ht rfl) (fun h => by subst h; exact hf rfl)
+
+/-! ## Casts -/
+
+/-- Transport along an equation is the identity on values. -/
+theorem Eval_eqrec {α : Type} {a : α} {motive : (b : α) → a = b → Type}
+    {I : (b : α) → (h : a = b) → RefInv (motive b h)} {env : SemEnv Value} {e : Exp}
+    {m : motive a rfl} {b : α} (h : a = b) (hm : Eval env e (I a rfl m)) :
+    Eval env e (I b h (Eq.rec (motive := motive) m h)) := by
+  cases h; exact hm
+
 end ConPastel.Translator
