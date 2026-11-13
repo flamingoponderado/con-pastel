@@ -209,4 +209,9 @@ theorem Eval_fn_darrow {α : Type} {β : α → Type} {A : RefInv α} {B : (x : 
   obtain ⟨v, refs, hrel, hv⟩ := h x xv hx σ s
   exact ⟨_, _, rfl, v, refs, hrel, hv⟩
 
+/-! ## Newtypes: structures with one data field -/
+
+/-- A structure with a single data field is represented by that field. -/
+def NEWTYPE {S F : Type} (proj : S → F) (A : RefInv F) : RefInv S := fun s v => A (proj s) v
+
 end ConPastel.Translator

@@ -159,6 +159,13 @@ partial def solve (g : MVarId) : GoalM Unit := do
     assignProof g (← mkAppOptM ``Eval_bool_lit #[env, ctx.hbool, toExpr (t.isConstOf ``Bool.true)])
     return
   match t with
+  | .proj I j sExp =>
+    if let some (I', j', _) ← newtypeInfo? (← inferType sExp) then
+      if I' == I && j' == j then
+        let invS ← invOf (← inferType sExp)
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp invS sExp])
+        return ← solve g'
+    throwError "unsupported projection {t}"
   | .letE n ty v b _ => solveLet g env inv n ty v b
   | .lam n ty b _ => solveLam g env inv n ty b
   | .mdata _ t' => solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, (← evalGoalCe g), mkApp inv t']))
@@ -219,6 +226,9 @@ partial def solveDecide (g : MVarId) (env c : Expr) : GoalM Unit := do
   | (``LE.le, #[ty, _, a, b]) => if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_le a b
   | (``Eq, #[ty, a, b]) => if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_eq a b
   | _ => pure ()
+  -- any other instance: `decide c` is the projection of the instance (a newtype)
+  let t ← mkAppOptM ``Decidable.decide #[c, none]
+  let _ := t
   throwError "unsupported condition {c}"
 
 partial def solveCases (g : MVarId) (env inv : Expr) (tn : Name) (dt : DatatypeInfo)
@@ -342,13 +352,21 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let t' := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
       let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, (← evalGoalCe g), mkApp inv t'.headBeta])
       return ← solve g'
-  -- conditions as Bool
+  -- conditions as Bool: known comparisons, else the instance (a newtype)
   if fn.isConstOf ``Decidable.decide && args.size == 2 then
-    return ← solveDecide g env args[0]!
+    let saved : Meta.SavedState ← (Meta.saveState : MetaM _)
+    let st₀ ← get
+    try return ← solveDecide g env args[0]!
+    catch _ =>
+      (saved.restore : MetaM Unit)
+      set st₀
+    let t' := Expr.proj ``Decidable 0 args[1]!
+    let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+    return ← solve g'
   -- if-then-else
   if fn.isConstOf ``ite && args.size == 5 then
-    let (_, gc) ← newEvalGoal env (← mkAppOptM ``decide #[args[1]!, args[2]!])
-    solveDecide gc env args[1]!
+    let (_, gc) ← newEvalGoal env (mkApp (mkConst ``BOOL) (← mkAppOptM ``decide #[args[1]!, args[2]!]))
+    solve gc
     let ce₁ ← mkFreshExprMVar (mkConst ``Exp)
     let ce₂ ← mkFreshExprMVar (mkConst ``Exp)
     let h₁ ← withLocalDeclD `h args[1]! fun h => do
@@ -362,6 +380,32 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     assignProof g (← mkAppOptM ``Eval_ite #[args[0]!, inv, env, args[1]!, args[2]!, none, ce₁, ce₂,
       args[3]!, args[4]!, ← instantiateMVars (mkMVar gc), h₁, h₂])
     return
+  -- newtypes: constructor, projection functions, casesOn
+  if let .const cn _ := fn then
+    if let some (.ctorInfo ci) := (← getEnv).find? cn then
+      if let some (I, j, _) ← newtypeInfo? (← inferType t) then
+        if I == ci.induct && args.size == ci.numParams + ci.numFields then
+          let field := args[ci.numParams + j]!
+          let invF ← invOf (← inferType field)
+          let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp invF field])
+          return ← solve g'
+    if let some info ← getProjectionFnInfo? cn then
+      if args.size == info.numParams + 1 then
+        let some (.ctorInfo ci) := (← getEnv).find? info.ctorName | throwError "bad projection {cn}"
+        let t' := mkAppN (.proj ci.induct info.i args[info.numParams]!) args[info.numParams + 1:].toArray
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+        return ← solve g'
+    let tn := cn.getPrefix
+    if cn == tn ++ `casesOn then
+      if let some (.inductInfo ii) := (← getEnv).find? tn then
+        if ii.ctors.length == 1 && ii.numIndices == 0 && args.size == ii.numParams + 3 then
+          let major := args[ii.numParams + 1]!
+          if (← newtypeInfo? (← inferType major)).isSome then
+            let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
+            let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
+            let t' := (mkAppN args[ii.numParams + 2]! projs.toArray).headBeta
+            let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+            return ← solve g'
   -- lists
   if fn.isConstOf ``List.nil && args.size == 1 then
     let (``LIST, #[_, invA]) := (← whnfR inv).getAppFnArgs | throwError "list without LIST invariant"

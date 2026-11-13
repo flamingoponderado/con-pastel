@@ -54,6 +54,31 @@ def shortIdent (s : String) : Expr :=
 
 /-! ## Invariants -/
 
+/-- Is the field type erased (a proof or a type)? -/
+def isErasedType (ty : Expr) : MetaM Bool := do
+  return (← isProp ty) || (← isTypeFormerType ty)
+
+/-- A structure type with exactly one data field: `(I, j, fieldType)`, the
+field's index and type (with the other fields abstracted as projections). -/
+def newtypeInfo? (ty : Expr) : MetaM (Option (Name × Nat × Expr)) := do
+  let ty ← whnfR ty
+  let .const I lvls := ty.getAppFn | return none
+  let some (.inductInfo ii) := (← getEnv).find? I | return none
+  unless ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec do return none
+  let params := ty.getAppArgs
+  unless params.size == ii.numParams do return none
+  let ctorTy ← instantiateTypeLevelParams (← getConstInfo ii.ctors.head!).toConstantVal lvls
+  let ctorTy ← instantiateForall ctorTy params
+  forallTelescope ctorTy fun fs _ => do
+    let mut data : Array Nat := #[]
+    for i in [0:fs.size] do
+      unless ← isErasedType (← inferType fs[i]!) do data := data.push i
+    unless data.size == 1 do return none
+    let j := data[0]!
+    let fty ← inferType fs[j]!
+    if fty.hasAnyFVar (fs.contains <| .fvar ·) then return none
+    return some (I, j, fty)
+
 partial def invOf (ty : Expr) : MetaM Expr := do
   let ty ← whnfR ty
   if ty.isConstOf ``Nat then return mkConst ``NAT
@@ -65,6 +90,9 @@ partial def invOf (ty : Expr) : MetaM Expr := do
     return ← mkAppM ``LIST #[← invOf ty.appArg!]
   if ty.isAppOfArity ``Prod 2 then
     return ← mkAppM ``PAIR #[← invOf ty.appFn!.appArg!, ← invOf ty.appArg!]
+  if let some (I, j, fty) ← newtypeInfo? ty then
+    let proj ← withLocalDeclD `s ty fun x => mkLambdaFVars #[x] (.proj I j x)
+    return ← mkAppOptM ``NEWTYPE #[ty, fty, proj, ← invOf fty]
   if let .forallE _ a b _ := ty then
     if b.hasLooseBVars then throwError "dependent function type {ty} not supported yet"
     return ← mkAppM ``Arrow #[← invOf a, ← invOf b]
