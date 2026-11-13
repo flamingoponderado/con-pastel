@@ -98,4 +98,57 @@ theorem Eval_bool_lit {env : SemEnv Value} (h : HasBoolCons env.c) (b : Bool) :
   subst hv
   cases b <;> rfl
 
+/-! ## let with the defining equation as a path condition -/
+
+theorem Eval_let_eq {α β : Type} {A : RefInv α} {B : RefInv β} {env : SemEnv Value} {n : VarN}
+    {e₁ e₂ : Exp} {v : α} {b : α → β}
+    (h₁ : Eval env e₁ (A v))
+    (h₂ : ∀ x, x = v → ∀ xv, A x xv → Eval { v := nsBind n xv env.v, c := env.c } e₂ (B (b x))) :
+    Eval env (.let_ (some n) e₁ e₂) (B (b v)) :=
+  Eval_let h₁ fun xv hxv => h₂ v rfl xv hxv
+
+/-! ## Recursive closures by well-founded induction -/
+
+/-- A recursive function value refines `f` if, assuming the refinement for
+all arguments below `x` in a well-founded relation, it refines `f x`. -/
+theorem arrow_of_wf {α β : Type} {A : RefInv α} {B : RefInv β} {r : α → α → Prop}
+    (hwf : WellFounded r) {f : α → β} {cl : Value}
+    (h : ∀ x, (∀ y, r y x → ∀ yv, A y yv → AppReturns cl yv (B (f y))) →
+      ∀ xv, A x xv → AppReturns cl xv (B (f x))) :
+    Arrow A B f cl := by
+  intro x
+  induction x using hwf.induction with
+  | _ x ih => exact h x ih
+
+/-- A recursive call: the callee value is the recursive closure, for which the
+induction hypothesis gives the refinement at the call's argument. -/
+theorem Eval_app_ih {α β : Type} {A : RefInv α} {B : RefInv β} {env : SemEnv Value}
+    {ef ex : Exp} {cl : Value} {f : α → β} {y : α}
+    (hf : Eval env ef (· = cl)) (hx : Eval env ex (A y))
+    (ih : ∀ yv, A y yv → AppReturns cl yv (B (f y))) :
+    Eval env (.app .opapp [ef, ex]) (B (f y)) :=
+  Eval_app hf hx fun _ yv hfv hy => hfv ▸ ih yv hy
+
+/-! ## Nat case splits -/
+
+/-- `Nat.casesOn n z s` (non-dependent motive) as
+`if n = 0 then z else let m = n - 1 in s`. -/
+theorem Eval_nat_casesOn {β : Type} {B : RefInv β} {env : SemEnv Value} {en ez es : Exp}
+    {mn : VarN} {n : Nat} {z : β} {s : Nat → β}
+    (hn : Eval env en (NAT n))
+    (hz : n = 0 → Eval env ez (B z))
+    (hs : ∀ m, n = m + 1 → ∀ mv, NAT m mv → Eval { v := nsBind mn mv env.v, c := env.c } es (B (s m))) :
+    Eval env (.if_ (.app .equality [en, .lit (.intLit 0)]) ez
+      (.let_ (some mn) (.app (.arith .sub .intT) [en, .lit (.intLit 1)]) es))
+      (B (Nat.casesOn (motive := fun _ => β) n z s)) := by
+  refine Eval_if (Eval_nat_eq hn (Eval_nat_lit env 0)) (fun h => ?_) (fun h => ?_)
+  · have : n = 0 := of_decide_eq_true h
+    subst this
+    exact hz rfl
+  · have hne : n ≠ 0 := of_decide_eq_false h
+    obtain ⟨m, rfl⟩ : ∃ m, n = m + 1 := ⟨n - 1, by omega⟩
+    refine Eval_let (P := NAT m) (Eval_weaken (Eval_int_sub hn (Eval_lit env _ (INT 1) rfl)) ?_) ?_
+    · intro v hv; simp only [INT] at hv; simp [NAT, hv]
+    · intro mv hmv; exact hs m rfl mv hmv
+
 end ConPastel.Translator
