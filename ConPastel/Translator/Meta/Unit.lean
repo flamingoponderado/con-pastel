@@ -233,7 +233,7 @@ def translateUnit (key : Expr) : MetaM Unit := do
   else if isFn then translateFunction key
   else translateThunk key
 
-elab "cake_unit " ts:term+ : command => do
+elab "cake_unit " ts:(colGt term:max)+ : command => do
   for t in ts do
     liftTermElabM do
       let key ← instantiateMVars (← Term.elabTerm t none)

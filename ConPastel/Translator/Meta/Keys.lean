@@ -19,7 +19,7 @@ def numStatic (f : Expr) (args : Array Expr) : MetaM Nat := do
     for i in [0:xs.size] do
       let ldecl ← xs[i]!.fvarId!.getDecl
       let a := args[i]!
-      let isTypeLike ← isType ldecl.type <||> pure (ldecl.type.isSort)
+      let isTypeLike ← isTypeFormerType ldecl.type
       let implicitish := ldecl.binderInfo.isImplicit || ldecl.binderInfo.isInstImplicit ||
         ldecl.binderInfo.isStrictImplicit
       if (implicitish || isTypeLike || (← isClass? ldecl.type).isSome) && !a.hasFVar && !a.hasMVar then
