@@ -94,8 +94,24 @@ partial def invOf (ty : Expr) : MetaM Expr := do
     let proj ← withLocalDeclD `s ty fun x => mkLambdaFVars #[x] (.proj I j x)
     return ← mkAppOptM ``NEWTYPE #[ty, fty, proj, ← invOf fty]
   if let .forallE n a b bi := ty then
+    -- a leading proof argument: the value exists regardless
+    if ← isProp a then
+      let β ← withLocalDecl n bi a fun h => do mkLambdaFVars #[h] (b.instantiate1 h)
+      let invB ← withLocalDecl n bi a fun h => do mkLambdaFVars #[h] (← invOf (b.instantiate1 h))
+      return ← mkAppOptM ``PIPROP #[a, β, invB]
+    -- a data argument followed by a proof about it
+    let dp? ← withLocalDecl n bi a fun x => do
+      let b' ← whnfR (b.instantiate1 x)
+      if let .forallE hn p rest hbi := b' then
+        if ← isProp p then
+          let P ← mkLambdaFVars #[x] p
+          let β ← withLocalDecl hn hbi p fun h => do mkLambdaFVars #[x, h] (rest.instantiate1 h)
+          let invB ← withLocalDecl hn hbi p fun h => do mkLambdaFVars #[x, h] (← invOf (rest.instantiate1 h))
+          return some (P, β, invB)
+      return none
+    if let some (P, β, invB) := dp? then
+      return ← mkAppOptM ``DARROWP #[a, P, β, ← invOf a, invB]
     if b.hasLooseBVars then
-      if ← isProp a then throwError "proof argument in function type {ty} not supported yet"
       let invA ← invOf a
       let invB ← withLocalDecl n bi a fun x => do mkLambdaFVars #[x] (← invOf (b.instantiate1 x))
       let β ← withLocalDecl n bi a fun x => do mkLambdaFVars #[x] (b.instantiate1 x)

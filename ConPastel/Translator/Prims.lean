@@ -173,3 +173,25 @@ by
   intro x xv y yv hx hy
   obtain ⟨ha, hb⟩ := prim_args envC funs x y xv yv hx hy
   exact Eval_nat_le ha hb
+
+open ConPastel.Translator Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL
+open Flapjack.Basis.Pure.MlString in
+cake_primitive Nat.mod
+  (Exp.fn (ofString "b") (.if_ (.app .equality [V "b", .lit (.intLit 0)]) (V "p")
+    (.app (.arith .mod .intT) [V "p", V "b"])))
+by
+  intro envC funs hnodup hfind _ _ _
+  refine prim2_cert envC funs _ hnodup hfind ?_
+  intro x xv y yv hx hy
+  obtain ⟨ha, hb⟩ := prim_args envC funs x y xv yv hx hy
+  refine Eval_if (Eval_nat_eq hb (Eval_nat_lit _ 0)) (fun h => ?_) (fun h => ?_)
+  · have : y = 0 := of_decide_eq_true h
+    subst this
+    exact Eval_weaken ha fun w hw => by show NAT (x % 0) w; simpa using hw
+  · have : y ≠ 0 := of_decide_eq_false h
+    exact Eval_weaken (Eval_int_mod (by exact_mod_cast this) ha hb) fun w hw => by
+      have hfm : (x : Int).fmod (y : Int) = ((x % y : Nat) : Int) := by
+        rw [Int.fmod_eq_emod]; simp
+      simp only [INT] at hw
+      show NAT (x % y) w
+      simp only [NAT, hw, hfm]

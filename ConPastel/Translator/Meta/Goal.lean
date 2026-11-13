@@ -208,6 +208,26 @@ partial def solveLam (g : MVarId) (env inv : Expr) (n : Name) (ty b : Expr) : Go
   let cname ← freshCName
   -- inv must be `Arrow A B`
   let inv ← whnfR inv
+  if let (``DARROWP, #[_, _, _, invA, invB]) := inv.getAppFnArgs then
+    let .lam hn p body' _ := b | throwError "expected a lambda over a proof"
+    let ceB ← mkFreshExprMVar (mkConst ``Exp)
+    let h ← withLocalDeclD n ty fun x => do
+      withLocalDeclD `xv (mkConst ``Value) fun xv => do
+      withLocalDeclD `hx (mkApp2 invA x xv) fun hx => do
+      withLocalDeclD hn (p.instantiate1 x) fun hp => do
+        let env' ← mkAppM ``SemEnv.mk #[← mkAppM ``nsBind #[mlString cname, xv, ← mkAppM ``SemEnv.v #[env]],
+          ← mkAppM ``SemEnv.c #[env]]
+        let bodyT := (body'.instantiate1 hp).instantiate1 x
+        let _ := bodyT
+        let bodyT := (b.instantiate1 x).bindingBody!.instantiate1 hp
+        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env', ceB, mkApp (invB.beta #[x, hp]) bodyT])
+        modify fun s => { s with locals := s.locals.push { fvar := x, cname, value := xv, rel := hx } }
+        solve gb.mvarId!
+        modify fun s => { s with locals := s.locals.pop }
+        mkLambdaFVars #[x, xv, hx, hp] (← instantiateMVars gb)
+    let f ← withLocalDeclD n ty fun x => mkLambdaFVars #[x] (b.instantiate1 x)
+    assignProof g (← mkAppOptM ``Eval_fn_darrowp #[none, none, none, invA, invB, env, mlString cname, ceB, f, h])
+    return
   if let (``DARROW, #[_, _, invA, invB]) := inv.getAppFnArgs then
     let ceB ← mkFreshExprMVar (mkConst ``Exp)
     let h ← withLocalDeclD n ty fun x => do
@@ -369,6 +389,28 @@ partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) 
 /-- `f x`: the function part, then the argument, with the function's own
 invariant (`Arrow` or `DARROW`). -/
 partial def solvePeel (g : MVarId) (env fpart x : Expr) : GoalM Unit := do
+  -- a proof argument: `F h` with `F`'s invariant `PIPROP`, or `F x h` with `DARROWP`
+  if ← isProof x then
+    -- `F x h` where `F`'s invariant is `DARROWP`
+    if fpart.isApp then
+      let F := fpart.appFn!
+      let xd := fpart.appArg!
+      let invF ← invOf (← inferType F)
+      if let (``DARROWP, #[_, _, _, invA, _]) := (← whnfR invF).getAppFnArgs then
+        let (_, gf) ← newEvalGoal env (mkApp invF F)
+        let (_, gx) ← newEvalGoal env (mkApp invA xd)
+        solve gf; solve gx
+        assignProof g (← mkAppM ``Eval_app_darrowp #[← instantiateMVars (mkMVar gf),
+          ← instantiateMVars (mkMVar gx), x])
+        return
+    -- `F h` where `F`'s invariant is `PIPROP`
+    let invF ← invOf (← inferType fpart)
+    if let (``PIPROP, _) := (← whnfR invF).getAppFnArgs then
+      let (_, gf) ← newEvalGoal env (mkApp invF fpart)
+      solve gf
+      assignProof g (← mkAppM ``Eval_piprop_elim #[← instantiateMVars (mkMVar gf), x])
+      return
+    throwError "proof argument {x} to {fpart} (invariant {invF})"
   let invF ← invOf (← inferType fpart)
   let (_, gf) ← newEvalGoal env (mkApp invF fpart)
   solve gf

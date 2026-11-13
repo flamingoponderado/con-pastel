@@ -118,10 +118,32 @@ def keyValue (key : Expr) : MetaM Expr := do
   unless ci.hasValue do throwError "{c} has no definition"
   return (mkAppN (← instantiateValueLevelParams ci lvls) key.getAppArgs).headBeta
 
-/-- A non-recursive function unit: `key = fun x => e`. -/
+/-- A function unit whose first data argument is followed by a proof. -/
+def translateFunctionP (key val : Expr) (xn : Name) (xty invA invB : Expr) (deps : Array Expr) : MetaM Unit := do
+  let (uname, cname) ← freshUnit
+  let param := "p"
+  let inv ← invOf (← inferType key)
+  let body ← mkFreshExprMVar (mkConst ``Exp)
+  withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx => do
+    let pf ← withLocalDeclD xn xty fun x => do
+      withLocalDeclD `xv (mkConst ``Value) fun xv => do
+      withLocalDeclD `hx (mkApp2 invA x xv) fun hx => do
+      let .forallE hn p _ _ ← whnfR (← inferType (mkApp key x)) | throwError "expected a proof argument"
+      withLocalDeclD hn p fun hp => do
+        let env ← bodyEnv envC funs param xv
+        let bodyT := (val.beta #[x, hp])
+        let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp (invB.beta #[x, hp]) bodyT])
+        let gst : GSt := { locals := #[{ fvar := x, cname := param, value := xv, rel := hx }] }
+        let _ ← (solve g.mvarId!).run gst |>.run gctx
+        let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
+          mkApp (invB.beta #[x, hp]) (mkApp2 key x hp), hnodup, hfind, g]
+        mkLambdaFVars #[x, xv, hx, hp] app
+    finishUnit key uname cname (.function param (uname ++ `body) false) deps body hyps envC funs pf key inv
+
 def mergeDeps (a b : Array Expr) : Array Expr :=
   b.foldl (fun acc d => if acc.contains d then acc else acc.push d) a
 
+/-- A non-recursive function unit: `key = fun x => e`. -/
 def translateFunction (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
   let val ← etaExpand (← keyValue key)
   let .lam xn xty _ _ := val | throwError "{key} is not a function"
@@ -130,6 +152,8 @@ def translateFunction (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := d
   let param := "p"
   let inv ← invOf (← inferType key)
   -- `Arrow A B` or `DARROW A B` (B depending on the argument)
+  if let (``DARROWP, #[_, _, _, invA, invB]) := inv.getAppFnArgs then
+    return ← translateFunctionP key val xn xty invA invB deps
   let (invA, invBAt) ← match inv.getAppFnArgs with
     | (``Arrow, #[_, _, invA, invB]) => pure (invA, fun (_ : Expr) => invB)
     | (``DARROW, #[_, _, invA, invB]) => pure (invA, fun x => invB.beta #[x])

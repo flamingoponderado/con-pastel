@@ -214,4 +214,27 @@ theorem Eval_fn_darrow {α : Type} {β : α → Type} {A : RefInv α} {B : (x : 
 /-- A structure with a single data field is represented by that field. -/
 def NEWTYPE {S F : Type} (proj : S → F) (A : RefInv F) : RefInv S := fun s v => A (proj s) v
 
+/-- A data argument followed by a proof about it: applying the value to `x`
+returns a representation of `f x h` for every proof `h`. -/
+def DARROWP {α : Type} {P : α → Prop} {β : (x : α) → P x → Type} (A : RefInv α)
+    (B : (x : α) → (h : P x) → RefInv (β x h)) : RefInv ((x : α) → (h : P x) → β x h) :=
+  fun f v => ∀ x xv, A x xv → ∀ h, AppReturns v xv (B x h (f x h))
+
+theorem Eval_app_darrowp {α : Type} {P : α → Prop} {β : (x : α) → P x → Type} {A : RefInv α}
+    {B : (x : α) → (h : P x) → RefInv (β x h)} {env : SemEnv Value} {ef ex : Exp}
+    {f : (x : α) → (h : P x) → β x h} {x : α} (hf : Eval env ef (DARROWP A B f))
+    (hx : Eval env ex (A x)) (h : P x) :
+    Eval env (.app .opapp [ef, ex]) (B x h (f x h)) :=
+  Eval_app hf hx fun _ _ hfv hxv => hfv x _ hxv h
+
+theorem Eval_fn_darrowp {α : Type} {P : α → Prop} {β : (x : α) → P x → Type} {A : RefInv α}
+    {B : (x : α) → (h : P x) → RefInv (β x h)} {env : SemEnv Value} {n : VarN} {body : Exp}
+    {f : (x : α) → (h : P x) → β x h}
+    (hb : ∀ x xv, A x xv → ∀ h, Eval { env with v := nsBind n xv env.v } body (B x h (f x h))) :
+    Eval env (.fn n body) (DARROWP A B f) := by
+  apply Eval_fn
+  intro x xv hx h σ s
+  obtain ⟨v, refs, hrel, hv⟩ := hb x xv hx h σ s
+  exact ⟨_, _, rfl, v, refs, hrel, hv⟩
+
 end ConPastel.Translator
