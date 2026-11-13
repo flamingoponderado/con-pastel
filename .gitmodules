@@ -1,6 +1,7 @@
 [submodule "deps/flapjack"]
 	path = deps/flapjack
 	url = https://github.com/flamingoponderado/flapjack.git
+	branch = lean-v4.35.0
 [submodule "deps/con-leche"]
 	path = deps/con-leche
 	url = https://github.com/leanprover/con-leche.git
