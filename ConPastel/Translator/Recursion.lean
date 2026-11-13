@@ -16,6 +16,9 @@ open Flapjack.NamespaceHOL
 
 /-! ## Namespace lookups -/
 
+theorem beq_eq_decide_of_decEq {α : Type} [DecidableEq α] (a b : α) :
+    (a == b) = decide (a = b) := rfl
+
 @[simp] theorem nsLookup_bind_short {β : Type} (vs : List (VarN × β))
     (ms : List (ModN × Namespace ModN VarN β)) (n : VarN) :
     nsLookup (.bind vs ms) (.short n) = vs.lookup n := rfl

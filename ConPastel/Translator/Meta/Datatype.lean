@@ -1,4 +1,5 @@
 import ConPastel.Translator.Meta.Goal
+import ConPastel.Translator.Meta.Ext
 import ConPastel.Translator.List
 
 /-!
@@ -21,24 +22,6 @@ primitive types `bool` (0) and `list` (1).
 
 namespace ConPastel.Translator.Meta
 open Lean Meta Elab Command
-
-structure DatatypeInfo where
-  name : Name
-  stamp : Nat
-  ctors : Array (Name × Nat)
-  deriving Inhabited
-
-initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap DatatypeInfo) ←
-  registerSimplePersistentEnvExtension {
-    addEntryFn := fun m d => m.insert d.name d
-    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m d => m.insert d.name d) m) {}
-  }
-
-def getDatatype? (env : Environment) (n : Name) : Option DatatypeInfo :=
-  (datatypeExt.getState env).find? n
-
-def nextStamp (env : Environment) : Nat :=
-  2 + (datatypeExt.getState env).size
 
 /-- The invariant (as source text) for a field type. -/
 partial def invText (self : Name) (ty : Expr) : MetaM String := do
@@ -113,7 +96,7 @@ def cakeDatatype (T : Name) : CommandElabM Unit := do
       s!"by subst hv; simp only [{T}.cakeInv]; exact ⟨{", ".intercalate ws}, {", ".intercalate ((List.range n).map (s!"h{·}'"))}, by simp⟩"
     runCmd s!"open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
 theorem _root_.{c}.cake_con {"{"}env : SemEnv Value{"}"} (hc : {T}.cakeHasCons env.c)
-    {"{"}{" ".intercalate (es ++ ["_e"])} : Exp{"}"} {if n == 0 then "" else "{" ++ " ".intercalate as ++ " : _}"}
+    {if n == 0 then "" else "{" ++ " ".intercalate es ++ " : Exp}"} {if n == 0 then "" else "{" ++ " ".intercalate as ++ " : _}"}
     {" ".intercalate hyps} :
     Eval env (.con (some (.short (Flapjack.Basis.Pure.MlString.ofString {ctorName c}))) [{", ".intercalate es}])
       ({T}.cakeInv ({c} {" ".intercalate as})) := by

@@ -1,5 +1,7 @@
 import Lean
 import ConPastel.Translator.Lemmas
+import ConPastel.Translator.Meta.Ext
+import ConPastel.Translator.List
 
 /-!
 # The proof-producing translator: expressions
@@ -56,6 +58,10 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if ty.isConstOf ``Nat then return mkConst ``NAT
   if ty.isConstOf ``Int then return mkConst ``INT
   if ty.isConstOf ``Bool then return mkConst ``BOOL
+  if let .const n _ := ty then
+    if (getDatatype? (← getEnv) n).isSome then return mkConst (n ++ `cakeInv)
+  if ty.isAppOfArity ``List 1 then
+    return ← mkAppM ``LIST #[← invOf ty.appArg!]
   if let .forallE _ a b _ := ty then
     if b.hasLooseBVars then throwError "dependent function type {ty} not supported yet"
     return ← mkAppM ``Arrow #[← invOf a, ← invOf b]
