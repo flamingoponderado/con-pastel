@@ -17,3 +17,4 @@ import ConPastel.Main.ReadAll
 import ConPastel.Program.Decls
 import ConPastel.Program.ConCheck
 import ConPastel.Main.Proof
+import ConPastel.Program.Assemble
