@@ -1,0 +1,14 @@
+name = "con-pastel"
+version = "0.1.0"
+defaultTargets = ["ConPastel"]
+
+[[require]]
+name = "con-leche"
+path = "deps/con-leche"
+
+[[require]]
+name = "Flapjack"
+path = "deps/flapjack"
+
+[[lean_lib]]
+name = "ConPastel"
