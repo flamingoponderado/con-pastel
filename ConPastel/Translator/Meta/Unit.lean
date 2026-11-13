@@ -119,17 +119,25 @@ def keyValue (key : Expr) : MetaM Expr := do
   return (mkAppN (← instantiateValueLevelParams ci lvls) key.getAppArgs).headBeta
 
 /-- A non-recursive function unit: `key = fun x => e`. -/
-def translateFunction (key : Expr) : MetaM Unit := do
+def mergeDeps (a b : Array Expr) : Array Expr :=
+  b.foldl (fun acc d => if acc.contains d then acc else acc.push d) a
+
+def translateFunction (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
   let val ← etaExpand (← keyValue key)
   let .lam xn xty _ _ := val | throwError "{key} is not a function"
-  let deps ← unitDepsOf key val
+  let deps := mergeDeps (← unitDepsOf key val) extra
   let (uname, cname) ← freshUnit
   let param := "p"
   let inv ← invOf (← inferType key)
-  let (``Arrow, #[_, _, invA, invB]) := inv.getAppFnArgs | throwError "unexpected invariant for {key}"
+  -- `Arrow A B` or `DARROW A B` (B depending on the argument)
+  let (invA, invBAt) ← match inv.getAppFnArgs with
+    | (``Arrow, #[_, _, invA, invB]) => pure (invA, fun (_ : Expr) => invB)
+    | (``DARROW, #[_, _, invA, invB]) => pure (invA, fun x => invB.beta #[x])
+    | _ => throwError "unexpected invariant for {key}"
   let body ← mkFreshExprMVar (mkConst ``Exp)
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx => do
     let pf ← withLocalDeclD xn xty fun x => do
+      let invB := invBAt x
       withLocalDeclD `xv (mkConst ``Value) fun xv => do
       withLocalDeclD `hx (mkApp2 invA x xv) fun hx => do
         let env ← bodyEnv envC funs param xv
@@ -142,9 +150,9 @@ def translateFunction (key : Expr) : MetaM Unit := do
     finishUnit key uname cname (.function param (uname ++ `body) false) deps body hyps envC funs pf key inv
 
 /-- A constant unit, as a thunk. -/
-def translateThunk (key : Expr) : MetaM Unit := do
+def translateThunk (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
   let val ← keyValue key
-  let deps ← unitDepsOf key val
+  let deps := mergeDeps (← unitDepsOf key val) extra
   let (uname, cname) ← freshUnit
   let param := "p"
   let invT ← invOf (← inferType key)
@@ -165,13 +173,13 @@ def translateThunk (key : Expr) : MetaM Unit := do
 
 /-- A recursive function unit, by well-founded induction on the structural
 argument (several arguments: tupled). -/
-def translateRecursive (key : Expr) : MetaM Unit := do
+def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
   let .const c lvls := key.getAppFn | throwError "bad key"
   let static := key.getAppArgs
   let some eqn ← getUnfoldEqnFor? c (nonRec := true) | throwError "no unfold equation for {c}"
   let eqnApp (as : Array Expr) : MetaM Expr := pure (mkAppN (mkConst eqn lvls) (static ++ as))
   let deps ← forallTelescope (← inferType key) fun xs _ => do
-    unitDepsOf key (← inferType (← eqnApp xs))
+    return mergeDeps (← unitDepsOf key (← inferType (← eqnApp xs))) extra
   let (uname, cname) ← freshUnit
   let param := "p"
   forallTelescope (← inferType key) fun xs resTy => do
@@ -225,13 +233,38 @@ def isRecursiveDef (c : Name) : MetaM Bool := do
   let env ← getEnv
   return (Lean.Elab.Structural.eqnInfoExt.find? env c).isSome || (Lean.Elab.WF.eqnInfoExt.find? env c).isSome
 
-def translateUnit (key : Expr) : MetaM Unit := do
+def translateUnitOnce (key : Expr) (extra : Array Expr) : MetaM Unit := do
   if (getUnit? (← getEnv) key).isSome then return
   let .const c _ := key.getAppFn | throwError "unit key {key} is not a constant application"
   let isFn : Bool ← forallTelescope (← inferType key) fun xs _ => pure (decide (xs.size > 0))
-  if ← isRecursiveDef c then translateRecursive key
-  else if isFn then translateFunction key
-  else translateThunk key
+  if ← isRecursiveDef c then translateRecursive key extra
+  else if isFn then translateFunction key extra
+  else translateThunk key extra
+
+/-- Translate `key`, first translating (recursively) the units it needs.
+Units needed only after unfolding (not visible in the body) are added to the
+dependencies explicitly (`extra`). -/
+partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array Expr := #[]) :
+    MetaM Unit := do
+  if (getUnit? (← getEnv) key).isSome then return
+  if stack.contains key then throwError "cyclic unit dependency at {key} (mutual recursion is not supported yet)"
+  if stack.length > 200 then throwError "unit dependency chain too deep at {key}"
+  let saved ← saveState
+  needUnitRef.set none
+  try
+    translateUnitOnce key extra
+  catch e =>
+    match ← needUnitRef.get with
+    | some dep =>
+      saved.restore
+      needUnitRef.set none
+      if extra.contains dep then
+        throwError "while translating {key}: unit {dep} is in scope but still needed: {e.toMessageData}"
+      translateUnit dep (key :: stack)
+      translateUnit key stack (extra.push dep)
+    | none =>
+      saved.restore
+      throwError "while translating {key}: {e.toMessageData}"
 
 elab "cake_unit " ts:(colGt term:max)+ : command => do
   for t in ts do

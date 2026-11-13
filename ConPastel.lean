@@ -18,3 +18,4 @@ import ConPastel.Program.Decls
 import ConPastel.Program.ConCheck
 import ConPastel.Main.Proof
 import ConPastel.Program.Assemble
+import ConPastel.Translator.Prims

@@ -93,8 +93,13 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if let some (I, j, fty) ← newtypeInfo? ty then
     let proj ← withLocalDeclD `s ty fun x => mkLambdaFVars #[x] (.proj I j x)
     return ← mkAppOptM ``NEWTYPE #[ty, fty, proj, ← invOf fty]
-  if let .forallE _ a b _ := ty then
-    if b.hasLooseBVars then throwError "dependent function type {ty} not supported yet"
+  if let .forallE n a b bi := ty then
+    if b.hasLooseBVars then
+      if ← isProp a then throwError "proof argument in function type {ty} not supported yet"
+      let invA ← invOf a
+      let invB ← withLocalDecl n bi a fun x => do mkLambdaFVars #[x] (← invOf (b.instantiate1 x))
+      let β ← withLocalDecl n bi a fun x => do mkLambdaFVars #[x] (b.instantiate1 x)
+      return ← mkAppOptM ``DARROW #[a, β, invA, invB]
     return ← mkAppM ``Arrow #[← invOf a, ← invOf b]
   throwError "no refinement invariant for type {ty}"
 

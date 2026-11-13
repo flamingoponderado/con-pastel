@@ -58,6 +58,15 @@ structure GSt where
 
 abbrev GoalM := StateRefT GSt (ReaderT GCtx MetaM)
 
+/-- The translation needs the unit for `key` first. -/
+def needUnitTag : String := "cake: need unit "
+
+initialize needUnitRef : IO.Ref (Option Expr) ← IO.mkRef none
+
+def throwNeedUnit {α : Type} (key : Expr) : MetaM α := do
+  needUnitRef.set (some key)
+  throwError "{needUnitTag}{key}"
+
 def getLevels (_args : Array Expr) : MetaM (List Level) := pure []
 
 def freshCName (pfx : String := "v") : GoalM String := do
@@ -86,7 +95,9 @@ def proveLookupG (env : Expr) (n : String) (v : Expr) (unfoldRec : Bool := true)
   let goal ← mkEq (← mkAppM ``nsLookup #[← mkAppM ``SemEnv.v #[env], shortIdent n])
     (← mkAppM ``Option.some #[v])
   let mvar ← mkFreshExprMVar goal
-  let remaining ← Tactic.run mvar.mvarId! (Tactic.evalTactic (← lookupSimp unfoldRec)) |>.run'
+  let remaining ← try
+      Tactic.run mvar.mvarId! (Tactic.evalTactic (← lookupSimp unfoldRec)) |>.run'
+    catch e => throwError "lookup of {n} failed: {e.toMessageData}\ngoal: {goal}"
   unless remaining.isEmpty do
     throwError "lookup of {n} not proved"
   instantiateMVars mvar
@@ -197,6 +208,21 @@ partial def solveLam (g : MVarId) (env inv : Expr) (n : Name) (ty b : Expr) : Go
   let cname ← freshCName
   -- inv must be `Arrow A B`
   let inv ← whnfR inv
+  if let (``DARROW, #[_, _, invA, invB]) := inv.getAppFnArgs then
+    let ceB ← mkFreshExprMVar (mkConst ``Exp)
+    let h ← withLocalDeclD n ty fun x => do
+      withLocalDeclD `xv (mkConst ``Value) fun xv => do
+      withLocalDeclD `hx (mkApp2 invA x xv) fun hx => do
+        let env' ← mkAppM ``SemEnv.mk #[← mkAppM ``nsBind #[mlString cname, xv, ← mkAppM ``SemEnv.v #[env]],
+          ← mkAppM ``SemEnv.c #[env]]
+        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env', ceB, mkApp (invB.beta #[x]) (b.instantiate1 x)])
+        modify fun s => { s with locals := s.locals.push { fvar := x, cname, value := xv, rel := hx } }
+        solve gb.mvarId!
+        modify fun s => { s with locals := s.locals.pop }
+        mkLambdaFVars #[x, xv, hx] (← instantiateMVars gb)
+    let f ← withLocalDeclD n ty fun x => mkLambdaFVars #[x] (b.instantiate1 x)
+    assignProof g (← mkAppOptM ``Eval_fn_darrow #[none, none, invA, invB, env, mlString cname, ceB, f, h])
+    return
   let (``Arrow, #[_, _, invA, invB]) := inv.getAppFnArgs
     | throwError "function expected to have an Arrow invariant, got {inv}"
   let ceB ← mkFreshExprMVar (mkConst ``Exp)
@@ -340,6 +366,23 @@ partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) 
   assignProof g (← mkAppOptM ``list_cake_mat #[α, invA, env, ctx.hlist, none, major, he, qfun,
     bn, hn, mlString nx, mlString ny, hne, bc, hc])
 
+/-- `f x`: the function part, then the argument, with the function's own
+invariant (`Arrow` or `DARROW`). -/
+partial def solvePeel (g : MVarId) (env fpart x : Expr) : GoalM Unit := do
+  let invF ← invOf (← inferType fpart)
+  let (_, gf) ← newEvalGoal env (mkApp invF fpart)
+  solve gf
+  match (← whnfR invF).getAppFnArgs with
+  | (``Arrow, #[_, _, invA, _]) =>
+    let (_, gx) ← newEvalGoal env (mkApp invA x)
+    solve gx
+    assignProof g (← mkAppM ``Eval_app_arrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
+  | (``DARROW, #[_, _, invA, _]) =>
+    let (_, gx) ← newEvalGoal env (mkApp invA x)
+    solve gx
+    assignProof g (← mkAppM ``Eval_app_darrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
+  | _ => throwError "function {fpart} has invariant {invF}"
+
 partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
@@ -351,6 +394,20 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let mci ← getConstInfo fnName
       let t' := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
       let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, (← evalGoalCe g), mkApp inv t'.headBeta])
+      return ← solve g'
+  -- Nat.add / Nat.mul as primitives (also reached after unfolding `+`, `*`)
+  if (fn.isConstOf ``Nat.add || fn.isConstOf ``Nat.mul) && args.size == 2 then
+    let lem := if fn.isConstOf ``Nat.add then ``Eval_nat_add else ``Eval_nat_mul
+    let (_, ga) ← newEvalGoal env (mkApp (mkConst ``NAT) args[0]!)
+    let (_, gb) ← newEvalGoal env (mkApp (mkConst ``NAT) args[1]!)
+    solve ga; solve gb
+    assignProof g (← mkAppM lem #[← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)])
+    return
+  -- class methods applied to instances: unfold to the instance's implementation
+  if let some t' ← Meta.unfoldProjInst? t then
+    let t' := t'.headBeta
+    if t' != t then
+      let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
       return ← solve g'
   -- conditions as Bool: known comparisons, else the instance (a newtype)
   if fn.isConstOf ``Decidable.decide && args.size == 2 then
@@ -518,6 +575,14 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         hf, ← instantiateMVars (mkMVar gx), ihy])
       return
   -- applications of locals and globals: peel the last argument
+  -- Nat constructors
+  if t.isConstOf ``Nat.zero then
+    assignProof g (← mkAppM ``Eval_nat_lit #[env, toExpr (0 : Nat)])
+    return
+  if fn.isConstOf ``Nat.succ && args.size == 1 then
+    let t' ← mkAppM ``HAdd.hAdd #[args[0]!, mkNatLit 1]
+    let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+    return ← solve g'
   -- unit value
   if t.isConstOf ``Unit.unit || t.isConstOf ``PUnit.unit then
     assignProof g (← mkAppM ``Eval_unit #[env])
@@ -528,7 +593,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if dargs.isEmpty then
         if let some u := getUnit? (← getEnv) key then
           if let .thunk _ _ := u.kind then
-            let some gv := ctx.globals.get? key | throwError "constant {key} not in scope"
+            let some gv := ctx.globals.get? key | throwNeedUnit key
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] key
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
@@ -544,7 +609,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let arity ← forallTelescope (← inferType key) fun xs _ => pure xs.size
           if dargs.size == arity then
             let tup ← dargs.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) dargs.back!
-            let some gv := ctx.globals.get? key | throwError "unit {key} not in scope"
+            let some gv := ctx.globals.get? key | throwNeedUnit key
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tupFn, hl, gv.cert]
             let (``Arrow, #[_, _, invT, _]) := gv.inv.getAppFnArgs | throwError "tupled unit invariant"
@@ -556,28 +621,14 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if fn.isConst then
     if let some (key, dargs) ← splitKey t then
       if dargs.isEmpty then
-        let some gv := ctx.globals.get? key | throwError "{key} has not been translated (or is not in scope)"
+        let some gv := ctx.globals.get? key | throwNeedUnit key
         let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
         assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv key, hl, gv.cert])
         return
-      let fpart := mkAppN key dargs.pop
-      let x := dargs.back!
-      let invA ← invOf (← inferType x)
-      let (_, gf) ← newEvalGoal env (mkApp (← mkAppM ``Arrow #[invA, inv]) fpart)
-      let (_, gx) ← newEvalGoal env (mkApp invA x)
-      solve gf; solve gx
-      assignProof g (← mkAppM ``Eval_app_arrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
-      return
+      return ← solvePeel g env (mkAppN key dargs.pop) dargs.back!
   -- applications of local functions
   if fn.isFVar && args.size > 0 then
-    let fpart := mkAppN fn args.pop
-    let x := args.back!
-    let invA ← invOf (← inferType x)
-    let (_, gf) ← newEvalGoal env (mkApp (← mkAppM ``Arrow #[invA, inv]) fpart)
-    let (_, gx) ← newEvalGoal env (mkApp invA x)
-    solve gf; solve gx
-    assignProof g (← mkAppM ``Eval_app_arrow #[← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gx)])
-    return
+    return ← solvePeel g env (mkAppN fn args.pop) args.back!
   throwError "cannot translate {t}"
 
 end

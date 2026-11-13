@@ -210,4 +210,25 @@ theorem Eval_int_eq {env : SemEnv Value} {e₁ e₂ : Exp} {a b : Int}
     exact ⟨_, rfl, fun refs ffi => by
       simp [doApp, doAppNumericCore, doAppBasic, doEq, litSameType]⟩
 
+theorem doApp_int_divmod {σ : Type} (refs : Store Value) (ffi : HolFfiState σ) (a b : Int) (hb : b ≠ 0) :
+    doApp (refs, ffi) (.arith .div .intT) [.litv (.intLit a), .litv (.intLit b)] =
+      some ((refs, ffi), .val (.litv (.intLit (a.fdiv b)))) ∧
+    doApp (refs, ffi) (.arith .mod .intT) [.litv (.intLit a), .litv (.intLit b)] =
+      some ((refs, ffi), .val (.litv (.intLit (a.fmod b)))) := by
+  simp [doApp_arith_core, doAppNumericCore, hb]
+
+theorem Eval_int_div {env : SemEnv Value} {e₁ e₂ : Exp} {a b : Int} (hb : b ≠ 0)
+    (h₁ : Eval env e₁ (INT a)) (h₂ : Eval env e₂ (INT b)) :
+    Eval env (.app (.arith .div .intT) [e₁, e₂]) (INT (a.fdiv b)) :=
+  Eval_binop rfl h₁ h₂ fun v₁ v₂ p₁ p₂ => by
+    subst p₁ p₂
+    exact ⟨_, rfl, fun refs ffi => (doApp_int_divmod refs ffi a b hb).1⟩
+
+theorem Eval_int_mod {env : SemEnv Value} {e₁ e₂ : Exp} {a b : Int} (hb : b ≠ 0)
+    (h₁ : Eval env e₁ (INT a)) (h₂ : Eval env e₂ (INT b)) :
+    Eval env (.app (.arith .mod .intT) [e₁, e₂]) (INT (a.fmod b)) :=
+  Eval_binop rfl h₁ h₂ fun v₁ v₂ p₁ p₂ => by
+    subst p₁ p₂
+    exact ⟨_, rfl, fun refs ffi => (doApp_int_divmod refs ffi a b hb).2⟩
+
 end ConPastel.Translator
