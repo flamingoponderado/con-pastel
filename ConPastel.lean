@@ -1,1 +1,1 @@
-import ConPastel.Basic
+import ConPastel.Spec
