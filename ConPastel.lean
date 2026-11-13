@@ -11,3 +11,6 @@ import ConPastel.Translator.List
 import ConPastel.Examples.Length
 import ConPastel.Translator.Prelude
 import ConPastel.Translator.Lemmas
+import ConPastel.Translator.Tuple
+import ConPastel.Main.Code
+import ConPastel.Main.ReadAll

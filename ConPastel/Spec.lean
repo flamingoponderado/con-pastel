@@ -18,7 +18,8 @@ means. The final theorem of con-pastel is `Implements conPastelProg`.
   source semantics (`semanticsProg`) from the primitive environment
   (`primSemEnv`).
 * **Input and output** go through a small, explicit FFI model (`Stdio`).
-  `read` hands out input bytes in chunks and `write` records output bytes.
+  `read` hands out the input one byte per call and `write` records output
+  bytes.
   The verdict is the bytes the program writes.
 -/
 
@@ -51,29 +52,24 @@ read back from the event trace instead. -/
 structure Stdio where
   input : List (BitVec 8)
 
-/-- Encode `n` as 8 little-endian bytes. -/
-def le64 (n : Nat) : List (BitVec 8) :=
-  (List.range 8).map fun i => BitVec.ofNat 8 (n / 256 ^ i)
-
 /-- The FFI oracle.
 
-* `read`, called with a buffer of length `8 + k`: let `n = min k remaining`.
-  The oracle writes `n` as 8 little-endian bytes into the buffer, then the
-  next `n` input bytes, and leaves the rest of the buffer unchanged.
-  `n = 0` means end of input.
+* `read`, called with a buffer of at least 2 bytes: if input remains, the
+  oracle sets byte 0 to `1` and byte 1 to the next input byte; at the end of
+  the input it sets byte 0 to `0`. The rest of the buffer is unchanged.
 * `write`, called with the bytes to write as configuration: the buffer is
   returned unchanged and nothing else changes. The written bytes are
   recorded in the io-event (`HolIoEvent.configuration`).
-* Every other name, and a `read` buffer shorter than 8 bytes, ends the run
+* Every other name, and a `read` buffer shorter than 2 bytes, ends the run
   with an FFI failure.
 -/
 def stdioOracle : HolOracle Stdio
   | .extCall name, st, _conf, bytes =>
     if name = ofString "read" then
-      if 8 ≤ bytes.length then
-        let n := min (bytes.length - 8) st.input.length
-        .ret { input := st.input.drop n }
-          (le64 n ++ st.input.take n ++ bytes.drop (8 + n))
+      if 2 ≤ bytes.length then
+        match st.input with
+        | b :: rest => .ret { input := rest } (1 :: b :: bytes.drop 2)
+        | [] => .ret st (0 :: bytes.drop 1)
       else .final .failed
     else if name = ofString "write" then
       .ret st bytes

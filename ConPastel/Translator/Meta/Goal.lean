@@ -41,6 +41,8 @@ structure RecFn where
 
 structure GCtx where
   hbool : Expr
+  /-- Proof of `HasListCons env.c`. -/
+  hlist : Expr := default
   /-- For each registered datatype, a proof of `T.cakeHasCons env.c`. -/
   hasCons : NameMap Expr := {}
   globals : NameMap GlobalVar := {}
@@ -261,6 +263,60 @@ partial def solveCases (g : MVarId) (env inv : Expr) (tn : Name) (dt : DatatypeI
     lemArgs := lemArgs ++ names.toArray.map (some ∘ mlString) ++ #[some hnd, some bk, some hk]
   assignProof g (← mkAppOptM (tn ++ `cake_mat) lemArgs)
 
+partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) : GoalM Unit := do
+  let ctx ← read
+  let α := args[0]!
+  let motive := args[1]!
+  let major := args[2]!
+  let nilAlt := args[3]!
+  let consAlt := args[4]!
+  let listTy ← mkAppM ``List #[α]
+  let dep ← withLocalDeclD `x listTy fun x => do
+    return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
+  if dep then throwError "dependent List.casesOn motive not supported"
+  unless major.isFVar do
+    let letT := Expr.letE `z listTy major (mkAppN fn #[α, motive, .bvar 0, nilAlt, consAlt]) false
+    let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv letT])
+    return ← solve g'
+  let st ← get
+  let some lv := st.locals.find? (·.fvar == major) | throwError "unknown scrutinee {major}"
+  let invA ← invOf α
+  let invL ← mkAppM ``LIST #[invA]
+  let hl ← proveLookupG env lv.cname lv.value
+  let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invL major, hl, lv.rel]
+  let qfun ← withLocalDeclD `x listTy fun x => do
+    mkLambdaFVars #[x] (mkApp inv (mkAppN fn #[α, motive, x, nilAlt, consAlt]))
+  -- nil branch
+  let bn ← mkFreshExprMVar (mkConst ``Exp)
+  let emptyN ← mkListLit (mkConst ``VarN) []
+  let emptyV ← mkListLit (mkConst ``Value) []
+  let hn ← withLocalDeclD `h (← mkEq major (← mkAppOptM ``List.nil #[α])) fun h => do
+    let envN ← mkAppM ``clauseEnv #[env, emptyN, emptyV]
+    let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envN, bn, mkApp inv nilAlt])
+    solve gb.mvarId!
+    mkLambdaFVars #[h] (← instantiateMVars gb)
+  -- cons branch
+  let nx ← freshCName "h"
+  let ny ← freshCName "t"
+  let hne ← closeWith (mkNot (← mkEq (mlString nx) (mlString ny))) (← `(tactic| decide))
+  let bc ← mkFreshExprMVar (mkConst ``Exp)
+  let hc ← withLocalDeclD `a α fun a => withLocalDeclD `as listTy fun as => do
+    withLocalDeclD `h (← mkEq major (← mkAppM ``List.cons #[a, as])) fun h => do
+    withLocalDeclD `w0 (mkConst ``Value) fun w0 => withLocalDeclD `w1 (mkConst ``Value) fun w1 => do
+    withLocalDeclD `hw0 (mkApp2 invA a w0) fun hw0 => withLocalDeclD `hw1 (mkApp2 invL as w1) fun hw1 => do
+      let envC ← mkAppM ``clauseEnv #[env, ← mkListLit (mkConst ``VarN) [mlString nx, mlString ny],
+        ← mkListLit (mkConst ``Value) [w0, w1]]
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envC, bc, mkApp inv (consAlt.beta #[a, as]).headBeta])
+      let saved := (← get).locals
+      let la : GLVar := { fvar := a, cname := nx, value := w0, rel := hw0 }
+      let las : GLVar := { fvar := as, cname := ny, value := w1, rel := hw1 }
+      modify fun s => { s with locals := s.locals.push la |>.push las }
+      solve gb.mvarId!
+      modify fun s => { s with locals := saved }
+      mkLambdaFVars #[a, as, h, w0, w1, hw0, hw1] (← instantiateMVars gb)
+  assignProof g (← mkAppOptM ``list_cake_mat #[α, invA, env, ctx.hlist, none, major, he, qfun,
+    bn, hn, mlString nx, mlString ny, hne, bc, hc])
+
 partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
@@ -293,6 +349,21 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     assignProof g (← mkAppOptM ``Eval_ite #[args[0]!, inv, env, args[1]!, args[2]!, none, ce₁, ce₂,
       args[3]!, args[4]!, ← instantiateMVars (mkMVar gc), h₁, h₂])
     return
+  -- lists
+  if fn.isConstOf ``List.nil && args.size == 1 then
+    let (``LIST, #[_, invA]) := (← whnfR inv).getAppFnArgs | throwError "list without LIST invariant"
+    assignProof g (← mkAppOptM ``Eval_nil #[args[0]!, invA, env, ctx.hlist])
+    return
+  if fn.isConstOf ``List.cons && args.size == 3 then
+    let (``LIST, #[_, invA]) := (← whnfR inv).getAppFnArgs | throwError "list without LIST invariant"
+    let (_, g₁) ← newEvalGoal env (mkApp invA args[1]!)
+    let (_, g₂) ← newEvalGoal env (mkApp inv args[2]!)
+    solve g₁; solve g₂
+    assignProof g (← mkAppOptM ``Eval_cons #[args[0]!, invA, env, ctx.hlist, none, none, args[1]!, args[2]!,
+      ← instantiateMVars (mkMVar g₁), ← instantiateMVars (mkMVar g₂)])
+    return
+  if fn.isConstOf ``List.casesOn && args.size == 5 then
+    return ← solveListCases g env inv fn args
   -- constructors of registered datatypes
   if let .const cn _ := fn then
     if let some (.ctorInfo ci) := (← getEnv).find? cn then

@@ -38,12 +38,13 @@ def withUnitHyps {α : Type} [Inhabited α] (deps : Array Name)
     (k : Expr → Array Expr → GCtx → MetaM α) : MetaM α := do
   withLocalDeclD `env (mkApp (mkConst ``SemEnv) (mkConst ``Value)) fun env => do
   withLocalDeclD `hbool (← mkAppM ``HasBoolCons #[← mkAppM ``SemEnv.c #[env]]) fun hbool => do
+  withLocalDeclD `hlist (← mkAppM ``HasListCons #[← mkAppM ``SemEnv.c #[env]]) fun hlist => do
   let dts := (datatypeExt.getState (← getEnv)).toList.map (·.1)
   let envc ← mkAppM ``SemEnv.c #[env]
   withLocalDeclsDND (dts.toArray.map fun T => (`hc, mkApp (mkConst (T ++ `cakeHasCons)) envc)) fun hcs => do
   let hasCons : NameMap Expr := (dts.zip hcs.toList).foldl (fun m (T, h) => m.insert T h) {}
   let rec go : List Name → Array Expr → NameMap GlobalVar → MetaM α
-    | [], acc, globals => k env (#[env, hbool] ++ hcs ++ acc) { hbool, hasCons, globals }
+    | [], acc, globals => k env (#[env, hbool, hlist] ++ hcs ++ acc) { hbool, hlist, hasCons, globals }
     | d :: ds, acc, globals => do
       let some u := getUnit? (← getEnv) d | throwError "unit {d} missing"
       let (tgt, cname) := unitTarget u
