@@ -16,6 +16,21 @@ The goal is reached when `lake build` checks `conPastel_correct` with no
 `sorry`, and `#print axioms conPastel_correct` shows only Lean's standard
 axioms (plus whatever flapjack's semantics already depends on, listed explicitly).
 
+## Opaque constants (found 2026-11-13)
+
+con-leche's pipeline reaches constants that Lean's logic leaves undetermined.
+The final theorem therefore has the hypothesis `RuntimeAssumptions` (in
+`ConPastel/Spec.lean`): `System.Platform.numBits = 64`, and `mixHash` /
+`String.hash` equal transcriptions of Lean's C runtime (checked against the
+runtime by `scripts/HashCheck.lean`). Other opaque constants need no
+assumption: `Expr.hasStrLitGo` and `panic!` messages only shape error
+contents, which the translator refines with a trivial invariant (the verdict
+only looks at ok/error); terminating `while` loops (`repeatM`) and
+`WellFounded.extrinsicFix` are pinned by Lean's logic.
+
+The goal statement becomes
+`theorem conPastel_correct (h : RuntimeAssumptions) : Implements conPastelProg`.
+
 ## Decisions (fixed)
 
 - Scope: the pure pipeline only; con-leche's driver, CLI and parallelism are not ported.

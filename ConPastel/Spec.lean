@@ -115,4 +115,66 @@ def Implements (prog : List Dec) : Prop :=
       ∃ events, b = .terminate .success events ∧
         writtenBytes events = verdictBytes (conLecheAccepts input)
 
+/-! ## Runtime assumptions
+
+Some constants that con-leche's pipeline reaches are opaque in Lean's logic:
+the logic does not determine their values, only the compiled code does. Two
+of them influence con-leche's accepting path, through memo tables and array
+indices, so the final theorem assumes what the Lean runtime does for them,
+transcribed from Lean v4.35.0's C runtime:
+
+* `System.Platform.numBits` (the width of `USize`) is 64;
+* `mixHash` is `lean_uint64_mix_hash` (`src/include/lean/lean.h`);
+* `String.hash` is `lean_string_hash` (`src/runtime/object.cpp`): MurmurHash64A
+  (`src/runtime/hash.cpp`) with seed 11 over the string's UTF-8 bytes, with
+  8-byte blocks read little-endian.
+
+Other opaque constants on the path do not need assumptions: they only
+contribute to error contents (`Expr.hasStrLitGo`, the messages of `panic!`),
+which never affect the verdict, or they are terminating `while` loops, whose
+value Lean's logic does pin down (`repeatM`). -/
+
+/-- `lean_uint64_mix_hash`. -/
+def leanMixHash (h k : UInt64) : UInt64 :=
+  let m : UInt64 := 0xc6a4a7935bd1e995
+  let k := k * m
+  let k := k ^^^ (k >>> 47)
+  let k := k ^^^ m
+  let h := h ^^^ k
+  h * m
+
+/-- Little-endian value of up to 8 bytes. -/
+def leWord (bs : List UInt8) : UInt64 :=
+  (bs.zipIdx).foldl (fun acc (b, i) => acc ^^^ (b.toUInt64 <<< (8 * i).toUInt64)) 0
+
+/-- The 8-byte block loop of MurmurHash64A. -/
+def murmurBlocks (m : UInt64) (h : UInt64) : List UInt8 → UInt64 × List UInt8
+  | b₀ :: b₁ :: b₂ :: b₃ :: b₄ :: b₅ :: b₆ :: b₇ :: rest =>
+    let k := leWord [b₀, b₁, b₂, b₃, b₄, b₅, b₆, b₇]
+    let k := k * m
+    let k := k ^^^ (k >>> 47)
+    let k := k * m
+    murmurBlocks m ((h ^^^ k) * m) rest
+  | tail => (h, tail)
+
+/-- MurmurHash64A (`src/runtime/hash.cpp`). -/
+def murmurHash64A (bytes : List UInt8) (seed : UInt64) : UInt64 :=
+  let m : UInt64 := 0xc6a4a7935bd1e995
+  let h := seed ^^^ (bytes.length.toUInt64 * m)
+  let (h, tail) := murmurBlocks m h bytes
+  let h := if tail.isEmpty then h else (h ^^^ leWord tail) * m
+  let h := h ^^^ (h >>> 47)
+  let h := h * m
+  h ^^^ (h >>> 47)
+
+/-- `lean_string_hash`. -/
+def leanStringHash (s : String) : UInt64 :=
+  murmurHash64A s.toByteArray.toList 11
+
+/-- What the final theorem assumes about the Lean runtime. -/
+structure RuntimeAssumptions : Prop where
+  numBits : System.Platform.numBits = 64
+  mixHash : ∀ h k, mixHash h k = leanMixHash h k
+  stringHash : ∀ s, String.hash s = leanStringHash s
+
 end ConPastel
