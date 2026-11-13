@@ -12,20 +12,20 @@ open Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.EvaluateHO
 open Flapjack.NamespaceHOL
 
 /-- A refinement invariant for Lean type `α`. -/
-abbrev Inv (α : Type) := α → Value → Prop
+abbrev RefInv (α : Type) := α → Value → Prop
 
-def INT : Inv Int := fun i v => v = .litv (.intLit i)
-def NAT : Inv Nat := fun n v => v = .litv (.intLit n)
-def BOOL : Inv Bool := fun b v => v = boolValue b
+def INT : RefInv Int := fun i v => v = .litv (.intLit i)
+def NAT : RefInv Nat := fun n v => v = .litv (.intLit n)
+def BOOL : RefInv Bool := fun b v => v = boolValue b
 
 /-- Functions: applying the value to a representation of `x` returns a
 representation of `f x`. -/
-def Arrow {α β : Type} (a : Inv α) (b : Inv β) : Inv (α → β) :=
+def Arrow {α β : Type} (a : RefInv α) (b : RefInv β) : RefInv (α → β) :=
   fun f fv => ∀ x xv, a x xv → AppReturns fv xv (b (f x))
 
 /-! ## Functions -/
 
-theorem Eval_fn_arrow {α β : Type} {a : Inv α} {b : Inv β} {env : SemEnv Value} {n : VarN}
+theorem Eval_fn_arrow {α β : Type} {a : RefInv α} {b : RefInv β} {env : SemEnv Value} {n : VarN}
     {body : Exp} {f : α → β}
     (h : ∀ x xv, a x xv → Eval { env with v := nsBind n xv env.v } body (b (f x))) :
     Eval env (.fn n body) (Arrow a b f) := by
@@ -34,7 +34,7 @@ theorem Eval_fn_arrow {α β : Type} {a : Inv α} {b : Inv β} {env : SemEnv Val
   obtain ⟨v, refs, hrel, hv⟩ := h x xv hx σ s
   exact ⟨_, _, rfl, v, refs, hrel, hv⟩
 
-theorem Eval_app_arrow {α β : Type} {a : Inv α} {b : Inv β} {env : SemEnv Value} {ef ex : Exp}
+theorem Eval_app_arrow {α β : Type} {a : RefInv α} {b : RefInv β} {env : SemEnv Value} {ef ex : Exp}
     {f : α → β} {x : α} (hf : Eval env ef (Arrow a b f)) (hx : Eval env ex (a x)) :
     Eval env (.app .opapp [ef, ex]) (b (f x)) :=
   Eval_app hf hx fun _ _ hfv hxv => hfv x _ hxv

@@ -6,3 +6,6 @@ import ConPastel.Translator.Eval
 import ConPastel.Translator.Basic
 import ConPastel.Translator.Recursion
 import ConPastel.Examples.SumTo
+import ConPastel.Translator.Datatype
+import ConPastel.Translator.List
+import ConPastel.Examples.Length
