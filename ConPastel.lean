@@ -9,3 +9,5 @@ import ConPastel.Examples.SumTo
 import ConPastel.Translator.Datatype
 import ConPastel.Translator.List
 import ConPastel.Examples.Length
+import ConPastel.Translator.Prelude
+import ConPastel.Translator.Lemmas
