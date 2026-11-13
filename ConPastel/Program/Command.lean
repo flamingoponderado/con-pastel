@@ -36,14 +36,14 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let some eu := us.find? (·.key == mkConst entry) | throwError "{entry} is not a unit"
   let some ru := us.find? (·.key == mkConst ``ConPastel.Main.revApp) | throwError "revApp is not a unit"
   -- the datatypes, in stamp order
-  let dts := ((datatypeExt.getState env).toList.map (·.2)).toArray.qsort (fun a b => a.stamp < b.stamp)
+  let dts := allDatatypes env
   let astT := mkConst ``AstT
   let tyVar ← mkAppM ``AstT.atvar #[mlString "'a"]
   let tdTy ← mkAppM ``Prod #[← mkAppM ``List #[mkConst ``TvarN], ← mkAppM ``Prod #[mkConst ``TypeN,
     ← mkAppM ``List #[← mkAppM ``Prod #[mkConst ``ConN, ← mkAppM ``List #[astT]]]]]
   let tdEntries ← dts.toList.mapM fun d => do
-    let ctors ← d.ctors.toList.mapM fun (c, n) => do
-      mkAppM ``Prod.mk #[mlString c.toString, ← mkListLit astT (List.replicate n tyVar)]
+    let ctors ← d.ctors.toList.mapM fun (_, cn, flags) => do
+      mkAppM ``Prod.mk #[mlString cn, ← mkListLit astT (List.replicate (flags.toList.filter id).length tyVar)]
     let ctorTy ← mkAppM ``Prod #[mkConst ``ConN, ← mkAppM ``List #[astT]]
     mkAppM ``Prod.mk #[← mkListLit (mkConst ``TvarN) [], ← mkAppM ``Prod.mk #[mlString d.name.toString,
       ← mkListLit ctorTy ctors]]

@@ -5,10 +5,16 @@ import Lean
 namespace ConPastel.Translator.Meta
 open Lean
 
+/-- A CakeML datatype for a closed Lean inductive type `ty` (an instance, for
+parameterized types). -/
 structure DatatypeInfo where
+  /-- The Lean type, e.g. `Option Nat`. -/
+  ty : Expr
+  /-- Namespace of the generated declarations (`ty`, `cakeInv`, `cakeHasCons`, …). -/
   name : Name
   stamp : Nat
-  ctors : Array (Name × Nat)
+  /-- Per constructor: its Lean name, its CakeML name, and which fields are data. -/
+  ctors : Array (Name × String × Array Bool)
   deriving Inhabited
 
 initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap DatatypeInfo) ←
@@ -17,11 +23,17 @@ initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap Data
     addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m d => m.insert d.name d) m) {}
   }
 
-def getDatatype? (env : Environment) (n : Name) : Option DatatypeInfo :=
-  (datatypeExt.getState env).find? n
+def allDatatypes (env : Environment) : Array DatatypeInfo :=
+  ((datatypeExt.getState env).toList.map (·.2)).toArray.qsort (fun a b => a.stamp < b.stamp)
+
+def getDatatypeByType? (env : Environment) (ty : Expr) : Option DatatypeInfo :=
+  (allDatatypes env).find? (·.ty == ty)
 
 def nextStamp (env : Environment) : Nat :=
   2 + (datatypeExt.getState env).size
+
+/-- The translation needs the datatype for `ty` first. -/
+initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 
 end ConPastel.Translator.Meta
 

@@ -84,8 +84,7 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if ty.isConstOf ``Nat then return mkConst ``NAT
   if ty.isConstOf ``Int then return mkConst ``INT
   if ty.isConstOf ``Bool then return mkConst ``BOOL
-  if let .const n _ := ty then
-    if (getDatatype? (← getEnv) n).isSome then return mkConst (n ++ `cakeInv)
+  if ty.isConstOf ``Unit || ty.isAppOfArity ``PUnit 0 then return mkConst ``UNIT
   if ty.isAppOfArity ``List 1 then
     return ← mkAppM ``LIST #[← invOf ty.appArg!]
   if ty.isAppOfArity ``Prod 2 then
@@ -93,6 +92,13 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if let some (I, j, fty) ← newtypeInfo? ty then
     let proj ← withLocalDeclD `s ty fun x => mkLambdaFVars #[x] (.proj I j x)
     return ← mkAppOptM ``NEWTYPE #[ty, fty, proj, ← invOf fty]
+  -- datatypes (instances of closed inductive types)
+  if let .const I _ := ty.getAppFn then
+    if let some (.inductInfo _) := (← getEnv).find? I then
+      if !ty.hasFVar && !ty.hasMVar then
+        if let some d := getDatatypeByType? (← getEnv) ty then return mkConst (d.name ++ `cakeInv)
+        needDatatypeRef.set (some ty)
+        throwError "cake: need datatype {ty}"
   if let .forallE n a b bi := ty then
     -- a leading proof argument: the value exists regardless
     if ← isProp a then

@@ -1,4 +1,4 @@
-import ConPastel.Translator.Meta.Unit
+import ConPastel.Translator.Meta.Datatype
 
 namespace ConPastel.Examples.NT
 

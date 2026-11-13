@@ -12,3 +12,8 @@ path = "deps/flapjack"
 
 [[lean_lib]]
 name = "ConPastel"
+
+# Translator experiments; each is an independent translation (not imported together).
+[[lean_lib]]
+name = "ConPastelExamples"
+globs = ["ConPastel.Examples.*"]

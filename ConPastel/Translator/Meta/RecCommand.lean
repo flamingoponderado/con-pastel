@@ -1,6 +1,6 @@
 import ConPastel.Translator.Meta.Goal
 import ConPastel.Translator.Meta.Command
-import ConPastel.Translator.Meta.Datatype
+import ConPastel.Translator.Meta.Ext
 
 /-! # `cake_rec`: translate a recursive single-argument function -/
 

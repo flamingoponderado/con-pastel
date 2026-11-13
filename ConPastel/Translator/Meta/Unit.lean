@@ -290,12 +290,4 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
       saved.restore
       throwError "while translating {key}: {e.toMessageData}"
 
-elab "cake_unit " ts:(colGt term:max)+ : command => do
-  for t in ts do
-    liftTermElabM do
-      let key ← instantiateMVars (← Term.elabTerm t none)
-      Term.synthesizeSyntheticMVarsNoPostponing
-      let key ← instantiateMVars key
-      translateUnit key
-
 end ConPastel.Translator.Meta
