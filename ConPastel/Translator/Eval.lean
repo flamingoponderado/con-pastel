@@ -24,11 +24,11 @@ def EvalRel {σ : Type} (s : State σ) (env : SemEnv Value) (e : Exp) (s' : Stat
 /-- The refinement judgement: `e` evaluates in `env` to a value satisfying
 `P`, from every state, only appending to the store. -/
 def Eval (env : SemEnv Value) (e : Exp) (P : Value → Prop) : Prop :=
-  ∀ {σ : Type} (s : State σ), ∃ v refs, EvalRel s env e { s with refs := s.refs ++ refs } v ∧ P v
+  ∀ (σ : Type) (s : State σ), ∃ v refs, EvalRel s env e { s with refs := s.refs ++ refs } v ∧ P v
 
 /-- Applying the function value `f` to `x` returns a value satisfying `P`. -/
 def AppReturns (f x : Value) (P : Value → Prop) : Prop :=
-  ∀ {σ : Type} (s : State σ), ∃ env e, doOpApp [f, x] = some (env, e) ∧
+  ∀ (σ : Type) (s : State σ), ∃ env e, doOpApp [f, x] = some (env, e) ∧
     ∃ v refs, EvalRel s env e { s with refs := s.refs ++ refs } v ∧ P v
 
 /-! ## Clocks -/
@@ -81,7 +81,7 @@ theorem Eval_fn (env : SemEnv Value) (n : VarN) (body : Exp) (P : Value → Prop
 theorem Eval_weaken {env : SemEnv Value} {e : Exp} {P Q : Value → Prop} (h : Eval env e P)
     (hPQ : ∀ v, P v → Q v) : Eval env e Q := by
   intro σ s
-  obtain ⟨v, refs, hrel, hp⟩ := h s
+  obtain ⟨v, refs, hrel, hp⟩ := h σ s
   exact ⟨v, refs, hrel, hPQ v hp⟩
 
 /-! ## Running expression lists -/
@@ -164,9 +164,9 @@ theorem Eval_app {env : SemEnv Value} {ef ex : Exp} {Pf Px Q : Value → Prop}
     (h : ∀ fv xv, Pf fv → Px xv → AppReturns fv xv Q) :
     Eval env (.app .opapp [ef, ex]) Q := by
   intro σ s
-  obtain ⟨vx, r₁, hx₁, px⟩ := hx s
-  obtain ⟨vf, r₂, hf₁, pf⟩ := hf { s with refs := s.refs ++ r₁ }
-  obtain ⟨env', body, happ, vr, r₃, hb, q⟩ := h vf vx pf px
+  obtain ⟨vx, r₁, hx₁, px⟩ := hx σ s
+  obtain ⟨vf, r₂, hf₁, pf⟩ := hf σ { s with refs := s.refs ++ r₁ }
+  obtain ⟨env', body, happ, vr, r₃, hb, q⟩ := h vf vx pf px σ
     { s with refs := s.refs ++ (r₁ ++ r₂) }
   refine ⟨vr, r₁ ++ r₂ ++ r₃, ?_, q⟩
   have hargs := Runs.cons hx₁.runs (State.refs_append s r₁ r₂ ▸ hf₁.runs)
