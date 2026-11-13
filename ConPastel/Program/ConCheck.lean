@@ -102,4 +102,20 @@ theorem everyExpFuns_of_conOk {tbl : List (ConN × Nat)} {envC : Namespace ModN 
     simp [everyExp_of_conOk ht e h.1, everyExpFuns_of_conOk ht fs h.2]
 end
 
+/-- A flat constructor environment agrees with its own arity table. -/
+theorem tableOk_bind (l : List (ConN × Nat × Stamp)) :
+    TableOk (l.map fun (n, a, _) => (n, a)) (.bind l []) := by
+  intro c n h
+  induction l with
+  | nil => simp at h
+  | cons p l ih =>
+    obtain ⟨k, a, st⟩ := p
+    by_cases hk : c = k
+    · subst hk; simp [List.lookup] at h ⊢; simp_all
+    · have hb : (c == k) = false := beq_eq_false_iff_ne.mpr hk
+      simp only [List.map_cons, List.lookup, hb] at h
+      obtain ⟨st', hst'⟩ := ih h
+      refine ⟨st', ?_⟩
+      simpa [nsLookup, List.lookup, hb] using hst'
+
 end ConPastel.Program

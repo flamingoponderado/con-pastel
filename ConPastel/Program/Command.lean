@@ -11,7 +11,8 @@ import ConPastel.Translator.Meta.Unit
 * `P.prog`, the program, and `P.correct`: for every input, `P.prog`
   completes, writing `entry`'s verdict on the input bytes.
 
-Datatypes are not supported here yet: the group's environment is `initEnv`.
+The program declares every registered datatype in one `Dtype` (stamps from 2,
+in registration order), then the group, then the main program.
 -/
 
 namespace ConPastel.Program
@@ -32,10 +33,31 @@ def addDef (n : Name) (ty val : Expr) : MetaM Unit :=
 
 def cakeProgram (P entry : Name) : MetaM Unit := do
   let env ← getEnv
-  unless (datatypeExt.getState env).isEmpty do throwError "cake_program: datatypes not supported yet"
   let us := unitsInOrder env
   let some eu := us.find? (·.const == entry) | throwError "{entry} is not a unit"
   let some ru := us.find? (·.const == ``ConPastel.Main.revApp) | throwError "revApp is not a unit"
+  -- the datatypes, in stamp order
+  let dts := ((datatypeExt.getState env).toList.map (·.2)).toArray.qsort (fun a b => a.stamp < b.stamp)
+  let astT := mkConst ``AstT
+  let tyVar ← mkAppM ``AstT.atvar #[mlString "'a"]
+  let tdTy ← mkAppM ``Prod #[← mkAppM ``List #[mkConst ``TvarN], ← mkAppM ``Prod #[mkConst ``TypeN,
+    ← mkAppM ``List #[← mkAppM ``Prod #[mkConst ``ConN, ← mkAppM ``List #[astT]]]]]
+  let tdEntries ← dts.toList.mapM fun d => do
+    let ctors ← d.ctors.toList.mapM fun (c, n) => do
+      mkAppM ``Prod.mk #[mlString c.toString, ← mkListLit astT (List.replicate n tyVar)]
+    let ctorTy ← mkAppM ``Prod #[mkConst ``ConN, ← mkAppM ``List #[astT]]
+    mkAppM ``Prod.mk #[← mkListLit (mkConst ``TvarN) [], ← mkAppM ``Prod.mk #[mlString d.name.toString,
+      ← mkListLit ctorTy ctors]]
+  addDef (P ++ `tds) (mkConst ``TypeDef) (← mkListLit tdTy tdEntries)
+  let tds := mkConst (P ++ `tds)
+  let envC ← mkAppM ``dtEnv #[tds]
+  let envCc ← mkAppM ``SemEnv.c #[envC]
+  let hdup ← closeWith (← mkEq (← mkAppM ``List.all #[tds, mkConst ``checkDupCtors]) (mkConst ``Bool.true))
+    (← `(tactic| decide))
+  let hbool ← closeWith (← mkAppM ``ConPastel.Translator.HasBoolCons #[envCc])
+    (← `(tactic| exact ⟨by decide, by decide⟩))
+  let hlist ← closeWith (← mkAppM ``ConPastel.Translator.HasListCons #[envCc])
+    (← `(tactic| exact ⟨by decide, by decide⟩))
   -- the group
   let fty ← funTy
   let entries ← us.toList.mapM fun u => do
@@ -45,7 +67,6 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     mkAppM ``Prod.mk #[mlString u.cname, ← mkAppM ``Prod.mk #[mlString param, mkConst body]]
   addDef (P ++ `funs) (← mkAppM ``List #[fty]) (← mkListLit fty entries)
   let funs := mkConst (P ++ `funs)
-  let envC := mkConst ``ConPastel.initEnv
   let nodupTy ← mkAppM ``List.Nodup #[← mkAppM ``List.map #[← withLocalDeclD `p fty fun p => do
     mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p]), funs]]
   addThm (P ++ `nodup) (← closeWith nodupTy (← `(tactic| decide)))
@@ -66,8 +87,10 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     let findTy ← mkEq (← mkAppM ``findRecFun #[mlString u.cname, funs])
       (← mkAppM ``Option.some #[← mkAppM ``Prod.mk #[mlString param, mkConst body]])
     let hfind ← closeWith findTy (← `(tactic| rfl))
-    let mut args : Array Expr := #[envC, funs, nodup, hfind,
-      mkConst ``ConPastel.Translator.initEnv_hasBoolCons, mkConst ``ConPastel.Translator.initEnv_hasListCons, lkC]
+    let hcs ← u.datatypes.mapM fun T => do
+      let nm := mkIdent (T ++ `cakeHasCons)
+      closeWith (mkApp (mkConst (T ++ `cakeHasCons)) envCc) (← `(tactic| (unfold $nm:ident; decide)))
+    let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC]
     for d in u.deps do
       let some dl := lookups.find? d | throwError "dependency {d} of {u.const} not assembled"
       let some dc := certs.find? d | throwError "dependency {d} of {u.const} not assembled"
@@ -76,10 +99,23 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     certs := certs.insert u.const (mkConst (P ++ Name.mkSimple s!"cert_{tag}"))
   -- the program and its correctness
   let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
-  let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dletrec #[mkConst ``Flapjack.Misc.Location.unknownLoc, funs], mainDecs]
+  let loc := mkConst ``Flapjack.Misc.Location.unknownLoc
+  let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dtype #[loc, tds],
+    ← mkAppM ``List.cons #[← mkAppM ``Dec.dletrec #[loc, funs], mainDecs]]
   addDef (P ++ `prog) (← mkAppM ``List #[mkConst ``Dec]) prog
-  let conOkTy ← mkEq (← mkAppM ``conOkFuns #[mkConst ``initTable, funs]) (mkConst ``Bool.true)
-  let hcon ← mkAppM ``group_conOk #[funs, ← closeWith conOkTy (← `(tactic| decide))]
+  -- constructor arities
+  let cRed ← withTransparency .all <| reduce envCc (explicitOnly := false) (skipTypes := false)
+  let (``Namespace.bind, #[_, _, _, l, _]) := cRed.getAppFnArgs
+    | throwError "constructor environment did not reduce to a flat namespace: {cRed}"
+  let hc ← closeWith (← mkEq envCc (← mkAppM ``Namespace.bind #[l, ← mkListLit (← mkAppM ``Prod
+      #[mkConst ``ModN, ← mkAppM ``Namespace #[mkConst ``ModN, mkConst ``ConN,
+        ← mkAppM ``Prod #[mkConst ``Nat, mkConst ``Stamp]]]) []]))
+    (← `(tactic| rfl))
+  let elemTy := (← inferType l).appArg!
+  let tbl ← mkAppM ``List.map #[← withLocalDeclD `e elemTy fun e => do
+      mkLambdaFVars #[e] (← mkAppM ``Prod.mk #[← mkAppM ``Prod.fst #[e], ← mkAppM ``Prod.fst #[← mkAppM ``Prod.snd #[e]]]), l]
+  let conOkTy ← mkEq (← mkAppM ``conOkFuns #[tbl, funs]) (mkConst ``Bool.true)
+  let hcon ← mkAppM ``group_conOk_of #[envC, l, hc, funs, ← closeWith conOkTy (← `(tactic| decide))]
   let memTy (n : String) : MetaM Expr := do
     mkAppM ``Membership.mem #[← mkAppM ``List.map #[← withLocalDeclD `p fty fun p => do
       mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p]), funs], mlString n]
@@ -88,9 +124,10 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let ne (a b : String) : MetaM Expr := do closeWith (mkNot (← mkEq (mlString a) (mlString b))) (← `(tactic| decide))
   let some ce := certs.find? eu.const | unreachable!
   let some cr := certs.find? ru.const | unreachable!
-  let pf ← mkAppOptM ``program_completes #[funs, toExpr eu.cname, toExpr ru.cname, mkConst entry, nodup, hcon,
-    hmemE, hmemR, ce, cr, ← ne eu.cname ConPastel.Main.bufName, ← ne eu.cname ConPastel.Main.readAllName,
-    ← ne ru.cname ConPastel.Main.bufName, ← ne ru.cname ConPastel.Main.readAllName]
+  let pf ← mkAppOptM ``program_completes_dt #[tds, funs, toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup,
+    nodup, hcon, hmemE, hmemR, ce, cr, hlist, ← ne eu.cname ConPastel.Main.bufName,
+    ← ne eu.cname ConPastel.Main.readAllName, ← ne ru.cname ConPastel.Main.bufName,
+    ← ne ru.cname ConPastel.Main.readAllName]
   addThm (P ++ `correct) pf
 
 elab "cake_program " P:ident entry:ident : command => do

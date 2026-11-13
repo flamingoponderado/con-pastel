@@ -116,4 +116,79 @@ theorem group_conOk (funs : List (VarN × VarN × Exp)) (h : conOkFuns initTable
   rw [← everyExpFuns_eq_all]
   exact everyExpFuns_of_conOk initTable_ok funs h
 
+/-- The group and the main program, from a closure environment `E₀`. -/
+theorem group_main_run (E₀ : SemEnv Value) (funs : List (VarN × VarN × Exp))
+    (entryName revName : String) (entry : List Nat → Bool)
+    (hnodup : (funs.map fun (f, _, _) => f).Nodup)
+    (hcon : funs.all (fun (_, _, e) => everyExp (oneConCheck E₀.c) e) = true)
+    (hmemE : ofString entryName ∈ funs.map (·.1)) (hmemR : ofString revName ∈ funs.map (·.1))
+    (he : Arrow (LIST NAT) BOOL entry (.recclosure E₀ funs (ofString entryName)))
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled
+      (.recclosure E₀ funs (ofString revName)))
+    (hlist : HasListCons E₀.c)
+    (hn₁ : ofString entryName ≠ ofString bufName) (hn₂ : ofString entryName ≠ ofString readAllName)
+    (hn₃ : ofString revName ≠ ofString bufName) (hn₄ : ofString revName ≠ ofString readAllName)
+    (s : State Stdio) (hor : s.ffi.oracle = stdioOracle) (input : List (BitVec 8))
+    (hin : s.ffi.ffiState.input = input) :
+    ∃ s' envM reads c d,
+      DeclsRun s E₀ (.dletrec Flapjack.Misc.Location.unknownLoc funs :: mainDecs entryName revName) s' envM ∧
+      s'.ffi.ioEvents = s.ffi.ioEvents ++ reads ++ [writeEvent (entry (byteNats input)) c d] ∧
+      (∀ e ∈ reads, IsRead e) := by
+  have hd₁ := DeclsRun.dletrec (loc := Flapjack.Misc.Location.unknownLoc) s hnodup hcon
+  let E := extendDecEnv { v := buildRecEnv funs E₀ nsEmpty, c := nsEmpty } E₀
+  have hentry := lookup_group funs E₀ _ hmemE
+  have hrev := lookup_group funs E₀ _ hmemR
+  have hlist' : HasListCons E.c := by
+    have : E.c = E₀.c := by simp [E, extendDecEnv, nsAppend_nsEmpty]
+    rw [this]; exact hlist
+  obtain ⟨s', envM, reads, c, d, hrun, hevents, hreads⟩ :=
+    mainRun entryName revName entry E _ _ hentry he hrev hr hlist' hn₁ hn₂ hn₃ hn₄ s hor input hin
+  exact ⟨s', _, reads, c, d, DeclsRun.cons hd₁ hrun, hevents, hreads⟩
+
+/-- The environment after declaring the datatypes `tds`. -/
+def dtEnv (tds : TypeDef) : SemEnv Value :=
+  extendDecEnv { v := nsEmpty, c := buildTdefs 2 tds } ConPastel.initEnv
+
+/-- **Whole-program correctness with datatypes**: `Dtype tds` (stamps from 2),
+the unit group over `dtEnv tds`, then the main program. -/
+theorem program_completes_dt (tds : TypeDef) (funs : List (VarN × VarN × Exp))
+    (entryName revName : String) (entry : List Nat → Bool)
+    (hdup : tds.all checkDupCtors = true)
+    (hnodup : (funs.map fun (f, _, _) => f).Nodup)
+    (hcon : funs.all (fun (_, _, e) => everyExp (oneConCheck (dtEnv tds).c) e) = true)
+    (hmemE : ofString entryName ∈ funs.map (·.1)) (hmemR : ofString revName ∈ funs.map (·.1))
+    (he : Arrow (LIST NAT) BOOL entry (.recclosure (dtEnv tds) funs (ofString entryName)))
+    (hr : Arrow (PAIR (LIST NAT) (LIST NAT)) (LIST NAT) revApp.cake_tupled
+      (.recclosure (dtEnv tds) funs (ofString revName)))
+    (hlist : HasListCons (dtEnv tds).c)
+    (hn₁ : ofString entryName ≠ ofString bufName) (hn₂ : ofString entryName ≠ ofString readAllName)
+    (hn₃ : ofString revName ≠ ofString bufName) (hn₄ : ofString revName ≠ ofString readAllName)
+    (input : ByteArray) :
+    ∃ events, Completes (ConPastel.initState (initFfi input)) ConPastel.initEnv
+        (.dtype Flapjack.Misc.Location.unknownLoc tds :: .dletrec Flapjack.Misc.Location.unknownLoc funs ::
+          mainDecs entryName revName) events ∧
+      writtenBytes events = verdictBytes (entry (input.toList.map UInt8.toNat)) := by
+  let s : State Stdio := ConPastel.initState (initFfi input)
+  have hdt := DeclsRun.dtype (loc := Flapjack.Misc.Location.unknownLoc) (env := ConPastel.initEnv) s hdup
+  let s₁ : State Stdio := { s with nextTypeStamp := s.nextTypeStamp + tds.length }
+  obtain ⟨s', envM, reads, c, d, hrun, hevents, hreads⟩ :=
+    group_main_run (dtEnv tds) funs entryName revName entry hnodup hcon hmemE hmemR he hr hlist
+      hn₁ hn₂ hn₃ hn₄ s₁ rfl (input.toList.map (·.toBitVec)) rfl
+  obtain ⟨ck₁, ck₂, heval⟩ := DeclsRun.cons hdt hrun
+  refine ⟨s'.ffi.ioEvents, ⟨ck₁, s'.ffi, .val (extendDecEnv envM { v := nsEmpty, c := buildTdefs s.nextTypeStamp tds }),
+    ?_, by simp, by simp, by simp, rfl⟩, ?_⟩
+  · simp only [SemanticsHOL.evaluateProgWithClock, Prod.mk.injEq]
+    exact ⟨congrArg (fun p => p.1.ffi) heval, congrArg Prod.snd heval⟩
+  · have hr' : writtenBytes reads = [] := by simpa [writtenBytes] using writtenBytes_append_reads [] reads hreads
+    have h0 : s₁.ffi.ioEvents = [] := rfl
+    rw [hevents, h0, List.nil_append, writtenBytes_append, hr', List.nil_append,
+      writtenBytes_singleton_write, byteNats_input]
+
+theorem group_conOk_of (E₀ : SemEnv Value) (l : List (ConN × Nat × Stamp)) (hc : E₀.c = .bind l [])
+    (funs : List (VarN × VarN × Exp))
+    (h : conOkFuns (l.map fun (n, a, _) => (n, a)) funs = true) :
+    funs.all (fun (_, _, e) => everyExp (oneConCheck E₀.c) e) = true := by
+  rw [← everyExpFuns_eq_all, hc]
+  exact everyExpFuns_of_conOk (tableOk_bind l) funs h
+
 end ConPastel.Program

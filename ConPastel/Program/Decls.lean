@@ -83,4 +83,13 @@ theorem DeclsRun.dletrec {σ : Type} (s : State σ) {env : SemEnv Value}
   rw [evaluateDecs]
   simp [hnodup, hcon]
 
+/-- `Dtype tds`. -/
+theorem DeclsRun.dtype {σ : Type} (s : State σ) {env : SemEnv Value}
+    {loc : Flapjack.Misc.Location.Locs} {tds : TypeDef} (hdup : tds.all checkDupCtors = true) :
+    DeclsRun s env [.dtype loc tds] { s with nextTypeStamp := s.nextTypeStamp + tds.length }
+      { v := nsEmpty, c := buildTdefs s.nextTypeStamp tds } := by
+  refine ⟨0, 0, ?_⟩
+  rw [evaluateDecs]
+  simp [hdup]
+
 end ConPastel.Program
