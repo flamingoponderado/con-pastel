@@ -89,9 +89,9 @@ def writtenBytes (events : List HolIoEvent) : List (BitVec 8) :=
   events.flatMap fun e =>
     if e.name = .extCall (ofString "write") then e.configuration else []
 
-/-- The output that stands for each verdict. -/
+/-- The output that stands for each verdict (ASCII, one byte per character). -/
 def verdictBytes (accepted : Bool) : List (BitVec 8) :=
-  ((if accepted then "accepted\n" else "rejected\n").toUTF8.toList).map (·.toBitVec)
+  (if accepted then "accepted\n" else "rejected\n").toList.map fun c => BitVec.ofNat 8 c.toNat
 
 /-! ## The statement -/
 
