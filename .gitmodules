@@ -1,0 +1,6 @@
+[submodule "deps/flapjack"]
+	path = deps/flapjack
+	url = https://github.com/flamingoponderado/flapjack.git
+[submodule "deps/con-leche"]
+	path = deps/con-leche
+	url = https://github.com/leanprover/con-leche.git
