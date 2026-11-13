@@ -48,6 +48,8 @@ structure GCtx where
   globals : NameMap GlobalVar := {}
   globalLookup : Expr → String → MetaM Expr := fun _ n => throwError "no global {n}"
   rec? : Option RecFn := none
+  /-- Unfold singleton recursive groups in lookups (the older commands). -/
+  unfoldRec : Bool := true
 
 structure GSt where
   locals : Array GLVar := #[]
@@ -62,18 +64,28 @@ def freshCName (pfx : String := "v") : GoalM String := do
   set { s with fresh := s.fresh + 1 }
   return s!"{pfx}{s.fresh}"
 
-/-- The simp set for variable lookups. -/
-def lookupSimp : MetaM Syntax.Tactic :=
-  `(tactic| simp (config := { decide := true }) only [*, nsLookup_nsBind_short, nsOptBind, ite_true,
+/-- The simp set for variable lookups. With `unfoldRec`, singleton
+recursive groups are unfolded (`buildRecEnv`); otherwise lookups into the
+recursive group come from hypotheses in context. -/
+def lookupSimp (unfoldRec : Bool) : MetaM Syntax.Tactic :=
+  if unfoldRec then
+    `(tactic| simp (config := { decide := true }) only [*, nsLookup_nsBind_short, nsOptBind, ite_true,
       ite_false, SemEnv.v, recBodyEnv, buildRecEnv, List.foldr_cons, List.foldr_nil, clauseEnv,
       nsLookup_nsAppend_alist_short, List.zip_cons_cons, List.zip_nil_left, List.reverse_cons,
-      List.reverse_nil, List.nil_append, List.cons_append, List.lookup, beq_eq_decide_of_decEq, decide_true, decide_false])
+      List.reverse_nil, List.nil_append, List.cons_append, List.lookup, beq_eq_decide_of_decEq,
+      decide_true, decide_false])
+  else
+    `(tactic| simp (config := { decide := true }) only [*, nsLookup_nsBind_short, nsOptBind, ite_true,
+      ite_false, SemEnv.v, recBodyEnv, clauseEnv,
+      nsLookup_nsAppend_alist_short, List.zip_cons_cons, List.zip_nil_left, List.reverse_cons,
+      List.reverse_nil, List.nil_append, List.cons_append, List.lookup, beq_eq_decide_of_decEq,
+      decide_true, decide_false])
 
-def proveLookupG (env : Expr) (n : String) (v : Expr) : MetaM Expr := do
+def proveLookupG (env : Expr) (n : String) (v : Expr) (unfoldRec : Bool := true) : MetaM Expr := do
   let goal ← mkEq (← mkAppM ``nsLookup #[← mkAppM ``SemEnv.v #[env], shortIdent n])
     (← mkAppM ``Option.some #[v])
   let mvar ← mkFreshExprMVar goal
-  let remaining ← Tactic.run mvar.mvarId! (Tactic.evalTactic (← lookupSimp)) |>.run'
+  let remaining ← Tactic.run mvar.mvarId! (Tactic.evalTactic (← lookupSimp unfoldRec)) |>.run'
   unless remaining.isEmpty do
     throwError "lookup of {n} not proved"
   instantiateMVars mvar
@@ -131,7 +143,7 @@ partial def solve (g : MVarId) : GoalM Unit := do
   -- locals
   if t.isFVar then
     let some lv := st.locals.find? (·.fvar == t) | throwError "unknown local {t}"
-    let hl ← proveLookupG env lv.cname lv.value
+    let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
     assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, p, hl, lv.rel])
     return
   -- literals
@@ -228,7 +240,7 @@ partial def solveCases (g : MVarId) (env inv : Expr) (tn : Name) (dt : DatatypeI
   let some lv := st.locals.find? (·.fvar == major) | throwError "unknown scrutinee {major}"
   let some hc := ctx.hasCons.find? tn | throwError "no constructor environment for {tn}"
   let invT := mkConst (tn ++ `cakeInv)
-  let hl ← proveLookupG env lv.cname lv.value
+  let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
   let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invT major, hl, lv.rel]
   let casesFn := (← getConstInfo (tn ++ `casesOn))
   let qfun ← withLocalDeclD `x (mkConst tn) fun x => do
@@ -282,7 +294,7 @@ partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) 
   let some lv := st.locals.find? (·.fvar == major) | throwError "unknown scrutinee {major}"
   let invA ← invOf α
   let invL ← mkAppM ``LIST #[invA]
-  let hl ← proveLookupG env lv.cname lv.value
+  let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
   let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invL major, hl, lv.rel]
   let qfun ← withLocalDeclD `x listTy fun x => do
     mkLambdaFVars #[x] (mkApp inv (mkAppN fn #[α, motive, x, nilAlt, consAlt]))
@@ -453,30 +465,52 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let invA := invAy.appFn!.appFn!
       let (_, gx) ← newEvalGoal env (mkApp invA y)
       solve gx
-      let hl ← proveLookupG env r.cname r.cl
+      let hl ← proveLookupG env r.cname r.cl ctx.unfoldRec
       let clEq ← withLocalDeclD `w (mkConst ``Value) fun w => do mkLambdaFVars #[w] (← mkEq w r.cl)
       let hf ← mkAppOptM ``Eval_var #[env, shortIdent r.cname, r.cl, clEq, hl, ← mkEqRefl r.cl]
       assignProof g (← mkAppOptM ``Eval_app_ih #[none, none, invA, inv, env, none, none, r.cl, none, y,
         hf, ← instantiateMVars (mkMVar gx), ihy])
       return
   -- applications of locals and globals: peel the last argument
+  -- unit value
+  if t.isConstOf ``Unit.unit || t.isConstOf ``PUnit.unit then
+    assignProof g (← mkAppM ``Eval_unit #[env])
+    return
+  -- constants translated as thunks: `c ()`
+  if let .const c _ := fn then
+    if args.isEmpty then
+      if let some u := getUnit? (← getEnv) c then
+        if let .thunk _ _ := u.kind then
+          let some gv := ctx.globals.find? c | throwError "constant {c} not in scope"
+          let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
+          let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] fn
+          let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
+          let hx ← mkAppM ``Eval_unit #[env]
+          assignProof g (← mkAppM ``Eval_app_arrow #[hf, hx])
+          return
   -- fully applied tupled global units: call the tupled closure with a tuple
   if let .const c _ := fn then
     if let some u := getUnit? (← getEnv) c then
-      if let .recursive _ _ true := u.kind then
+      if let .function _ _ true := u.kind then
         let tupName := c ++ `cake_tupled
         let arity ← forallTelescope (← inferType fn) fun xs _ => pure xs.size
         if args.size == arity then
           let tup ← args.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) args.back!
-          let t' := mkApp (mkConst tupName) tup
-          let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
-          return ← solve g'
+          let some gv := ctx.globals.find? c | throwError "unit {c} not in scope"
+          let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
+          let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv (mkConst tupName),
+            hl, gv.cert]
+          let (``Arrow, #[_, _, invT, _]) := gv.inv.getAppFnArgs | throwError "tupled unit invariant"
+          let (_, gt) ← newEvalGoal env (mkApp invT tup)
+          solve gt
+          assignProof g (← mkAppM ``Eval_app_arrow #[hf, ← instantiateMVars (mkMVar gt)])
+          return
   if fn.isFVar || fn.isConst then
     if args.isEmpty then
       if fn.isConst then
         let .const c _ := fn | unreachable!
         let some gv := ctx.globals.find? c | throwError "constant {c} has not been translated"
-        let hl ← proveLookupG env gv.cname gv.value
+        let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
         assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv fn, hl, gv.cert])
         return
     else

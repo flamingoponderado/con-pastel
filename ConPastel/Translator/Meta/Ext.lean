@@ -28,13 +28,13 @@ end ConPastel.Translator.Meta
 namespace ConPastel.Translator.Meta
 open Lean
 
-/-- How a unit's value is bound in the program. -/
+/-- How a unit is represented: every unit is one entry `(name, param, body)`
+of the program's single recursive function group. -/
 inductive UnitKind where
-  /-- `Dlet (pvar name) exp`: the certificate is an `Eval` of `exp`. -/
-  | plain (exp : Name)
-  /-- `Dletrec [(name, param, body)]`: the certificate is an `Arrow` for the
-  recursive closure; `tupled` units take their arguments as a nested tuple. -/
-  | recursive (param : String) (body : Name) (tupled : Bool)
+  /-- A function; `tupled` units take their arguments as a nested tuple. -/
+  | function (param : String) (body : Name) (tupled : Bool)
+  /-- A constant, as a function of `()`. -/
+  | thunk (param : String) (body : Name)
   deriving Inhabited
 
 /-- A translated Lean constant. -/
@@ -43,9 +43,11 @@ structure UnitInfo where
   /-- CakeML variable the unit is bound to. -/
   cname : String
   kind : UnitKind
-  /-- The certificate theorem. Its hypotheses, in order: the environment,
-  `HasBoolCons`, one `cakeHasCons` per datatype in `datatypes`, then for
-  each dependency a value, its invariant and its lookup. -/
+  /-- The certificate theorem. Its hypotheses, in order: the closure
+  environment `envC`, the group `funs`, distinctness of its names, this unit's
+  entry (`findRecFun`), `HasBoolCons`, `HasListCons`, one `cakeHasCons` per
+  datatype in `datatypes`, the lookup of this unit in the group, then for each
+  dependency its lookup and its certificate. -/
   cert : Name
   datatypes : Array Name
   deps : Array Name
@@ -59,5 +61,8 @@ initialize unitExt : SimplePersistentEnvExtension UnitInfo (NameMap UnitInfo) â†
 
 def getUnit? (env : Environment) (n : Name) : Option UnitInfo :=
   (unitExt.getState env).find? n
+
+def unitCount (env : Environment) : Nat :=
+  (unitExt.getState env).size
 
 end ConPastel.Translator.Meta

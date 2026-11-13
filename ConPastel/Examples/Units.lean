@@ -11,9 +11,10 @@ def useBoth (x : Nat) : Nat := twice sq x + sumSq x
 def addAcc : Nat → Nat → Nat
   | 0, acc => acc
   | n + 1, acc => addAcc n (acc + sq n)
-def callAcc (x : Nat) : Nat := addAcc x 1 + 2
+def seven : Nat := 3 + 4
+def callAcc (x : Nat) : Nat := addAcc x seven + 2
 
-cake_unit sq sumSq twice useBoth addAcc callAcc
+cake_unit sq sumSq twice useBoth addAcc seven callAcc
 
 #check @useBoth.cake_cert
 #check @callAcc.cake_cert

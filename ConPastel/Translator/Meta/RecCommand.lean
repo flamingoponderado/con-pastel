@@ -126,7 +126,7 @@ partial def destructAndSolve (g : MVarId) (env invB : Expr) (f : Expr) (eqn : Na
   let (``PAIR, #[_, _, invA, invRest]) := invP.getAppFnArgs | throwError "PAIR expected"
   let xn ← freshCName "t"
   let yn ← freshCName "t"
-  let hl ← proveLookupG env lv.cname lv.value
+  let hl ← proveLookupG env lv.cname lv.value (← read).unfoldRec
   let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invP p, hl, lv.rel]
   -- continuation g a b := f pre a (projs b)
   let gfun ← withLocalDeclD `a aty fun a => withLocalDeclD `b bty fun b => do

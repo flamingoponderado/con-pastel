@@ -151,4 +151,24 @@ theorem Eval_nat_casesOn {β : Type} {B : RefInv β} {env : SemEnv Value} {en ez
     · intro v hv; simp only [INT] at hv; simp [NAT, hv]
     · intro mv hmv; exact hs m rfl mv hmv
 
+/-! ## Unit and thunks -/
+
+def UNIT : RefInv Unit := fun _ v => v = .conv none []
+
+theorem Eval_unit (env : SemEnv Value) : Eval env (.con none []) (UNIT ()) := by
+  intro σ s
+  refine ⟨.conv none [], [], ⟨0, 0, ?_⟩, rfl⟩
+  rw [Flapjack.EvaluateHOL.evaluate]
+  simp [doConCheck, buildConv, Flapjack.EvaluateHOL.evaluate]
+
+theorem findRecFun_mem {α β : Type} {n : VarN} :
+    ∀ {funs : List (VarN × α × β)} {r : α × β}, findRecFun n funs = some r → n ∈ funs.map (·.1)
+  | [], _, h => by simp [findRecFun] at h
+  | (f, x, b) :: rest, r, h => by
+    simp only [findRecFun] at h
+    by_cases hf : f = n
+    · simp [hf]
+    · simp only [hf, ite_false] at h
+      exact List.mem_cons_of_mem _ (findRecFun_mem h)
+
 end ConPastel.Translator
