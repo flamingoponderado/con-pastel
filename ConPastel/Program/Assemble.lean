@@ -1,6 +1,7 @@
 import ConPastel.Main.Proof
 import ConPastel.Semantics.Behaviour
 import ConPastel.Semantics.Init
+import Batteries.Tactic.OpenPrivate
 
 /-!
 # Whole programs
@@ -14,6 +15,7 @@ verdict on the input bytes.
 namespace ConPastel.Program
 open Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.EvaluateHOL
 open Flapjack.NamespaceHOL Flapjack.Basis.Pure.MlString ConPastel.Translator ConPastel.Main
+open private everyExpFuns from Flapjack.AstHOL.Syntax
 
 /-- Looking up a group member right after the `Dletrec`. -/
 theorem lookup_group (funs : List (VarN × VarN × Exp)) (E : SemEnv Value) (n : VarN)
@@ -88,5 +90,30 @@ theorem program_completes (funs : List (VarN × VarN × Exp)) (entryName revName
     have h0 : s.ffi.ioEvents = [] := rfl
     rw [hevents, h0, List.nil_append, writtenBytes_append, hr', List.nil_append,
       writtenBytes_singleton_write, byteNats_input]
+
+/-- Constructor arities of the initial environment. -/
+def initTable : List (ConN × Nat) := ConPastel.initCons.map fun (n, a, _) => (n, a)
+
+theorem initTable_ok : TableOk initTable ConPastel.initEnv.c := by
+  intro c n h
+  have : ∀ l : List (ConN × Nat × Stamp), (l.map fun (n, a, _) => (n, a)).lookup c = some n →
+      ∃ st, l.lookup c = some (n, st) := by
+    intro l hl
+    induction l with
+    | nil => simp at hl
+    | cons p l ih =>
+      obtain ⟨k, a, st⟩ := p
+      by_cases hk : c = k
+      · subst hk; simp [List.lookup] at hl ⊢; exact hl
+      · have hb : (c == k) = false := beq_eq_false_iff_ne.mpr hk
+        simp only [List.map_cons, List.lookup, hb] at hl ⊢
+        exact ih hl
+  obtain ⟨st, hst⟩ := this ConPastel.initCons h
+  exact ⟨st, by simpa [ConPastel.initEnv, nsLookup_bind_short] using hst⟩
+
+theorem group_conOk (funs : List (VarN × VarN × Exp)) (h : conOkFuns initTable funs = true) :
+    funs.all (fun (_, _, e) => everyExp (oneConCheck ConPastel.initEnv.c) e) = true := by
+  rw [← everyExpFuns_eq_all]
+  exact everyExpFuns_of_conOk initTable_ok funs h
 
 end ConPastel.Program

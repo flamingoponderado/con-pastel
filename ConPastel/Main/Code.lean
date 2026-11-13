@@ -54,5 +54,4 @@ end ConPastel.Main
 
 namespace ConPastel.Main
 cake_unit revApp
-#check @revApp.cake_cert
 end ConPastel.Main
