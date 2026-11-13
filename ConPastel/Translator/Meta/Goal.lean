@@ -1,5 +1,6 @@
 import Lean
 import ConPastel.Translator.Lemmas
+import ConPastel.Translator.Tuple
 import ConPastel.Translator.Meta.Core
 import ConPastel.Translator.Meta.Ext
 
@@ -34,6 +35,9 @@ structure RecFn where
   /-- The recursive closure value and its CakeML name. -/
   cl : Expr
   cname : String
+  /-- Number of curried arguments after the static ones; when more than one,
+  the recursive closure takes them as a nested tuple. -/
+  arity : Nat := 1
 
 structure GCtx where
   hbool : Expr
@@ -58,7 +62,7 @@ def freshCName (pfx : String := "v") : GoalM String := do
 
 /-- The simp set for variable lookups. -/
 def lookupSimp : MetaM Syntax.Tactic :=
-  `(tactic| simp (config := { decide := true }) only [nsLookup_nsBind_short, nsOptBind, ite_true,
+  `(tactic| simp (config := { decide := true }) only [*, nsLookup_nsBind_short, nsOptBind, ite_true,
       ite_false, SemEnv.v, recBodyEnv, buildRecEnv, List.foldr_cons, List.foldr_nil, clauseEnv,
       nsLookup_nsAppend_alist_short, List.zip_cons_cons, List.zip_nil_left, List.reverse_cons,
       List.reverse_nil, List.nil_append, List.cons_append, List.lookup, beq_eq_decide_of_decEq, decide_true, decide_false])
@@ -337,6 +341,15 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     assignProof g (← mkAppOptM ``Eval_nat_casesOn #[none, inv, env, none, cez, ces, mlString mn, n,
       args[2]!, args[3]!, ← instantiateMVars (mkMVar gn), hz, hs])
     return
+  -- pairs
+  if fn.isConstOf ``Prod.mk && args.size == 4 then
+    let (``PAIR, #[_, _, invA, invB]) := (← whnfR inv).getAppFnArgs
+      | throwError "pair without a PAIR invariant: {inv}"
+    let (_, ga) ← newEvalGoal env (mkApp invA args[2]!)
+    let (_, gb) ← newEvalGoal env (mkApp invB args[3]!)
+    solve ga; solve gb
+    assignProof g (← mkAppM ``Eval_pair #[← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)])
+    return
   -- Nat arithmetic
   match t.getAppFnArgs with
   | (``HAdd.hAdd, #[ty, _, _, _, a, b]) | (``HMul.hMul, #[ty, _, _, _, a, b]) =>
@@ -350,8 +363,10 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   | _ => pure ()
   -- recursive calls
   if let some r := ctx.rec? then
-    if fn.isConstOf r.head && args.size == r.static.size + 1 then
-      let y := args[r.static.size]!
+    if fn.isConstOf r.head && args.size == r.static.size + r.arity then
+      let ys := args[r.static.size:].toArray
+      let y ← if r.arity == 1 then pure ys[0]! else
+        ys.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) ys.back!
       -- the IH at y: ∀ yv, A y yv → AppReturns cl yv (B (f y))
       let ihTy ← whnfR (← inferType r.ih)
       let .forallE _ _ body _ := ihTy | throwError "bad IH"
