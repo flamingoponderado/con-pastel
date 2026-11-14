@@ -645,6 +645,35 @@ def translateUnitOnce (key : Expr) (extra : Array Expr) : MetaM Unit := do
   else if isFn then translateFunction key extra
   else translateThunk key extra
 
+/-- Candidate unit keys mentioned by the unfolding equations of a mutual
+block's members: applications of defined constants (not members, constructors,
+recursors or matchers) to closed static arguments. -/
+partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
+  let env ← getEnv
+  let found ← IO.mkRef (#[] : Array Expr)
+  let rec visit (e : Expr) : MetaM Unit := do
+    match e with
+    | .app .. | .const .. =>
+      if let .const c _ := e.getAppFn then
+        if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) then
+          if let some (.defnInfo _) := env.find? c then
+            if let some (k, _) ← splitKey e then
+              if !k.hasFVar && !k.hasMVar && !(← found.get).contains k then found.modify (·.push k)
+      for a in e.getAppArgs do visit a
+      unless e.getAppFn.isConst do visit e.getAppFn
+    | .lam _ ty b _ | .forallE _ ty b _ =>
+      visit ty; withLocalDeclD `x ty fun x => visit (b.instantiate1 x)
+    | .letE _ ty v b _ =>
+      visit ty; visit v; withLocalDeclD `x ty fun x => visit (b.instantiate1 x)
+    | .mdata _ e' => visit e'
+    | .proj _ _ e' => visit e'
+    | _ => pure ()
+  for c in ms do
+    if let some eqn ← getUnfoldEqnFor? c (nonRec := true) then
+      forallTelescope (← inferType (mkConst eqn)) fun _ ty => do
+        if let some (_, _, rhs) := ty.eq? then visit rhs
+  found.get
+
 /-- Translate `key`, first translating (recursively) the units it needs.
 Units needed only after unfolding (not visible in the body) are added to the
 dependencies explicitly (`extra`). -/
@@ -653,6 +682,21 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
   if (getUnit? (← getEnv) key).isSome then return
   if stack.contains key then throwError "cyclic unit dependency at {key} (mutual recursion is not supported yet)"
   if stack.length > 200 then throwError "unit dependency chain too deep at {key}"
+  -- a mutual block: translate the constants its members' equations mention first
+  -- (best effort), so the block is not restarted for every dependency it discovers
+  if extra.isEmpty then
+    if let .const c _ := key.getAppFn then
+      let ms ← mutualMembers c
+      if !ms.isEmpty then
+        let cands ← blockCandidates ms
+        for k in cands do
+          if (getUnit? (← getEnv) k).isNone && !stack.contains k && !(ms.contains k.getAppFn.constName!) then
+            let s0 ← saveState
+            try translateUnit k (key :: stack)
+            catch e =>
+              let msg ← e.toMessageData.toString
+              if (msg.splitOn "cake: need datatype").length > 1 then throw e
+              s0.restore
   let saved ← saveState
   needUnitRef.set none
   try
