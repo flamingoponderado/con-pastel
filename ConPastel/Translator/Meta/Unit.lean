@@ -651,9 +651,17 @@ recursors or matchers) to closed static arguments. -/
 partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
   let env ← getEnv
   let found ← IO.mkRef (#[] : Array Expr)
+  let seenInst ← IO.mkRef (#[] : Array Expr)
   let rec visit (e : Expr) : MetaM Unit := do
     match e with
     | .app .. | .const .. =>
+      -- class methods at instances (e.g. `bind` of `StateT σ m`): what they unfold to
+      if !e.hasLooseBVars then
+        if let some e' ← (try Meta.unfoldProjInst? e catch _ => pure none) then
+          let e' := e'.headBeta
+          if !(← seenInst.get).contains e' then
+            seenInst.modify (·.push e')
+            visit e'
       if let .const c _ := e.getAppFn then
         if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) then
           if let some (.defnInfo _) := env.find? c then
