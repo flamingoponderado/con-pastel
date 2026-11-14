@@ -517,7 +517,7 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
         return ← solve g'
     if I == ``Prod then
       -- `case s of (x, y) => x` (or `y`)
-      let sty ← whnfR (← inferType sExp)
+      let sty ← whnfD (← inferType sExp)
       let (``Prod, #[aty, bty]) := sty.getAppFnArgs | throwError "bad pair projection {t}"
       let invP ← invOf sty
       let (``PAIR, #[_, _, invA, invB]) := invP.getAppFnArgs | throwError "bad pair invariant"
@@ -546,7 +546,7 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     -- a field of a single-constructor datatype: `I.casesOn s (fun fs => f_j)` (structure eta)
     if let some (.inductInfo ii) := (← getEnv).find? I then
       if ii.ctors.length == 1 then
-        let sty ← whnfR (← inferType sExp)
+        let sty ← whnfD (← inferType sExp)
         -- the structure must be a registered datatype (else `casesOn` would be undone by structure eta)
         let _ ← invOf sty
         let .const _ lvls := sty.getAppFn | throwError "bad projection {t}"
@@ -851,14 +851,14 @@ partial def isSupportedCases (e : Expr) : MetaM Bool := do
   let args := e.getAppArgs
   unless args.size == ii.numParams + 1 + 1 + ii.ctors.length do return false
   let major := args[ii.numParams + 1]!
-  let τ ← whnfR (← inferType major)
+  let τ ← whnfD (← inferType major)
   if (← findDatatype? τ).isSome then return true
   return (← newtypeInfo? τ).isSome
 
 /-- `T.casesOn` for the type of `d`, with a non-dependent motive returning `R`,
 whose branches are `branch (C fields)`. -/
 partial def mkCasesOn (d R : Expr) (branch : Expr → MetaM Expr) : MetaM Expr := do
-  let τ ← whnfR (← inferType d)
+  let τ ← whnfD (← inferType d)
   let .const I lvls := τ.getAppFn | throwError "cannot case split on {d} : {τ}"
   let some (.inductInfo ii) := (← getEnv).find? I | throwError "cannot case split on {d} : {τ}"
   let params := τ.getAppArgs
@@ -996,7 +996,7 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let R ← inferType t
   for i in [0:discrs.size] do
     let d := discrs[i]!
-    let τ ← whnfR (← inferType d)
+    let τ ← whnfD (← inferType d)
     let .const I _ := τ.getAppFn | continue
     let some (.inductInfo _) := (← getEnv).find? I | continue
     -- a constructor application is already split
@@ -1271,7 +1271,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         -- structure eta: `S.casesOn s f = f s.1 … s.n` for any non-recursive structure
         if ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec && args.size ≥ ii.numParams + 3 then
           let major := args[ii.numParams + 1]!
-          let mty ← whnfR (← inferType major)
+          let mty ← whnfD (← inferType major)
           -- registered datatypes have their own `casesOn` (and projections become `casesOn`)
           if !(← isProp (← inferType major)) && (mty.hasFVar || (← findDatatype? mty).isNone) then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
