@@ -93,7 +93,8 @@ def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (b
 
 /-- Finish a unit: name the body, state and check the certificate, register. -/
 def finishUnit (key : Expr) (uname : Name) (cname : String) (kind : UnitKind) (deps : Array Expr)
-    (body : Expr) (hyps : Array Expr) (envC funs : Expr) (pf : Expr) (target inv : Expr) : MetaM Unit := do
+    (body : Expr) (hyps : Array Expr) (envC funs : Expr) (pf : Expr) (target inv : Expr)
+    (peers : Array Name := #[]) : MetaM Unit := do
   let bodyI ← instantiateMVars body
   let bodyName := uname ++ `body
   addDecl (Declaration.defnDecl (mkDefinitionValEx bodyName [] (mkConst ``Exp) bodyI .abbrev .safe []))
@@ -115,7 +116,7 @@ def finishUnit (key : Expr) (uname : Name) (cname : String) (kind : UnitKind) (d
     let some du := getUnit? (← getEnv) d | throwError "dependency {d} of {key} is not a unit"
     pure du.name
   let datatypes ← datatypeNames
-  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes, deps, assumes, depNames }
+  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes, deps, assumes, depNames, peers }
 
 /-- The body environment of a group entry. -/
 def bodyEnv (envC funs : Expr) (param : String) (xv : Expr) : MetaM Expr :=
@@ -353,6 +354,222 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
       else mkAppOptM ``arrow_of_wf #[τ, resTy0, invT, invBf.bindingBody!, r, hwf, ft, cl, pfH]
     finishUnit key uname cname (.function param (uname ++ `body) tupled) deps body hyps envC funs pf ft inv
 
+/-- The members of `c`'s well-founded mutual block (`#[]` if not mutual). -/
+def mutualMembers (c : Name) : MetaM (Array Name) := do
+  match Lean.Elab.WF.eqnInfoExt.find? (← getEnv) c with
+  | some info => return if info.declNames.size > 1 then info.declNames else #[]
+  | none => return #[]
+
+/-- The hypotheses of a mutual block's certificates: for every member its
+entry (`hfind`) and lookup (`hself`), then the common ones. `k` gets `envC`,
+`funs`, `hnodup`, the entries, the lookups, the common hypotheses
+(`hbool hlist hcs…`), the assumptions, the dependency hypotheses and the context. -/
+def withBlockHyps {α : Type} [Inhabited α] (members : Array (String × String × Expr)) (deps : Array Expr)
+    (k : Expr → Expr → Expr → Array Expr → Array Expr → Array Expr → Array Expr → Array Expr → GCtx → MetaM α) :
+    MetaM α := do
+  withLocalDeclD `envC (mkApp (mkConst ``SemEnv) (mkConst ``Value)) fun envC => do
+  let fty ← funTy
+  withLocalDeclD `funs (← mkAppM ``List #[fty]) fun funs => do
+  let nodupTy ← mkAppM ``List.Nodup #[← mkAppM ``List.map #[← withLocalDeclD `p fty fun p => do
+    mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p]), funs]]
+  withLocalDeclD `hnodup nodupTy fun hnodup => do
+  let findTys ← members.mapM fun (self, param, body) => do
+    mkEq (← mkAppM ``findRecFun #[mlString self, funs]) (← mkAppM ``Option.some #[← mkAppM ``Prod.mk #[mlString param, body]])
+  withLocalDeclsDND (findTys.map (`hfind, ·)) fun hfinds => do
+  let envCc ← mkAppM ``SemEnv.c #[envC]
+  withLocalDeclD `hbool (← mkAppM ``HasBoolCons #[envCc]) fun hbool => do
+  withLocalDeclD `hlist (← mkAppM ``HasListCons #[envCc]) fun hlist => do
+  let dts := (datatypeExt.getState (← getEnv)).toList.map (·.1)
+  withLocalDeclsDND (dts.toArray.map fun T => (`hc, mkApp (mkConst (T ++ `cakeHasCons)) envCc)) fun hcs => do
+  let hasCons : NameMap Expr := (dts.zip hcs.toList).foldl (fun m (T, h) => m.insert T h) {}
+  let selfTys ← members.mapM fun (self, _, _) => groupLookupTy envC funs self
+  withLocalDeclsDND (selfTys.map (`hself, ·)) fun hselfs => do
+  let reps := assumeReplaceExt.getState (← getEnv)
+  withLocalDeclsDND (reps.map fun (_, _, P) => (`ha, P)) fun has => do
+  let assumed := (reps.zip has).map fun ((k, r, _), h) => (k, r, h)
+  let rec go : List Expr → Array Expr → Std.HashMap Expr GlobalVar → MetaM α
+    | [], acc, globals =>
+      k envC funs hnodup hfinds hselfs (#[hbool, hlist] ++ hcs) has acc
+        { hbool, hlist, hasCons, globals, unfoldRec := false, assumed }
+    | d :: ds, acc, globals => do
+      let some u := getUnit? (← getEnv) d | throwError "unit {d} missing"
+      let (tgt, inv) ← unitTarget u
+      let value ← mkAppM ``Value.recclosure #[envC, funs, mlString u.cname]
+      withLocalDeclD `hl (← groupLookupTy envC funs u.cname) fun hl => do
+      withLocalDeclD `hv (mkApp2 inv tgt value) fun hv => do
+        go ds (acc ++ #[hl, hv]) (globals.insert d { cname := u.cname, value, inv, cert := hv })
+  go deps.toList #[] {}
+
+/-- Case analysis on a nested sum `τ₀ ⊕' (τ₁ ⊕' …)` with a non-dependent result:
+`alt i t` for the `i`-th summand. -/
+partial def sumCasesND (tys : List Expr) (res : Expr) (alt : Nat → Expr → MetaM Expr) (s : Expr) (i : Nat := 0) :
+    MetaM Expr := do
+  match tys with
+  | [] => throwError "empty sum"
+  | [_] => alt i s
+  | τ :: rest =>
+    let restTy ← sumTy rest
+    let motive ← withLocalDeclD `x (← mkAppM ``PSum #[τ, restTy]) fun x => mkLambdaFVars #[x] res
+    let l ← withLocalDeclD `t τ fun t => do mkLambdaFVars #[t] (← alt i t)
+    let r ← withLocalDeclD `s restTy fun s' => do mkLambdaFVars #[s'] (← sumCasesND rest res alt s' (i + 1))
+    mkAppOptM ``PSum.casesOn #[τ, restTy, motive, s, l, r]
+where
+  sumTy : List Expr → MetaM Expr
+    | [] => throwError "empty sum"
+    | [τ] => pure τ
+    | τ :: rest => do mkAppM ``PSum #[τ, ← sumTy rest]
+
+/-- The nested sum type `τ₀ ⊕' (τ₁ ⊕' …)`. -/
+def sumTyOf (tys : List Expr) : MetaM Expr := sumCasesND.sumTy tys
+
+/-- The injection of the `i`-th summand. -/
+partial def sumInj (tys : List Expr) (i : Nat) (t : Expr) : MetaM Expr := do
+  match tys, i with
+  | [_], _ => pure t
+  | τ :: rest, 0 => mkAppOptM ``PSum.inl #[τ, ← sumTyOf rest, t]
+  | τ :: rest, i + 1 => mkAppOptM ``PSum.inr #[τ, ← sumTyOf rest, ← sumInj rest i t]
+  | [], _ => throwError "empty sum"
+
+/-- Dependent case analysis for the joint induction step: for the `i`-th
+summand, `alt i t ih` proves `C (ctx (inj t))` from the induction hypothesis at
+`ctx (inj t)`; the result proves `(∀ y, r y s → Pred y) → Pred s`. -/
+partial def sumCasesStep (tys : List Expr) (C : Expr → MetaM Expr) (ihTyAt : Expr → MetaM Expr)
+    (ctx : Expr → MetaM Expr) (alt : Nat → Expr → Expr → MetaM Expr) (s : Expr) (i : Nat := 0) : MetaM Expr := do
+  match tys with
+  | [] => throwError "empty sum"
+  | [τ] =>
+    let _ := τ
+    withLocalDeclD `ih (← ihTyAt (← ctx s)) fun ih => do mkLambdaFVars #[ih] (← alt i s ih)
+  | τ :: rest =>
+    let restTy ← sumTyOf rest
+    let sty ← mkAppM ``PSum #[τ, restTy]
+    let motive ← withLocalDeclD `x sty fun x => do
+      let cx ← ctx x
+      mkLambdaFVars #[x] (← mkArrow (← ihTyAt cx) (← C cx))
+    let l ← withLocalDeclD `t τ fun t => do
+      let ct ← ctx (← mkAppOptM ``PSum.inl #[τ, restTy, t])
+      withLocalDeclD `ih (← ihTyAt ct) fun ih => do mkLambdaFVars #[t, ih] (← alt i t ih)
+    let ctx' (x : Expr) : MetaM Expr := do ctx (← mkAppOptM ``PSum.inr #[τ, restTy, x])
+    let r ← withLocalDeclD `s restTy fun s' => do
+      mkLambdaFVars #[s'] (← sumCasesStep rest C ihTyAt ctx' alt s' (i + 1))
+    mkAppOptM ``PSum.casesOn #[τ, sty.appArg!, motive, s, l, r]
+
+/-- A well-founded mutual block: all members translated together, by one
+well-founded induction over the sum of their argument tuples. -/
+def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := do
+  for m in members do
+    unless (← getConstInfo m).levelParams.isEmpty do throwError "mutual block member {m} is universe polymorphic"
+  let keys := members.map (mkConst ·)
+  -- equations and dependencies
+  let eqns ← members.mapM fun c => do
+    let some e ← getUnfoldEqnFor? c (nonRec := true) | throwError "no unfold equation for {c}"
+    pure e
+  let mut deps := extra
+  for i in [0:members.size] do
+    let ds ← forallTelescope (← inferType keys[i]!) fun xs _ => do
+      unitDepsOf keys[i]! (← inferType (mkAppN (mkConst eqns[i]!) xs))
+    deps := mergeDeps ds deps
+  deps := deps.filter fun d => !keys.contains d
+  -- per member: arity, tuple type, result type, invariants, names
+  let k0 := unitCount (← getEnv)
+  let mut infos : Array (Nat × Expr × Expr × Name × String) := #[]
+  for i in [0:members.size] do
+    let (n, tys, resTy) ← forallTelescope (← inferType keys[i]!) fun xs resTy => do
+      let tys ← xs.mapM inferType
+      if tys.any (·.hasFVar) || resTy.hasFVar then
+        throwError "{members[i]!}: dependent types in a mutual block are not supported yet"
+      return (xs.size, tys, resTy)
+    let τ ← tupleTy tys.toList
+    let env ← getEnv
+    let (uname, cname) := match cakeTagExt.getState env with
+      | some t => (Name.mkStr (unitNamespace env) s!"u{k0 + i}", s!"%{t}.{k0 + i}")
+      | none => (Name.mkStr `ConPastel.Cake s!"u{k0 + i}", s!"%{k0 + i}")
+    infos := infos.push (n, τ, resTy, uname, cname)
+  let taus := infos.toList.map (·.2.1)
+  let S ← sumTyOf taus
+  let param := "p"
+  -- tupled functions and invariants
+  let mut fts : Array Expr := #[]
+  let mut invTs : Array Expr := #[]
+  let mut invBs : Array Expr := #[]
+  for i in [0:members.size] do
+    let (n, τ, resTy, uname, _) := infos[i]!
+    invTs := invTs.push (← invOf τ)
+    invBs := invBs.push (← invOf resTy)
+    if n > 1 then
+      let tupName := uname ++ `tupled
+      let tupVal ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (mkAppN keys[i]! (← tupleProjs p n).toArray)
+      addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
+      fts := fts.push (mkConst tupName)
+    else fts := fts.push keys[i]!
+  -- the joint measure: each member's measure in Lean's `_mutual` definition
+  let M ← withLocalDeclD `s S fun s => do
+    let body ← sumCasesND taus (mkConst ``Nat) (fun i t => do
+      let (n, _, _, _, _) := infos[i]!
+      let v := (mkAppN (← keyValue keys[i]!) (← tupleProjs t n).toArray).headBeta
+      let some (_, packed, _, _, m, _) ← wfParts members[i]! v
+        | throwError "{members[i]!}: unexpected well-founded definition shape {v}"
+      pure (m.beta #[packed]).headBeta) s
+    mkLambdaFVars #[s] body
+  let wfr ← mkAppOptM ``measure #[S, M]
+  let r ← mkAppOptM ``WellFoundedRelation.rel #[S, wfr]
+  let hwf ← mkAppOptM ``WellFoundedRelation.wf #[S, wfr]
+  let bodies ← members.mapM fun _ => mkFreshExprMVar (mkConst ``Exp)
+  let memberSpecs := (List.range members.size).toArray.map fun i => (infos[i]!.2.2.2.2, param, bodies[i]!)
+  withBlockHyps memberSpecs deps fun envC funs hnodup hfinds hselfs common has depHyps gctx₀ => do
+    let cls ← infos.mapM fun (_, _, _, _, cname) => mkAppM ``Value.recclosure #[envC, funs, mlString cname]
+    -- the member statements and the joint predicate
+    let P (i : Nat) (t : Expr) : MetaM Expr := do
+      withLocalDeclD `v (mkConst ``Value) fun v => do
+        mkForallFVars #[v] (← mkArrow (mkApp2 invTs[i]! t v)
+          (← mkAppM ``AppReturns #[cls[i]!, v, mkApp invBs[i]! (mkApp fts[i]! t)]))
+    let Pred ← withLocalDeclD `s S fun s => do mkLambdaFVars #[s] (← sumCasesND taus (mkSort .zero) P s)
+    let PredAt (x : Expr) : MetaM Expr := pure (Pred.beta #[x]).headBeta
+    let ihTyAt (x : Expr) : MetaM Expr := withLocalDeclD `y S fun y => do
+      mkForallFVars #[y] (← mkArrow (mkApp2 r y x) (← PredAt y))
+    let bms : Array BlockMember ← (List.range members.size).toArray.mapM fun i => do
+      let inj ← withLocalDeclD `t infos[i]!.2.1 fun t => do mkLambdaFVars #[t] (← sumInj taus i t)
+      pure { head := members[i]!, arity := infos[i]!.1, cl := cls[i]!, cname := infos[i]!.2.2.2.2, inj,
+             invT := invTs[i]!, invB := invBs[i]!, ft := fts[i]! }
+    -- the induction step, by cases on the summand
+    let step ← withLocalDeclD `s S fun s => do
+      let pf ← sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do
+        let (n, _, _, _, cname) := infos[i]!
+        let _ := cname
+        withLocalDeclD `pv (mkConst ``Value) fun pv => do
+        withLocalDeclD `hp (mkApp2 invTs[i]! p pv) fun hp => do
+          let env ← bodyEnv envC funs param pv
+          let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, bodies[i]!, mkApp invBs[i]! (mkApp fts[i]! p)])
+          let mr : MutRec := { members := bms, ih, s := ← sumInj taus i p, r }
+          let gctx := { gctx₀ with mrec? := some mr }
+          let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
+          let eqnApp (as : Array Expr) : MetaM Expr := pure (mkAppN (mkConst eqns[i]!) as)
+          let _ ← (destructAndSolve g.mvarId! env (fun _ => pure invBs[i]!) keys[i]! eqnApp #[] p n).run gst |>.run gctx
+          let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname,
+            mlString param, bodies[i]!, pv, mkApp invBs[i]! (mkApp fts[i]! p), hnodup, hfinds[i]!, g]
+          mkLambdaFVars #[pv, hp] app) s
+      mkLambdaFVars #[s] pf
+    let joint ← withLocalDeclD `s S fun s => do
+      mkLambdaFVars #[s] (← withTransparency .all <| mkAppOptM ``WellFounded.induction #[S, r, hwf, Pred, s, step])
+    -- the joint theorem over all hypotheses
+    let allHyps := #[envC, funs, hnodup] ++ hfinds ++ common ++ hselfs ++ has ++ depHyps
+    let jointName := infos[0]!.2.2.2.1 ++ `joint
+    let jointPf ← instantiateMVars (← mkLambdaFVars allHyps joint)
+    let jointTy ← instantiateMVars (← inferType jointPf)
+    addDecl (Declaration.thmDecl (mkTheoremValEx jointName [] jointTy jointPf []))
+    let jointApp := mkAppN (mkConst jointName) allHyps
+    -- each member's certificate: the joint theorem at its injection
+    let peerNames := infos.map (·.2.2.2.1)
+    for i in [0:members.size] do
+      let (n, τ, _, uname, cname) := infos[i]!
+      let pf ← withLocalDeclD `t τ fun t => do mkLambdaFVars #[t] (mkApp jointApp (← sumInj taus i t))
+      let peerHyps := ((List.range members.size).filter (· != i)).foldl (fun acc j => acc ++ #[hfinds[j]!, hselfs[j]!]) #[]
+      let hyps := #[envC, funs, hnodup, hfinds[i]!] ++ common ++ #[hselfs[i]!] ++ has ++ peerHyps ++ depHyps
+      let inv ← mkAppM ``Arrow #[invTs[i]!, invBs[i]!]
+      let peers := peerNames.filter (· != uname)
+      finishUnit keys[i]! uname cname (.function param (uname ++ `body) (n > 1)) deps bodies[i]! hyps envC funs pf
+        fts[i]! inv peers
+
 /-- Is `c` defined by recursion (structural or well-founded)? -/
 def isRecursiveDef (c : Name) : MetaM Bool := do
   let env ← getEnv
@@ -362,6 +579,10 @@ def translateUnitOnce (key : Expr) (extra : Array Expr) : MetaM Unit := do
   if (getUnit? (← getEnv) key).isSome then return
   let .const c _ := key.getAppFn | throwError "unit key {key} is not a constant application"
   let isFn : Bool ← forallTelescope (← inferType key) fun xs _ => pure (decide (xs.size > 0))
+  let ms ← mutualMembers c
+  if !ms.isEmpty then
+    unless key.getAppArgs.isEmpty do throwError "mutual block with static arguments is not supported yet: {key}"
+    return ← translateMutual ms extra
   if ← isRecursiveDef c then
     -- the unfolding equation first; for well-founded definitions whose recursive
     -- calls we cannot prove decreasing, the functional (with Lean's own proofs)

@@ -50,6 +50,28 @@ structure RecFn where
   argument tuple, and the tupled function. -/
   dep? : Option (Expr × Expr) := none
 
+/-- A member of a mutual block being translated. -/
+structure BlockMember where
+  head : Name
+  arity : Nat
+  /-- The recursive closure value and its CakeML name. -/
+  cl : Expr
+  cname : String
+  /-- The injection of the member's argument tuple into the block's sum type. -/
+  inj : Expr
+  /-- Argument and result invariants, and the tupled function. -/
+  invT : Expr
+  invB : Expr
+  ft : Expr
+
+/-- The mutual block being translated: the joint induction hypothesis
+`∀ s', r s' s → Pred s'` at the current sum value `s`. -/
+structure MutRec where
+  members : Array BlockMember
+  ih : Expr
+  s : Expr
+  r : Expr
+
 structure GCtx where
   hbool : Expr
   /-- Proof of `HasListCons env.c`. -/
@@ -63,6 +85,8 @@ structure GCtx where
   unfoldRec : Bool := true
   /-- Runtime-assumption replacements in scope: `(K, K', hypothesis)`. -/
   assumed : Array (Name × Name × Expr) := #[]
+  /-- The mutual block being translated, if any. -/
+  mrec? : Option MutRec := none
 
 structure GSt where
   locals : Array GLVar := #[]
@@ -1309,6 +1333,26 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         return .continue)
       decHintRef.set (some args[5]!)
       return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
+  -- calls to members of the mutual block: the joint induction hypothesis at `inj_j y`
+  if let some mr := ctx.mrec? then
+    if let .const cn _ := fn then
+      if let some m := mr.members.find? (·.head == cn) then
+        if args.size == m.arity then
+          let y ← if m.arity == 1 then pure args[0]! else
+            args.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) args.back!
+          let q := (m.inj.beta #[y]).headBeta
+          let relTy := mkApp2 mr.r q mr.s
+          let hdec ← try closeWith relTy (← `(tactic| (subst_vars; (try simp only [WellFoundedRelation.rel, measure, InvImage, invImage, Nat.lt_wfRel] at *); (try dsimp only at *); first | omega | decreasing_tactic | (simp_wf; omega))))
+            catch _ => throwError "cannot prove the mutual call decreases: {← whnfR relTy}"
+          let ihq := mkApp2 mr.ih q hdec
+          let (_, gx) ← newEvalGoal env (mkApp m.invT y)
+          solve gx
+          let hl ← proveLookupG env m.cname m.cl ctx.unfoldRec
+          let clEq ← withLocalDeclD `w (mkConst ``Value) fun w => do mkLambdaFVars #[w] (← mkEq w m.cl)
+          let hf ← mkAppOptM ``Eval_var #[env, shortIdent m.cname, m.cl, clEq, hl, ← mkEqRefl m.cl]
+          assignProof g (← mkAppOptM ``Eval_app_ih #[none, none, m.invT, m.invB, env, none, none, m.cl, m.ft, y,
+            hf, ← instantiateMVars (mkMVar gx), ihq])
+          return
   -- recursive calls
   if let some r := ctx.rec? then
     if fn.isConstOf r.head && args.size == r.static.size + r.arity &&

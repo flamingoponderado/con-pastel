@@ -91,19 +91,24 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   withLocalDeclD `h (mkConst ``ConPastel.RuntimeAssumptions) fun hrt => do
   let mut certs : Std.HashMap Name Expr := {}
   let mut lookups : Std.HashMap Name Expr := {}
+  let mut finds : Std.HashMap Name Expr := {}
+  -- lookups and entries first (mutual blocks use their peers')
   for u in us do
     let tag := u.cname.drop 1
     let lk ← closeWith (← groupLookupTy envC funs u.cname)
       (← `(tactic| exact ConPastel.Translator.nsLookup_buildRecEnv (by decide)))
     addThm (P ++ Name.mkSimple s!"lookup_{tag}") lk
-    let lkC := mkConst (P ++ Name.mkSimple s!"lookup_{tag}")
-    lookups := lookups.insert u.name lkC
+    lookups := lookups.insert u.name (mkConst (P ++ Name.mkSimple s!"lookup_{tag}"))
     let (param, body) := match u.kind with
       | .function p b _ => (p, b)
       | .thunk p b => (p, b)
     let findTy ← mkEq (← mkAppM ``findRecFun #[mlString u.cname, funs])
       (← mkAppM ``Option.some #[← mkAppM ``Prod.mk #[mlString param, mkConst body]])
-    let hfind ← closeWith findTy (← `(tactic| rfl))
+    finds := finds.insert u.name (← closeWith findTy (← `(tactic| rfl)))
+  for u in us do
+    let tag := u.cname.drop 1
+    let some lkC := lookups.get? u.name | unreachable!
+    let some hfind := finds.get? u.name | unreachable!
     let hcs ← u.datatypes.mapM fun T => do
       let nm := mkIdent (T ++ `cakeHasCons)
       closeWith (mkApp (mkConst (T ++ `cakeHasCons)) envCc) (← `(tactic| (unfold $nm:ident; decide)))
@@ -113,6 +118,10 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
       let i3 := mkIdent `h.stringHash
       closeWith a (← `(tactic| first | exact $i1:ident | exact $i2:ident | exact $i3:ident))
     let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC] ++ has
+    for p in u.peers do
+      let some pf := finds.get? p | throwError "peer {p} of {u.key} not assembled"
+      let some pl := lookups.get? p | throwError "peer {p} of {u.key} not assembled"
+      args := args ++ #[pf, pl]
     for d in depNamesOf env u do
       let some dl := lookups.get? d | throwError "dependency {d} of {u.key} not assembled"
       let some dc := certs.get? d | throwError "dependency {d} of {u.key} not assembled"

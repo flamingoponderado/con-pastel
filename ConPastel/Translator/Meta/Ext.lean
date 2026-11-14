@@ -102,6 +102,9 @@ structure UnitInfo where
   /-- The units (by name) whose certificates discharge the dependencies, in
   the order of `deps` (a key may be translated in several modules). -/
   depNames : Array Name := #[]
+  /-- The other members of this unit's mutual block (their entries and
+  lookups are hypotheses of the certificate, after the assumptions). -/
+  peers : Array Name := #[]
   deriving Inhabited
 
 /-- Units by key (for translation) and all units (for assembly; a key may have
