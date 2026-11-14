@@ -767,6 +767,14 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
   let args := t.getAppArgs
+  -- under-applied constructors (constructors as function values): eta-expand
+  if let .const cn _ := fn then
+    if let some (.ctorInfo ci) := (← getEnv).find? cn then
+      if args.size ≥ ci.numParams && args.size < ci.numParams + ci.numFields then
+        let t' ← forallTelescope (← inferType t) fun xs _ => do
+          let xs := xs[:ci.numParams + ci.numFields - args.size].toArray
+          mkLambdaFVars xs (mkAppN t xs)
+        return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- registered replacements `K xs = K' xs`
   if let .const c [] := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
