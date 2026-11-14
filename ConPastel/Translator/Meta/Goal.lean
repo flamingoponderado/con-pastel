@@ -39,6 +39,13 @@ structure RecFn where
   /-- Number of curried arguments after the static ones; when more than one,
   the recursive closure takes them as a nested tuple. -/
   arity : Nat := 1
+  /-- Well-founded functions translated from their functional: where each data
+  argument comes from in `c._unary fixed ⟨packed…⟩` (`(true, k)`: fixed
+  argument `k`; `(false, k)`: packed component `k`) and the number of packed
+  components. -/
+  argSrc : Array (Bool × Nat) := #[]
+  nPacked : Nat := 0
+  lvls : List Level := []
 
 structure GCtx where
   hbool : Expr
@@ -62,6 +69,16 @@ abbrev GoalM := StateRefT GSt (ReaderT GCtx MetaM)
 def needUnitTag : String := "cake: need unit "
 
 initialize needUnitRef : IO.Ref (Option Expr) ← IO.mkRef none
+
+/-- Lean's own decreasing proof for the recursive call being translated. -/
+initialize decHintRef : IO.Ref (Option Expr) ← IO.mkRef none
+
+/-- The `n` components of a packed (`PSigma`) argument tuple. -/
+partial def psigmaComps (e : Expr) (n : Nat) : Array Expr :=
+  if n ≤ 1 then #[e] else
+  match e.consumeMData.getAppFnArgs with
+  | (``PSigma.mk, #[_, _, a, b]) => #[a] ++ psigmaComps b (n - 1)
+  | _ => #[Expr.proj ``PSigma 0 e] ++ psigmaComps (Expr.proj ``PSigma 1 e) (n - 1)
 
 def throwNeedUnit {α : Type} (key : Expr) : MetaM α := do
   needUnitRef.set (some key)
@@ -321,6 +338,8 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     return
   match t with
   | .proj I j sExp =>
+    if let some v ← Meta.projectCore? sExp.consumeMData j then
+      return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv v]))
     if let some (I', j', _) ← newtypeInfo? (← inferType sExp) then
       if I' == I && j' == j then
         let invS ← invOf (← inferType sExp)
@@ -377,6 +396,15 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
 partial def solveLet (g : MVarId) (env inv : Expr) (n : Name) (ty v b : Expr) : GoalM Unit := do
   -- lets of propositions, proofs and types have no runtime content: substitute
   if (← isProp ty) || (← whnfD ty).isSort then
+    let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
+    return ← solve g'
+  -- a body that only typechecks with the definition unfolded (proofs about the
+  -- bound value, e.g. Lean's own decreasing proofs): substitute
+  let opaqueOk ← withLocalDeclD n ty fun x => do
+    try Meta.check (b.instantiate1 x); pure true catch _ => pure false
+  unless opaqueOk do
+    if n == `z then
+      throwError "a match with an equation hypothesis on a non-variable discriminant is not supported: {b.instantiate1 v}"
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
     return ← solve g'
   let cname ← freshCName
@@ -738,6 +766,20 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
   let args := t.getAppArgs
+  -- registered replacements `K xs = K' xs`
+  if let .const c [] := fn then
+    if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
+      let n ← forallTelescope (← inferType (mkConst thm)) fun xs _ => pure xs.size
+      if args.size == n then
+        let heq := mkAppN (mkConst thm) args
+        let t' := mkAppN (mkConst rc) args
+        let ce ← evalGoalCe g
+        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+        solve gb.mvarId!
+        let motive ← withLocalDeclD `x (← inferType t) fun x => do
+          mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+        g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+        return
   -- matchers and sparse casesOn auxiliaries
   if let .const fnName _ := fn then
     if (← Meta.isMatcher fnName) then
@@ -1000,6 +1042,16 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       assignProof g (← mkAppM lem #[← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)])
       return
   | _ => pure ()
+  -- a recursive call in a well-founded functional: the call, with Lean's decreasing proof
+  if let some r := ctx.rec? then
+    if fn.isConstOf ``recCall && args.size == 6 then
+      let _ := r
+      let t' ← Meta.transform (args[3]!.beta #[args[4]!]).headBeta (post := fun x => do
+        if let .proj _ i sv := x then
+          if let some v ← Meta.projectCore? sv.consumeMData i then return .done v
+        return .continue)
+      decHintRef.set (some args[5]!)
+      return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- recursive calls
   if let some r := ctx.rec? then
     if fn.isConstOf r.head && args.size == r.static.size + r.arity &&
@@ -1011,7 +1063,19 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let ihTy ← whnfR (← inferType r.ih)
       let .forallE _ _ body _ := ihTy | throwError "bad IH"
       let .forallE _ relTy _ _ := body.instantiate1 y | throwError "bad IH"
-      let hdec ← try closeWith relTy (← `(tactic| first
+      let hint ← decHintRef.get
+      decHintRef.set none
+      let hinted ← match hint with
+        | none => pure none
+        | some h => do
+          let hty ← inferType h
+          if ← isDefEq hty relTy then pure (some h) else
+          try
+            let imp ← closeWith (← mkArrow hty relTy) (← `(tactic| (intro hh; subst_vars; exact hh)))
+            pure (some (mkApp imp h))
+          catch _ => pure none
+      let hdec ← if let some h := hinted then pure h else
+        try closeWith relTy (← `(tactic| first
           | decreasing_tactic
           | (simp_wf; omega)
           | (simp only [InvImage, Nat.lt_eq] at *; omega)

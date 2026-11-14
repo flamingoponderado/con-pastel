@@ -32,6 +32,15 @@ def getDatatypeByType? (env : Environment) (ty : Expr) : Option DatatypeInfo :=
 def nextStamp (env : Environment) : Nat :=
   2 + (datatypeExt.getState env).size
 
+/-- Replacements `K ↦ (K', thm)` with `thm : ∀ xs, K xs = K' xs`: the
+translator translates `K' xs` for `K xs` (for library functions whose own
+definitions do not translate, e.g. recursion with proof parameters). -/
+initialize replaceExt : SimplePersistentEnvExtension (Name × Name × Name) (NameMap (Name × Name)) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, r, t) => m.insert k (r, t)
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, r, t) => m.insert k (r, t)) m) {}
+  }
+
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 

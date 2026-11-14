@@ -1,4 +1,4 @@
-import ConPastel.Translator.Prims
+import ConPastel.Translator.Replace
 import ConPastel.Translator.Meta.Datatype
 
 /-!

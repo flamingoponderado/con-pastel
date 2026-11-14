@@ -195,34 +195,73 @@ def translateThunk (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
         mkLambdaFVars #[x, xv, hx] app
     finishUnit key uname cname (.thunk param (uname ++ `body)) deps body hyps envC funs pf target inv
 
+/-- The parts of a well-founded definition's unfolding `v` (its value applied
+to the arguments): `c._unary fixed packed` or (one varying argument)
+`WellFounded.Nat.fix … packed`. Returns `(fixed, packed, α, motive, measure, F)`. -/
+def wfParts (c : Name) (v : Expr) : MetaM (Option (Array Expr × Expr × Expr × Expr × Expr × Expr)) := do
+  let some info := Lean.Elab.WF.eqnInfoExt.find? (← getEnv) c | return none
+  if let .const un ulvls := v.getAppFn then
+    if un == info.declNameNonRec then
+      let fixed := v.getAppArgs.pop
+      let u := (mkAppN (← instantiateValueLevelParams (← getConstInfo un) ulvls) fixed).headBeta
+      let (``WellFounded.Nat.fix, #[α, motive, m, F]) := u.getAppFnArgs | return none
+      return some (fixed, v.getAppArgs.back!, α, motive, m, F)
+  if let (``WellFounded.Nat.fix, #[α, motive, m, F, x]) := v.getAppFnArgs then
+    return some (#[], x, α, motive, m, F)
+  return none
+
 /-- The termination measure of a recursive unit, as a function of the tuple of
 its arguments: `sizeOf` of the structural argument, or the measure of a
 `termination_by` definition (`WellFounded.Nat.fix` in its `_unary` form). -/
 def recursionMeasure (key : Expr) (c : Name) (static : Array Expr) (n : Nat) (τ : Expr) : MetaM Expr := do
   let env ← getEnv
-  if let some info := Lean.Elab.WF.eqnInfoExt.find? env c then
+  if (Lean.Elab.WF.eqnInfoExt.find? env c).isSome then
     withLocalDeclD `p τ fun p => do
       let projs ← tupleProjs p n
-      -- `c`'s value applied to the arguments is `c._unary fixed… packed`
       let v := (mkAppN (← keyValue key) projs.toArray).headBeta
-      let .const un ulvls := v.getAppFn | throwError "{c}: unexpected WF definition shape {v}"
-      unless un == info.declNameNonRec do throwError "{c}: unexpected WF definition shape {v}"
-      let uargs := v.getAppArgs
-      let fixed := uargs.pop
-      let packed := uargs.back!
-      let uci ← getConstInfo un
-      let u := (mkAppN (← instantiateValueLevelParams uci ulvls) fixed).headBeta
-      match u.getAppFnArgs with
-      | (``WellFounded.Nat.fix, args) =>
-        -- `WellFounded.Nat.fix {α} {motive} (measure) (F) …`
-        let m := args[2]!
-        mkLambdaFVars #[p] (m.beta #[packed]).headBeta
-      | _ => throwError "{c}: well-founded recursion via {u.getAppFn} is not supported yet"
+      let some (_, packed, _, _, m, _) ← wfParts c v
+        | throwError "{c}: well-founded recursion of this shape is not supported yet: {v}"
+      mkLambdaFVars #[p] (m.beta #[packed]).headBeta
   else
     let some k ← structRecArg? c | throwError "{c}: no recursion information"
     withLocalDeclD `p τ fun p => do
       let comp := (← tupleProjs p n)[k - static.size]!
       mkLambdaFVars #[p] (← mkAppM ``SizeOf.sizeOf #[comp])
+
+/-- For a well-founded definition over the data parameters `xs`: for each,
+whether it is unchanged by recursive calls, else its index among the packed
+components; and the number of packed components. -/
+def wfArgSources (key : Expr) (c : Name) (xs : Array Expr) : MetaM (Array (Bool × Nat) × Nat) := do
+  let v := (mkAppN (← keyValue key) xs).headBeta
+  let some (fixed, packed, _) ← wfParts c v | return (#[], 0)
+  let nPacked := if fixed.isEmpty && !(v.getAppFn.isConst && !v.isAppOf ``WellFounded.Nat.fix) then 1
+    else key.getAppArgs.size + xs.size - fixed.size
+  let comps := psigmaComps packed nPacked
+  let src ← xs.mapM fun x => do
+    if let some k := comps.findIdx? (· == x) then return (false, k)
+    return (true, 0)
+  unless src.any (!·.1) do throwError "{c}: no varying argument found in {v}"
+  return (src, nPacked)
+
+/-- For a well-founded definition, its unfolding as its functional:
+`f as = F ⟨as…⟩ (fun y h => recCall (fun y => f as[y]) y h)`, so that each
+recursive call carries Lean's own decreasing proof. -/
+def wfFunctionalEqn (key : Expr) (c : Name) (src : Array (Bool × Nat)) (nPacked : Nat) (as : Array Expr) :
+    MetaM (Option Expr) := do
+  let v := (mkAppN (← keyValue key) as).headBeta
+  let some (_, packed, α, motive, m, F) ← wfParts c v | return none
+  let fty ← whnf (← instantiateForall (← inferType F) #[packed])
+  let .forallE _ recTy _ _ := fty | return none
+  let recFn ← forallTelescope recTy fun ys _ => do
+    unless ys.size == 2 do throwError "unexpected well-founded functional for {c}"
+    let gf ← withLocalDeclD `y α fun y' => do
+      let comps := psigmaComps y' nPacked
+      let args := (as.zip src).map fun (a, (unch, k)) => if unch then a else comps[k]!
+      mkLambdaFVars #[y'] (mkAppN key args)
+    mkLambdaFVars ys (← mkAppOptM ``recCall #[α, motive, ← inferType ys[1]!, gf, ys[0]!, ys[1]!])
+  let rhs := (mkApp2 F packed recFn).headBeta
+  let pf ← mkAppOptM ``WellFounded.Nat.fix_eq #[α, motive, m, F, packed]
+  return some (← mkExpectedTypeHint pf (← mkEq (mkAppN key as) rhs))
 
 /-- A recursive function unit, by well-founded induction on the structural
 argument (several arguments: tupled). -/
@@ -250,6 +289,7 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := 
       pure (mkConst tupName)
     else pure f
   let msr ← recursionMeasure key c static n τ
+  let wfSrc ← try wfArgSources key c xs catch _ => pure (#[], 0)
   let body ← mkFreshExprMVar (mkConst ``Exp)
   let inv ← mkAppM ``Arrow #[invT, invB]
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx₀ => do
@@ -266,9 +306,15 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := 
       withLocalDeclD `hp (mkApp2 invT p pv) fun hp => do
         let env ← bodyEnv envC funs param pv
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invB (mkApp ft p)])
-        let gctx := { gctx₀ with rec? := some { head := c, static, ih, cl, cname, arity := n } }
+        let rf : RecFn := { head := c, static, ih, cl, cname, arity := n, argSrc := wfSrc.1, nPacked := wfSrc.2, lvls }
+        let gctx := { gctx₀ with rec? := some rf }
         let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
-        let _ ← (destructAndSolve g.mvarId! env invB f eqnApp #[] p n).run gst |>.run gctx
+        let eqnAppS (as : Array Expr) : MetaM Expr := do
+          if wfSrc.1.isEmpty then eqnApp as else
+          match ← wfFunctionalEqn key c wfSrc.1 wfSrc.2 as with
+          | some e => pure e
+          | none => eqnApp as
+        let _ ← (destructAndSolve g.mvarId! env invB f eqnAppS #[] p n).run gst |>.run gctx
         let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, pv,
           mkApp invB (mkApp ft p), hnodup, hfind, g]
         mkLambdaFVars #[p, ih, pv, hp] app

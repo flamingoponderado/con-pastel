@@ -259,4 +259,8 @@ theorem list_get_eq_getD {α : Type u} [Inhabited α] (l : List α) (f : Fin l.l
     l.get f = l.getD f.val default := by
   simp [List.getD_eq_getElem?_getD]
 
+/-- A recursive call inside a well-founded functional, carrying Lean's own
+decreasing proof (the translator reads the proof off; the value is `f y`). -/
+def recCall {α : Sort u} {β : α → Sort v} {P : Prop} (f : (a : α) → β a) (y : α) (_h : P) : β y := f y
+
 end ConPastel.Translator

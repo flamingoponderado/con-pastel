@@ -79,4 +79,16 @@ syntax (name := cakePrimitive) "cake_primitive " term:max term:max (" assuming "
     let kind := if isFn then UnitKind.function "p" (uname ++ `body) false else .thunk "p" (uname ++ `body)
     addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := #[], deps := #[], assumes }
 
+/-- `cake_replace K K' thm` with `thm : ∀ xs, K xs = K' xs`. -/
+elab "cake_replace " k:ident r:ident thm:ident : command => do
+  let kc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo k
+  let rc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo r
+  let tc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo thm
+  liftTermElabM do
+    let ok ← forallTelescope (← inferType (mkConst tc)) fun xs ty => do
+      let some (_, l, rr) := ty.eq? | return false
+      return l == mkAppN (mkConst kc) xs && rr == mkAppN (mkConst rc) xs
+    unless ok do throwError "{tc} must state ∀ xs, {kc} xs = {rc} xs (no universe levels)"
+  modifyEnv fun env => replaceExt.addEntry env (kc, rc, tc)
+
 end ConPastel.Translator.Meta
