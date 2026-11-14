@@ -65,6 +65,7 @@ def escName (n : Name) : String :=
     | .anonymous => "")
 
 partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElabM Unit := do
+  let τ ← liftTermElabM (normType τ)
   if (getDatatypeByType? (← getEnv) τ).isSome then return
   if stack.contains τ then throwError "cyclic datatype dependency at {τ} (mutual types are not supported yet)"
   -- first the datatypes the field invariants need

@@ -79,6 +79,17 @@ def newtypeInfo? (ty : Expr) : MetaM (Option (Name × Nat × Expr)) := do
     if fty.hasAnyFVar (fs.contains <| .fvar ·) then return none
     return some (I, j, fty)
 
+/-- A type with its reducible abbreviations unfolded throughout (`Unit` is
+`PUnit`, …): datatypes are registered and looked up by this normal form. -/
+def normType (ty : Expr) : MetaM Expr := do
+  Meta.transform (← instantiateMVars ty) (post := fun e => do
+    let e' ← whnfR e
+    if e' != e then return .visit e' else return .done e)
+
+/-- The registered datatype for `ty` (up to `normType`). -/
+def findDatatype? (ty : Expr) : MetaM (Option DatatypeInfo) := do
+  return getDatatypeByType? (← getEnv) (← normType ty)
+
 partial def invOf (ty : Expr) : MetaM Expr := do
   let ty ← whnfR (← instantiateMVars ty).headBeta
   -- `Id α` is `α` (`Id` is only `implicit_reducible`)
@@ -100,8 +111,8 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if let .const I _ := ty.getAppFn then
     if let some (.inductInfo _) := (← getEnv).find? I then
       if !ty.hasFVar && !ty.hasMVar then
-        if let some d := getDatatypeByType? (← getEnv) ty then return mkConst (d.name ++ `cakeInv)
-        needDatatypeRef.set (some ty)
+        if let some d ← findDatatype? ty then return mkConst (d.name ++ `cakeInv)
+        needDatatypeRef.set (some (← normType ty))
         throwError "cake: need datatype {ty}"
   if let .forallE n a b bi := ty then
     -- a leading proof argument: the value exists regardless

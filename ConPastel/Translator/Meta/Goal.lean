@@ -827,7 +827,7 @@ partial def isSupportedCases (e : Expr) : MetaM Bool := do
   unless args.size == ii.numParams + 1 + 1 + ii.ctors.length do return false
   let major := args[ii.numParams + 1]!
   let τ ← whnfR (← inferType major)
-  if (getDatatypeByType? (← getEnv) τ).isSome then return true
+  if (← findDatatype? τ).isSome then return true
   return (← newtypeInfo? τ).isSome
 
 /-- `T.casesOn` for the type of `d`, with a non-dependent motive returning `R`,
@@ -934,8 +934,22 @@ discriminant, with the equation `match … = casesOn …` proved by cases. -/
 partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let replaceT (t' : Expr) : GoalM MVarId := do
     g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
-  if let .reduced t' ← reduceMatcher? t then
-    return ← solve (← replaceT t')
+  -- reduce only on syntactic constructors/literals: `reduceMatcher?` would put
+  -- discriminants in whnf, unfolding definitions into their internals
+  let discrsCtor ← do
+    let some info ← getMatcherInfo? (t.getAppFn.constName!) | pure false
+    let ds := t.getAppArgs[info.numParams + 1 : info.numParams + 1 + info.numDiscrs].toArray
+    ds.allM fun d => do
+      let d := d.consumeMData
+      if d.isLit || d.nat?.isSome || d.rawNatLit?.isSome then return true
+      let d ← whnfR d
+      -- variables, projections etc. are fine (structure eta); applications of
+      -- defined functions are not (whnf would unfold them)
+      let .const c _ := d.getAppFn | return true
+      return (← getEnv).find? c matches some (.ctorInfo _)
+  if discrsCtor then
+    if let .reduced t' ← reduceMatcher? t then
+      return ← solve (← replaceT t')
   let .const fnName lvls := t.getAppFn | unreachable!
   let args := t.getAppArgs
   -- a `Decidable P` discriminant: split on it
@@ -1199,7 +1213,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let major := args[ii.numParams + 1]!
           let mty ← whnfR (← inferType major)
           -- registered datatypes have their own `casesOn` (and projections become `casesOn`)
-          if !(← isProp (← inferType major)) && (mty.hasFVar || (getDatatypeByType? (← getEnv) mty).isNone) then
+          if !(← isProp (← inferType major)) && (mty.hasFVar || (← findDatatype? mty).isNone) then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
             let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
             let t' := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
@@ -1240,7 +1254,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     if let some (.ctorInfo ci) := (← getEnv).find? cn then
       let τ ← whnfR (← inferType t)
       if !τ.hasFVar then
-        if let some d := getDatatypeByType? (← getEnv) τ then
+        if let some d ← findDatatype? τ then
           let some k := d.ctors.findIdx? (·.1 == cn) | throwError "constructor {cn} not in {τ}"
           let (_, _, dataFlags) := d.ctors[k]!
           let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {τ}"
@@ -1266,7 +1280,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if let some (.inductInfo ii) := (← getEnv).find? tn then
         if args.size > ii.numParams + 1 then
           let τ ← whnfR (← inferType args[ii.numParams + 1]!)
-          if let some d := getDatatypeByType? (← getEnv) τ then
+          if let some d ← findDatatype? τ then
             return ← solveCases g env inv d fn ii.numParams args
   -- `Nat.rec` whose step ignores the induction hypothesis is `Nat.casesOn`
   if fn.isConstOf ``Nat.rec && args.size == 4 then
