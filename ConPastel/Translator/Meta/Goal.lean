@@ -1482,7 +1482,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     if let some (.defnInfo di) := (← getEnv).find? cn then
       let lenv ← getEnv
       let isRec := (Lean.Elab.Structural.eqnInfoExt.find? lenv cn).isSome || (Lean.Elab.WF.eqnInfoExt.find? lenv cn).isSome
-      if !isRec && !(← Meta.isMatcher cn) && !(replaceExt.getState lenv).contains cn then
+      if !isRec && !(← Meta.isMatcher cn) && !(replaceExt.getState lenv).contains cn &&
+          !(isAuxRecursor lenv cn) && !(isNoConfusion lenv cn) then
         let openStatic ← forallBoundedTelescope di.type args.size fun xs _ => do
           let mut r := false
           for i in [0:xs.size] do
