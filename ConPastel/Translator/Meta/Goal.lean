@@ -844,12 +844,12 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           mkLambdaFVars xs (mkAppN t xs)
         return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- registered replacements `K xs = K' xs`
-  if let .const c [] := fn then
+  if let .const c us := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
-      let n ← forallTelescope (← inferType (mkConst thm)) fun xs _ => pure xs.size
+      let n ← forallTelescope (← inferType (mkConst thm us)) fun xs _ => pure xs.size
       if args.size == n then
-        let heq := mkAppN (mkConst thm) args
-        let t' := mkAppN (mkConst rc) args
+        let heq := mkAppN (mkConst thm us) args
+        let t' := mkAppN (mkConst rc us) args
         let ce ← evalGoalCe g
         let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
         solve gb.mvarId!

@@ -85,10 +85,11 @@ elab "cake_replace " k:ident r:ident thm:ident : command => do
   let rc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo r
   let tc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo thm
   liftTermElabM do
-    let ok ← forallTelescope (← inferType (mkConst tc)) fun xs ty => do
+    let us := ((← getConstInfo tc).levelParams).map Level.param
+    let ok ← forallTelescope (← inferType (mkConst tc us)) fun xs ty => do
       let some (_, l, rr) := ty.eq? | return false
-      return l == mkAppN (mkConst kc) xs && rr == mkAppN (mkConst rc) xs
-    unless ok do throwError "{tc} must state ∀ xs, {kc} xs = {rc} xs (no universe levels)"
+      return l == mkAppN (mkConst kc us) xs && rr == mkAppN (mkConst rc us) xs
+    unless ok do throwError "{tc} must state ∀ xs, {kc} xs = {rc} xs (same universe parameters, in order)"
   modifyEnv fun env => replaceExt.addEntry env (kc, rc, tc)
 
 end ConPastel.Translator.Meta

@@ -153,6 +153,13 @@ theorem decodeChar_eq (bytes : ByteArray) (i : Nat) : bytes.utf8DecodeChar? i = 
   split
   · split <;> simp_all [isDone]
   · rfl
+/-- `String.foldl` over the character list (the library goes through `String.Slice`). -/
+def stringFoldl {α : Type u} (f : α → Char → α) (init : α) (s : String) : α := s.toList.foldl f init
+
+theorem stringFoldl_eq {α : Type u} (f : α → Char → α) (init : α) (s : String) :
+    String.foldl f init s = stringFoldl f init s := by
+  simp [stringFoldl, String.foldl_eq_foldl_toList]
+
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -160,3 +167,4 @@ cake_replace Array.range ConPastel.Impl.arrayRange ConPastel.Impl.arrayRange_eq
 cake_replace instDecidableEqString ConPastel.Impl.stringDecEq ConPastel.Impl.stringDecEq_eq
 cake_replace ByteArray.utf8Decode? ConPastel.Impl.utf8Decode ConPastel.Impl.utf8Decode_eq
 cake_replace ByteArray.utf8DecodeChar? ConPastel.Impl.decodeChar ConPastel.Impl.decodeChar_eq
+cake_replace String.foldl ConPastel.Impl.stringFoldl ConPastel.Impl.stringFoldl_eq
