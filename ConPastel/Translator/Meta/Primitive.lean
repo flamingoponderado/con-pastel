@@ -133,4 +133,10 @@ elab "cake_rewrite " thm:ident : command => do
       pure c
   modifyEnv fun env => rewriteExt.addEntry env (head, tc)
 
+/-- `cake_module "tag"`: the units of this module get names of their own
+(`ConPastel.Cake.tag.uk`, CakeML `%tag.k`), so that independent modules over a
+common base can be imported together; such modules register no datatypes. -/
+elab "cake_module " t:str : command => do
+  modifyEnv fun env => cakeTagExt.setState env (some t.getString)
+
 end ConPastel.Translator.Meta

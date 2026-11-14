@@ -97,24 +97,49 @@ structure UnitInfo where
   datatypes : Array Name
   deps : Array Expr
   /-- Runtime assumptions (propositions) the certificate takes after the
-  lookup of the unit itself (primitives only). -/
+  lookup of the unit itself. -/
   assumes : Array Expr := #[]
+  /-- The units (by name) whose certificates discharge the dependencies, in
+  the order of `deps` (a key may be translated in several modules). -/
+  depNames : Array Name := #[]
   deriving Inhabited
 
-initialize unitExt : SimplePersistentEnvExtension UnitInfo (Std.HashMap Expr UnitInfo) ←
+/-- Units by key (for translation) and all units (for assembly; a key may have
+been translated in several independent modules). -/
+structure UnitState where
+  byKey : Std.HashMap Expr UnitInfo := {}
+  all : Array UnitInfo := #[]
+  deriving Inhabited
+
+initialize unitExt : SimplePersistentEnvExtension UnitInfo UnitState ←
   registerSimplePersistentEnvExtension {
-    addEntryFn := fun m d => m.insert d.key d
-    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m d => m.insert d.key d) m) {}
+    addEntryFn := fun st d => { byKey := if st.byKey.contains d.key then st.byKey else st.byKey.insert d.key d,
+                                all := st.all.push d }
+    addImportedFn := fun as => as.foldl (fun st a => a.foldl (fun st d =>
+      { byKey := if st.byKey.contains d.key then st.byKey else st.byKey.insert d.key d,
+        all := st.all.push d }) st) {}
   }
 
 def getUnit? (env : Environment) (key : Expr) : Option UnitInfo :=
-  (unitExt.getState env).get? key
-
-def unitCount (env : Environment) : Nat :=
-  (unitExt.getState env).size
+  (unitExt.getState env).byKey.get? key
 
 def allUnits (env : Environment) : Array UnitInfo :=
-  (unitExt.getState env).toArray.map (·.2)
+  (unitExt.getState env).all
+
+/-- The current module's tag (`cake_module`): units of a tagged module get
+names of their own, so independent modules can be imported together. -/
+initialize cakeTagExt : EnvExtension (Option String) ← registerEnvExtension (pure none)
+
+/-- The namespace of the current module's units. -/
+def unitNamespace (env : Environment) : Name :=
+  match cakeTagExt.getState env with
+  | some t => Name.mkStr `ConPastel.Cake t
+  | none => `ConPastel.Cake
+
+/-- Units already registered in the current module's namespace. -/
+def unitCount (env : Environment) : Nat :=
+  let ns := unitNamespace env
+  ((unitExt.getState env).all.filter (·.name.getPrefix == ns)).size
 
 
 /-- Progress line: appended (and flushed) to the file named by `CAKE_LOG`, else stderr. -/

@@ -111,7 +111,11 @@ def finishUnit (key : Expr) (uname : Name) (cname : String) (kind : UnitKind) (d
     throwError "certificate for {key} has leaked locals (mvars: {pf.hasMVar}): {descr}"
   addDecl (Declaration.thmDecl (mkTheoremValEx (uname ++ `cert) [] stmt pf []))
   let assumes := (assumeReplaceExt.getState (← getEnv)).map (·.2.2)
-  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := ← datatypeNames, deps, assumes }
+  let depNames ← deps.mapM fun d => do
+    let some du := getUnit? (← getEnv) d | throwError "dependency {d} of {key} is not a unit"
+    pure du.name
+  let datatypes ← datatypeNames
+  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes, deps, assumes, depNames }
 
 /-- The body environment of a group entry. -/
 def bodyEnv (envC funs : Expr) (param : String) (xv : Expr) : MetaM Expr :=
@@ -119,8 +123,11 @@ def bodyEnv (envC funs : Expr) (param : String) (xv : Expr) : MetaM Expr :=
 
 /-- Fresh unit names. -/
 def freshUnit : MetaM (Name × String) := do
-  let k := unitCount (← getEnv)
-  return (Name.mkStr `ConPastel.Cake s!"u{k}", s!"%{k}")
+  let env ← getEnv
+  let k := unitCount env
+  match cakeTagExt.getState env with
+  | some t => return (Name.mkStr (unitNamespace env) s!"u{k}", s!"%{t}.{k}")
+  | none => return (Name.mkStr `ConPastel.Cake s!"u{k}", s!"%{k}")
 
 /-- The definition of a unit key `f static…`. -/
 def keyValue (key : Expr) : MetaM Expr := do

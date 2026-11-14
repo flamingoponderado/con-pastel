@@ -19,9 +19,26 @@ namespace ConPastel.Program
 open Lean Meta Elab Command ConPastel.Translator.Meta
 open Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL
 
-def unitsInOrder (env : Environment) : Array UnitInfo :=
-  let key (u : UnitInfo) : Nat := (u.cname.drop 1).toNat!
-  (allUnits env).qsort (fun a b => key a < key b)
+/-- A unit's dependencies, by unit name (older units recorded only keys). -/
+def depNamesOf (env : Environment) (u : UnitInfo) : Array Name :=
+  if u.depNames.size == u.deps.size then u.depNames
+  else u.deps.filterMap fun d => (getUnit? env d).map (·.name)
+
+/-- All units, every unit after its dependencies (independent modules may
+have translated the same key: both copies are kept). -/
+def unitsInOrder (env : Environment) : Array UnitInfo := Id.run do
+  let us := allUnits env
+  let mut done : Std.HashSet Name := {}
+  let mut out : Array UnitInfo := #[]
+  let mut todo := us
+  while !todo.isEmpty do
+    let (ready, rest) := todo.partition fun u => (depNamesOf env u).all done.contains
+    if ready.isEmpty then break
+    for u in ready do
+      done := done.insert u.name
+      out := out.push u
+    todo := rest
+  return out
 
 def addThm (n : Name) (pf : Expr) : MetaM Unit := do
   let pf ← instantiateMVars pf
@@ -72,15 +89,15 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let nodup := mkConst (P ++ `nodup)
   -- certificates, in registration order, all under `h : RuntimeAssumptions`
   withLocalDeclD `h (mkConst ``ConPastel.RuntimeAssumptions) fun hrt => do
-  let mut certs : Std.HashMap Expr Expr := {}
-  let mut lookups : Std.HashMap Expr Expr := {}
+  let mut certs : Std.HashMap Name Expr := {}
+  let mut lookups : Std.HashMap Name Expr := {}
   for u in us do
     let tag := u.cname.drop 1
     let lk ← closeWith (← groupLookupTy envC funs u.cname)
       (← `(tactic| exact ConPastel.Translator.nsLookup_buildRecEnv (by decide)))
     addThm (P ++ Name.mkSimple s!"lookup_{tag}") lk
     let lkC := mkConst (P ++ Name.mkSimple s!"lookup_{tag}")
-    lookups := lookups.insert u.key lkC
+    lookups := lookups.insert u.name lkC
     let (param, body) := match u.kind with
       | .function p b _ => (p, b)
       | .thunk p b => (p, b)
@@ -96,12 +113,12 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
       let i3 := mkIdent `h.stringHash
       closeWith a (← `(tactic| first | exact $i1:ident | exact $i2:ident | exact $i3:ident))
     let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC] ++ has
-    for d in u.deps do
+    for d in depNamesOf env u do
       let some dl := lookups.get? d | throwError "dependency {d} of {u.key} not assembled"
       let some dc := certs.get? d | throwError "dependency {d} of {u.key} not assembled"
       args := args ++ #[dl, dc]
     addThm (P ++ Name.mkSimple s!"cert_{tag}") (← mkLambdaFVars #[hrt] (mkAppN (mkConst u.cert) args))
-    certs := certs.insert u.key (mkApp (mkConst (P ++ Name.mkSimple s!"cert_{tag}")) hrt)
+    certs := certs.insert u.name (mkApp (mkConst (P ++ Name.mkSimple s!"cert_{tag}")) hrt)
   -- the program and its correctness
   let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
   let loc := mkConst ``Flapjack.Misc.Location.unknownLoc
@@ -127,8 +144,8 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let hmemE ← closeWith (← memTy eu.cname) (← `(tactic| decide))
   let hmemR ← closeWith (← memTy ru.cname) (← `(tactic| decide))
   let ne (a b : String) : MetaM Expr := do closeWith (mkNot (← mkEq (mlString a) (mlString b))) (← `(tactic| decide))
-  let some ce := certs.get? eu.key | unreachable!
-  let some cr := certs.get? ru.key | unreachable!
+  let some ce := certs.get? eu.name | unreachable!
+  let some cr := certs.get? ru.name | unreachable!
   let pf ← mkAppOptM ``program_completes_dt #[tds, funs, toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup,
     nodup, hcon, hmemE, hmemR, ce, cr, hlist, ← ne eu.cname ConPastel.Main.bufName,
     ← ne eu.cname ConPastel.Main.readAllName, ← ne ru.cname ConPastel.Main.bufName,

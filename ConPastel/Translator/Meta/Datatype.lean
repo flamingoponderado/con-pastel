@@ -82,6 +82,8 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
             | some τ' => registerDatatype τ' (τ :: stack)
             | none => throw e
   let env ← getEnv
+  if let some t := cakeTagExt.getState env then
+    throwError "datatype {τ} is needed by module '{t}': register it in the base chain (cake_datatype)"
   let stamp := nextStamp env
   logInfo m!"cake datatype t{stamp}: {τ} ({(← liftTermElabM (ctorFields τ)).size} constructors)"
   cakeLog s!"[cake] datatype t{stamp}: {← liftTermElabM (do return (← ppExpr τ).pretty.take 120)}"
@@ -141,6 +143,10 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
     let wsRev := "[" ++ ", ".intercalate (ds.reverse.map (s!"w{·}")) ++ "]"
     let witness := if n == 0 then s!"by subst hv; simp [{N}.cakeInv]" else
       s!"by subst hv; simp only [{N}.cakeInv]; exact ⟨{", ".intercalate (ds.map (s!"w{·}"))}, {", ".intercalate (ds.map (s!"h{·}'"))}, by simp⟩"
+    -- peel the value list field by field (a single `match` does not scale to many fields)
+    let peel := if n == 0 then s!"match vs, hvs with\n  | {wsRev}, {patL} => exact {witness}" else
+      String.join (ds.reverse.map (s!"rcases hvs with _ | ⟨h{·}', hvs⟩\n  ")) ++
+      s!"rcases hvs with ⟨⟩\n  subst hv; simp only [{N}.cakeInv]; exact ⟨{", ".intercalate (ds.map fun _ => "_")}, {", ".intercalate (ds.map (s!"h{·}'"))}, by simp⟩"
     let allA := if fs.size == 0 then "" else "{" ++ " ".intercalate ((List.range fs.size).map (s!"a{·}")) ++ " : _}"
     let es := if n == 0 then "" else "{" ++ " ".intercalate (ds.map (s!"e{·}")) ++ " : Exp}"
     runCmd s!"set_option maxHeartbeats 0 in
@@ -152,8 +158,7 @@ theorem _root_.{N}.con{i} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env
   have hl := {proj i}
   refine Eval_weaken (Eval_con (Ps := {ps}) hl {evalAll}) ?_
   rintro v ⟨vs, hvs, hv⟩
-  match vs, hvs with
-  | {wsRev}, {patL} => exact {witness}"
+  {peel}"
   -- the match lemma
   let mut params : Array String := #[]
   let mut casesL : Array String := #[]

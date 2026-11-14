@@ -881,8 +881,13 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let d := args[info.numParams + 1]!
       if let (``Decidable, #[P]) := (← whnfR (← inferType d)).getAppFnArgs then
         let R ← inferType t
-        let a := args[info.numParams + 2]!
-        let b := args[info.numParams + 3]!
+        let a₀ := args[info.numParams + 2]!
+        let b₀ := args[info.numParams + 3]!
+        -- the alternatives in either order: the one over `¬P` is the false branch
+        let firstNeg ← do
+          let .forallE _ dom _ _ ← whnf (← inferType a₀) | pure false
+          pure (dom.isAppOfArity ``Not 1)
+        let (a, b) := if firstNeg then (b₀, a₀) else (a₀, b₀)
         let t' ← mkAppOptM ``dite #[R, P, d, a, b]
         let eqTy ← withLocalDeclD `x (← inferType d) fun x => do
           mkForallFVars #[x] (← mkEq (mkAppN t.getAppFn (args.set! (info.numParams + 1) x))
