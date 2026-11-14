@@ -89,6 +89,8 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if ty.isConstOf ``Unit || ty.isAppOfArity ``PUnit 0 then return mkConst ``UNIT
   if ty.isAppOfArity ``List 1 then
     return ← mkAppM ``LIST #[← invOf ty.appArg!]
+  if ty.isAppOfArity ``Quot 2 then
+    return ← mkAppOptM ``QUOT #[ty.appFn!.appArg!, ty.appArg!, ← invOf ty.appFn!.appArg!]
   if ty.isAppOfArity ``Prod 2 then
     return ← mkAppM ``PAIR #[← invOf ty.appFn!.appArg!, ← invOf ty.appArg!]
   if let some (I, j, fty) ← newtypeInfo? ty then

@@ -282,6 +282,24 @@ theorem option_get_eq_getD {α : Type u} [Inhabited α] (o : Option α) (h : o.i
   | none => simp at h
   | some x => rfl
 
+/-! ## Quotients: a quotient value is represented by a representative's value -/
+
+def QUOT {α : Type} {r : α → α → Prop} (A : RefInv α) : RefInv (Quot r) :=
+  fun q v => ∃ a, Quot.mk r a = q ∧ A a v
+
+theorem Eval_quot_mk {α : Type} {r : α → α → Prop} {A : RefInv α} {env : SemEnv Value} {e : Exp} {a : α}
+    (h : Eval env e (A a)) : Eval env e (QUOT (r := r) A (Quot.mk r a)) :=
+  Eval_weaken h fun v hv => ⟨a, rfl, hv⟩
+
+/-- `Quot.lift f h q` is `f` applied to `q`'s representative. -/
+theorem Eval_quot_lift {α β : Type} {r : α → α → Prop} {A : RefInv α} {B : RefInv β} {env : SemEnv Value}
+    {ef eq : Exp} {f : α → β} {hresp : ∀ a b, r a b → f a = f b} {q : Quot r}
+    (hf : Eval env ef (Arrow A B f)) (hq : Eval env eq (QUOT A q)) :
+    Eval env (.app .opapp [ef, eq]) (B (Quot.lift f hresp q)) :=
+  Eval_app hf hq fun _ qv hfv hqv => by
+    obtain ⟨a, rfl, ha⟩ := hqv
+    exact hfv a qv ha
+
 end ConPastel.Translator
 
 namespace ConPastel.Impl

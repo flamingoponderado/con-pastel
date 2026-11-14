@@ -628,6 +628,33 @@ partial def solveDecide (g : MVarId) (env c : Expr) : GoalM Unit := do
   let _ := t
   throwError "unsupported condition {c}"
 
+/-- Split on the `Decidable P` argument at position `pos` of `t`:
+`t[d] = dite P (fun h => t[isTrue h]) (fun h => t[isFalse h])` (by cases on
+`d`), after which the branches reduce. Returns whether it applied. -/
+partial def solveDecSplit (g : MVarId) (env inv t : Expr) (pos : Nat) : GoalM Bool := do
+  let args := t.getAppArgs
+  let d := args[pos]!
+  let (``Decidable, #[P]) := (← whnfR (← inferType d)).getAppFnArgs | return false
+  if d.getAppFn.isConstOf ``Decidable.isTrue || d.getAppFn.isConstOf ``Decidable.isFalse ||
+      d.getAppFn.isConstOf ``Decidable.intro then return false
+  let R ← inferType t
+  let tAt (x : Expr) : Expr := mkAppN t.getAppFn (args.set! pos x)
+  let a ← withLocalDeclD `h P fun h => do mkLambdaFVars #[h] (tAt (← mkAppOptM ``Decidable.isTrue #[P, h]))
+  let b ← withLocalDeclD `h (mkNot P) fun h => do mkLambdaFVars #[h] (tAt (← mkAppOptM ``Decidable.isFalse #[P, h]))
+  let eqTy ← withLocalDeclD `x (← inferType d) fun x => do
+    mkForallFVars #[x] (← mkEq (tAt x) (← mkAppOptM ``dite #[R, P, x, a, b]))
+  let eqAll? ← try some <$> closeWith eqTy (← `(tactic| (intro x; rcases x with ⟨b, r⟩; cases b <;> with_unfolding_all rfl)))
+    catch _ => pure none
+  let some eqAll := eqAll? | return false
+  let heq := mkApp eqAll d
+  let t' ← mkAppOptM ``dite #[R, P, d, a, b]
+  let ce ← evalGoalCe g
+  let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+  solve gb.mvarId!
+  let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
+  g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+  return true
+
 /-- A `casesOn` with a dependent motive whose result is a newtype (e.g.
 `Decidable (x = b)`): the projection commutes with the case split,
 `(casesOn x alts).1 = casesOn x (fun fs => (alt fs).1)` (proved by cases). -/
@@ -887,36 +914,10 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     return ← solve (← replaceT t')
   let .const fnName lvls := t.getAppFn | unreachable!
   let args := t.getAppArgs
-  -- a `Decidable P` discriminant `d`: `t[d] = dite P (fun h => t[isTrue h]) (fun h => t[isFalse h])`
-  -- (by cases on `d`); each branch's match then reduces on that discriminant
+  -- a `Decidable P` discriminant: split on it
   if let some info ← getMatcherInfo? fnName then
     for i in [0:info.numDiscrs] do
-      let pos := info.numParams + 1 + i
-      let d := args[pos]!
-      let (``Decidable, #[P]) := (← whnfR (← inferType d)).getAppFnArgs | continue
-      if d.getAppFn.isConstOf ``Decidable.isTrue || d.getAppFn.isConstOf ``Decidable.isFalse ||
-          d.getAppFn.isConstOf ``Decidable.intro then continue
-      let R ← inferType t
-      let tAt (x : Expr) : Expr := mkAppN t.getAppFn (args.set! pos x)
-      let branches (x : Expr) : MetaM (Expr × Expr) := do
-        let a ← withLocalDeclD `h P fun h => do mkLambdaFVars #[h] (tAt (← mkAppOptM ``Decidable.isTrue #[P, h]))
-        let b ← withLocalDeclD `h (mkNot P) fun h => do mkLambdaFVars #[h] (tAt (← mkAppOptM ``Decidable.isFalse #[P, h]))
-        let _ := x
-        pure (a, b)
-      let (a, b) ← branches d
-      let eqTy ← withLocalDeclD `x (← inferType d) fun x => do
-        mkForallFVars #[x] (← mkEq (tAt x) (← mkAppOptM ``dite #[R, P, x, a, b]))
-      let eqAll? ← try some <$> closeWith eqTy (← `(tactic| (intro x; rcases x with ⟨b, r⟩; cases b <;> with_unfolding_all rfl)))
-        catch _ => pure none
-      let some eqAll := eqAll? | continue
-      let heq := mkApp eqAll d
-      let t' ← mkAppOptM ``dite #[R, P, d, a, b]
-      let ce ← evalGoalCe g
-      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
-      solve gb.mvarId!
-      let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
-      g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
-      return
+      if ← solveDecSplit g env inv t (info.numParams + 1 + i) then return
   let mci ← getConstInfo fnName
   let unfolded := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
   if ← isSupportedCases unfolded then
@@ -977,6 +978,26 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
         g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
         return
+  -- quotients: `Quot.mk r a` is `a`'s value; `Quot.lift f h q` applies `f` to `q`
+  if fn.isConstOf ``Quot.mk && args.size == 3 then
+    let (``QUOT, #[_, _, invA]) := (← whnfR inv).getAppFnArgs | throwError "quotient without QUOT invariant: {inv}"
+    let (_, ga) ← newEvalGoal env (mkApp invA args[2]!)
+    solve ga
+    assignProof g (← mkAppOptM ``Eval_quot_mk #[none, args[1]!, invA, env, none, none, ← instantiateMVars (mkMVar ga)])
+    return
+  if fn.isConstOf ``Quot.lift && args.size ≥ 6 then
+    if args.size > 6 then return ← solvePeel g env (mkAppN fn args.pop) args.back!
+    let q := args[5]!
+    let invQ ← invOf (← inferType q)
+    let (``QUOT, #[_, _, invA]) := invQ.getAppFnArgs | throwError "quotient without QUOT invariant"
+    let f := args[3]!
+    let (_, gf) ← newEvalGoal env (mkApp (← mkAppM ``Arrow #[invA, inv]) f)
+    solve gf
+    let (_, gq) ← newEvalGoal env (mkApp invQ q)
+    solve gq
+    assignProof g (← mkAppOptM ``Eval_quot_lift #[none, none, none, invA, inv, env, none, none, f, args[4]!, q,
+      ← instantiateMVars (mkMVar gf), ← instantiateMVars (mkMVar gq)])
+    return
   -- rewrite rules `lhs = rhs` whose `lhs` matches
   if let .const c _ := fn then
     if let some thms := (rewriteExt.getState (← getEnv)).find? c then
@@ -1146,6 +1167,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     let tn := cn.getPrefix
     if cn == tn ++ `casesOn then
       if let some (.inductInfo ii) := (← getEnv).find? tn then
+        -- `Decidable.casesOn d …`: split on `d` (its fields are a Boolean and a proof about it)
+        if tn == ``Decidable && args.size ≥ ii.numParams + 3 then
+          if ← solveDecSplit g env inv t (ii.numParams + 1) then return
         -- structure eta: `S.casesOn s f = f s.1 … s.n` for any non-recursive structure
         if ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec && args.size ≥ ii.numParams + 3 then
           let major := args[ii.numParams + 1]!
