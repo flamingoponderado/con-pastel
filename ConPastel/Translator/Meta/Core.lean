@@ -125,6 +125,11 @@ partial def invOf (ty : Expr) : MetaM Expr := do
       let β ← withLocalDecl n bi a fun x => do mkLambdaFVars #[x] (b.instantiate1 x)
       return ← mkAppOptM ``DARROW #[a, β, invA, invB]
     return ← mkAppM ``Arrow #[← invOf a, ← invOf b]
+  -- type-level definitions (`StateT σ m α`, monad abbreviations, …): unfold
+  if let .const c _ := ty.getAppFn then
+    if let some (.defnInfo _) := (← getEnv).find? c then
+      if let some ty' ← unfoldDefinition? ty then
+        return ← invOf ty'
   throwError "no refinement invariant for type {ty}"
 
 /-! ## Variable lookups -/

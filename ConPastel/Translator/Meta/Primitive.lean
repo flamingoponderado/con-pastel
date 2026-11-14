@@ -122,4 +122,15 @@ elab "cake_alias " a:ident b:ident n:str : command => do
     addDecl (Declaration.thmDecl (mkTheoremValEx b.getId eci.levelParams eci.type
       (mkConst eqn (eci.levelParams.map Level.param)) []))
 
+/-- `cake_rewrite thm` with `thm : ∀ xs, lhs = rhs`: translate terms matching `lhs` as `rhs`. -/
+elab "cake_rewrite " thm:ident : command => do
+  let tc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo thm
+  let head ← liftTermElabM do
+    let ci ← getConstInfo tc
+    forallTelescope ci.type fun _ ty => do
+      let some (_, l, _) := ty.eq? | throwError "{tc} must be an equation"
+      let .const c _ := l.getAppFn | throwError "{tc}: left-hand side must be a constant application"
+      pure c
+  modifyEnv fun env => rewriteExt.addEntry env (head, tc)
+
 end ConPastel.Translator.Meta

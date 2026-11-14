@@ -194,6 +194,11 @@ termination_by n - power
 def nextPowerOfTwo (n : Nat) : Nat := np2Go n 1
 theorem nextPowerOfTwo_eq (n : Nat) : Nat.nextPowerOfTwo n = nextPowerOfTwo n :=
   np2Go_eq n 1 (by decide)
+/-- `Array.foldlM` (default bounds) over the list (`Array.foldlM.loop` carries proofs). -/
+theorem arrayFoldlM_eq {m : Type u → Type v} [Monad m] {α : Type w} {β : Type u}
+    (f : β → α → m β) (init : β) (as : Array α) :
+    as.foldlM f init 0 as.size = as.toList.foldlM f init := (Array.foldlM_toList ..).symm
+
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -210,3 +215,4 @@ cake_replace Nat.nextPowerOfTwo ConPastel.Impl.nextPowerOfTwo ConPastel.Impl.nex
 are checked against the runtime by `scripts/HashCheck.lean`). -/
 cake_replace_assuming mixHash ConPastel.leanMixHash (∀ h k, mixHash h k = ConPastel.leanMixHash h k)
 cake_replace_assuming String.hash ConPastel.leanStringHash (∀ s, String.hash s = ConPastel.leanStringHash s)
+cake_rewrite ConPastel.Impl.arrayFoldlM_eq

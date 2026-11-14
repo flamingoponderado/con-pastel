@@ -41,6 +41,16 @@ initialize replaceExt : SimplePersistentEnvExtension (Name × Name × Name) (Nam
     addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, r, t) => m.insert k (r, t)) m) {}
   }
 
+/-- Rewrite rules `thm : ∀ xs, lhs = rhs` keyed by `lhs`'s head constant: a
+term matching `lhs` (by unification) is translated as `rhs` (for equations
+that hold only at particular arguments, e.g. `Array.foldlM`'s default bounds). -/
+initialize rewriteExt : SimplePersistentEnvExtension (Name × Name) (NameMap (Array Name)) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, t) => m.insert k ((m.find? k).getD #[] |>.push t)
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, t) =>
+      m.insert k ((m.find? k).getD #[] |>.push t)) m) {}
+  }
+
 /-- Replacements under runtime assumptions `K ↦ (K', P)` with `P` a closed
 proposition `∀ xs, K xs = K' xs` (a field of `RuntimeAssumptions`): every unit
 takes the registered propositions as hypotheses, and `K xs` is translated as

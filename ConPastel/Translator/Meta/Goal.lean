@@ -955,6 +955,28 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
         g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
         return
+  -- rewrite rules `lhs = rhs` whose `lhs` matches
+  if let .const c _ := fn then
+    if let some thms := (rewriteExt.getState (← getEnv)).find? c then
+      for thm in thms do
+        let ci ← getConstInfo thm
+        let thmE ← mkConstWithFreshMVarLevels thm
+        let (xs, _, ty) ← forallMetaTelescope (← inferType thmE)
+        let _ := ci
+        let some (_, lhs, rhs) := ty.eq? | continue
+        let saved : Meta.SavedState ← (Meta.saveState : MetaM _)
+        if (← isDefEq lhs t) then
+          let heq ← instantiateMVars (mkAppN thmE xs)
+          if heq.hasExprMVar then (saved.restore : MetaM Unit); continue
+          let t' ← instantiateMVars rhs
+          let ce ← evalGoalCe g
+          let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+          solve gb.mvarId!
+          let motive ← withLocalDeclD `x (← inferType t) fun x => do
+            mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+          g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+          return
+        (saved.restore : MetaM Unit)
   -- registered replacements `K xs = K' xs`
   if let .const c us := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
