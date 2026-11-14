@@ -265,7 +265,7 @@ def wfFunctionalEqn (key : Expr) (c : Name) (src : Array (Bool × Nat)) (nPacked
 
 /-- A recursive function unit, by well-founded induction on the structural
 argument (several arguments: tupled). -/
-def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
+def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bool := false) : MetaM Unit := do
   let .const c lvls := key.getAppFn | throwError "bad key"
   let static := key.getAppArgs
   let some eqn ← getUnfoldEqnFor? c (nonRec := true) | throwError "no unfold equation for {c}"
@@ -310,7 +310,7 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := 
         let gctx := { gctx₀ with rec? := some rf }
         let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
         let eqnAppS (as : Array Expr) : MetaM Expr := do
-          if wfSrc.1.isEmpty then eqnApp as else
+          if wfSrc.1.isEmpty || !functional then eqnApp as else
           match ← wfFunctionalEqn key c wfSrc.1 wfSrc.2 as with
           | some e => pure e
           | none => eqnApp as
@@ -330,7 +330,16 @@ def translateUnitOnce (key : Expr) (extra : Array Expr) : MetaM Unit := do
   if (getUnit? (← getEnv) key).isSome then return
   let .const c _ := key.getAppFn | throwError "unit key {key} is not a constant application"
   let isFn : Bool ← forallTelescope (← inferType key) fun xs _ => pure (decide (xs.size > 0))
-  if ← isRecursiveDef c then translateRecursive key extra
+  if ← isRecursiveDef c then
+    -- the unfolding equation first; for well-founded definitions whose recursive
+    -- calls we cannot prove decreasing, the functional (with Lean's own proofs)
+    let saved ← saveState
+    try translateRecursive key extra
+    catch e =>
+      let msg ← e.toMessageData.toString
+      unless (msg.splitOn "cannot prove the recursive call decreases").length > 1 do throw e
+      saved.restore
+      translateRecursive key extra (functional := true)
   else if isFn then translateFunction key extra
   else translateThunk key extra
 
