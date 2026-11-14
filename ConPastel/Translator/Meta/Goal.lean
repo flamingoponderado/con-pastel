@@ -604,6 +604,11 @@ partial def solveLam (g : MVarId) (env inv : Expr) (n : Name) (ty b : Expr) : Go
   -- inv must be `Arrow A B`
   let inv ← whnfR inv
   if let (``DARROWP, #[_, _, _, invA, invB]) := inv.getAppFnArgs then
+    -- the proof binder (eta-expand a body that is a function of the proof)
+    let b ← if b.isLambda then pure b else do
+      let .forallE _ pty _ _ ← whnf (← withLocalDeclD n ty fun x => do inferType (b.instantiate1 x))
+        | throwError "expected a function over a proof: {b}"
+      pure (Expr.lam `h pty (mkApp (b.liftLooseBVars 0 1) (.bvar 0)) .default)
     let .lam hn p body' _ := b | throwError "expected a lambda over a proof"
     let ceB ← mkFreshExprMVar (mkConst ``Exp)
     let h ← withLocalDeclD n ty fun x => do
@@ -1158,7 +1163,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       ← instantiateMVars (mkMVar gm)])
     return
   -- `Bool.rec (motive := fun x => x.Reflects P → R) F T b r …`: a decision taken apart, i.e. `dite`
-  if fn.isConstOf ``Bool.rec && args.size ≥ 5 then
+  if (fn.isConstOf ``Bool.rec || fn.isConstOf ``Bool.casesOn) && args.size ≥ 5 then
     let motive := args[0]!
     let isRefl ← withLocalDeclD `x (mkConst ``Bool) fun x => do
       let m ← whnfR (motive.beta #[x]).headBeta
@@ -1168,8 +1173,10 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             return some (P, body)
       return none
     if let some (P, R) := isRefl then
-      let (F, T, b, r) := (args[1]!, args[2]!, args[3]!, args[4]!)
-      let heq ← mkAppOptM ``bool_rec_reflects_eq_dite #[P, R, F, T, b, r]
+      let (F, T, b, r) := if fn.isConstOf ``Bool.rec then (args[1]!, args[2]!, args[3]!, args[4]!)
+        else (args[2]!, args[3]!, args[1]!, args[4]!)
+      let heq ← if fn.isConstOf ``Bool.rec then mkAppOptM ``bool_rec_reflects_eq_dite #[P, R, F, T, b, r]
+        else mkAppOptM ``bool_casesOn_reflects_eq_dite #[P, R, F, T, b, r]
       let rest := args[5:].toArray
       let t5 := mkAppN fn args[:5].toArray
       let d5 := (← inferType heq).appArg!
@@ -1323,7 +1330,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
               pfs := pfs.push (← instantiateMVars (mkMVar gj))
           let nd := pfs.size
           let lemArgs : Array (Option Expr) := #[some env, some hc] ++ Array.replicate nd none ++
-            Array.replicate fields.size none ++ pfs.map some
+            fields.map some ++ pfs.map some
           assignProof g (← mkAppOptM (d.name ++ Name.mkSimple s!"con{k}") lemArgs)
           return
   -- casesOn of datatypes, with a non-dependent motive
