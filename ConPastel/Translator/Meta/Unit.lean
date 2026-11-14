@@ -645,6 +645,12 @@ def translateUnitOnce (key : Expr) (extra : Array Expr) : MetaM Unit := do
   else if isFn then translateFunction key extra
   else translateThunk key extra
 
+/-- Constants the solver translates natively (never units). -/
+def nativeHeads : List Name :=
+  [``Int.add, ``Int.sub, ``Int.mul, ``Int.neg, ``Int.ofNat, ``Int.negSucc, ``Int.decEq, ``Int.decLe, ``Int.decLt,
+   ``Nat.add, ``Nat.mul, ``Nat.cast, ``Decidable.decide, ``ite, ``dite, ``cond, ``Decidable.isTrue,
+   ``Decidable.isFalse, ``Eq.mpr, ``Eq.mp, ``Eq.ndrec, ``cast, ``Quot.mk, ``Quot.lift, ``id]
+
 /-- Candidate unit keys mentioned by the unfolding equations of a mutual
 block's members: applications of defined constants (not members, constructors,
 recursors or matchers) to closed static arguments. -/
@@ -663,7 +669,7 @@ partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
             seenInst.modify (·.push e')
             visit e'
       if let .const c _ := e.getAppFn then
-        if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) then
+        if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) && !nativeHeads.contains c then
           if let some (.defnInfo _) := env.find? c then
             if let some (k, _) ← splitKey e then
               if !k.hasFVar && !k.hasMVar && !(← found.get).contains k then
