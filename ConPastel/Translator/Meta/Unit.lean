@@ -504,6 +504,7 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
       unitDepsOf keys[i]! (← inferType (mkAppN (mkConst eqns[i]!) xs))
     deps := mergeDeps ds deps
   deps := deps.filter fun d => !keys.contains d
+  cakeLog s!"[mutual] {members.size} members, {deps.size} dependencies"
   -- per member: arity, tuple type, result type, invariants, names
   let k0 := unitCount (← getEnv)
   let mut infos : Array (Nat × Expr × Expr × Name × String) := #[]
@@ -522,6 +523,7 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
   let taus := infos.toList.map (·.2.1)
   let S ← sumTyOf taus
   let param := "p"
+  cakeLog s!"[mutual] sum type built"
   -- tupled functions and invariants
   let mut fts : Array Expr := #[]
   let mut invTs : Array Expr := #[]
@@ -563,6 +565,7 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
       let repack ← withLocalDeclD `s S fun s => do
         mkLambdaFVars #[s] (← sumCasesND taus α (fun i t => do pure (← partsAt i t).1) s)
       pure (← mkAppOptM ``InvImage #[none, none, r', repack], ← mkAppOptM ``InvImage.wf #[none, none, r', repack, hwf'])
+  cakeLog s!"[mutual] termination relation built"
   let bodies ← members.mapM fun _ => mkFreshExprMVar (mkConst ``Exp)
   let memberSpecs := (List.range members.size).toArray.map fun i => (infos[i]!.2.2.2.2, param, bodies[i]!)
   withBlockHyps memberSpecs deps fun envC funs hnodup hfinds hselfs common has depHyps gctx₀ => do
@@ -593,11 +596,14 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
           let gctx := { gctx₀ with mrec? := some mr }
           let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
           let eqnApp (as : Array Expr) : MetaM Expr := pure (mkAppN (mkConst eqns[i]!) as)
+          let t0 ← IO.monoMsNow
           let _ ← (destructAndSolve g.mvarId! env (fun _ => pure invBs[i]!) keys[i]! eqnApp #[] p n).run gst |>.run gctx
+          cakeLog s!"[mutual] member {i} {members[i]!} solved in {(← IO.monoMsNow) - t0}ms"
           let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname,
             mlString param, bodies[i]!, pv, mkApp invBs[i]! (mkApp fts[i]! p), hnodup, hfinds[i]!, g]
           mkLambdaFVars #[pv, hp] app) s
       mkLambdaFVars #[s] pf
+    cakeLog s!"[mutual] induction step built"
     let joint ← withLocalDeclD `s S fun s => do
       mkLambdaFVars #[s] (← withTransparency .all <| mkAppOptM ``WellFounded.induction #[S, r, hwf, Pred, s, step])
     -- the joint theorem over all hypotheses
@@ -605,7 +611,9 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
     let jointName := infos[0]!.2.2.2.1 ++ `joint
     let jointPf ← instantiateMVars (← mkLambdaFVars allHyps joint)
     let jointTy ← instantiateMVars (← inferType jointPf)
+    cakeLog s!"[mutual] adding joint theorem"
     addDecl (Declaration.thmDecl (mkTheoremValEx jointName [] jointTy jointPf []))
+    cakeLog s!"[mutual] joint theorem added"
     let jointApp := mkAppN (mkConst jointName) allHyps
     -- each member's certificate: the joint theorem at its injection
     let peerNames := infos.map (·.2.2.2.1)
