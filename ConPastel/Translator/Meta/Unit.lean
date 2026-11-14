@@ -299,7 +299,10 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
   let saved ← saveState
   needUnitRef.set none
   try
+    let t0 ← IO.monoMsNow
     withCurrHeartbeats (translateUnitOnce key extra)
+    if (← getEnv).contains `ConPastel.cakeTraceUnits then pure ()
+    IO.eprintln s!"[cake] {(← IO.monoMsNow) - t0}ms unit {(← ppExpr key).pretty.take 120}"
   catch e =>
     match ← needUnitRef.get with
     | some dep =>

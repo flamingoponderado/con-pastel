@@ -91,7 +91,88 @@ def lookupSimp (unfoldRec : Bool) : MetaM Syntax.Tactic :=
       List.reverse_nil, List.nil_append, List.cons_append, List.lookup, beq_eq_decide_of_decEq,
       decide_true, decide_false])
 
+def mlStringLit? (e : Expr) : Option String :=
+  match e.consumeMData with
+  | .app (.const ``Flapjack.Basis.Pure.MlString.ofString _) (.lit (.strVal s)) => some s
+  | _ => none
+
+partial def listLit? (e : Expr) : Option (List Expr) :=
+  match e.consumeMData.getAppFnArgs with
+  | (``List.nil, _) => some []
+  | (``List.cons, #[_, a, rest]) => (listLit? rest).map (a :: ·)
+  | _ => none
+
+/-- A direct proof of `nsLookup ns (.short n) = some v`, following the shape
+of the environments the translator builds. Returns `(v, proof)`. -/
+partial def lookupNs (ns : Expr) (n : String) : MetaM (Expr × Expr) := do
+  let ns ← instantiateMVars ns
+  let nm := mlString n
+  match ns.consumeMData.getAppFnArgs with
+  | (``SemEnv.v, #[_, env]) =>
+    match env.consumeMData.getAppFnArgs with
+    | (``SemEnv.mk, #[_, a, _]) => lookupNs a n
+    | (``recBodyEnv, #[envC, funs, p, xv]) =>
+      lookupNs (← mkAppM ``nsBind #[p, xv, ← mkAppM ``buildRecEnv #[funs, envC, ← mkAppM ``SemEnv.v #[envC]]]) n
+    | (``clauseEnv, #[env', xs, vs]) =>
+      let some xl := listLit? xs | throwError "clause names not a literal"
+      let some vl := listLit? vs | throwError "clause values not a literal"
+      let pairs ← (xl.zip vl).reverse.mapM fun (x, v) => mkAppM ``Prod.mk #[x, v]
+      let pty ← mkAppM ``Prod #[mkConst ``VarN, mkConst ``Value]
+      let al ← mkListLit pty pairs
+      lookupNs (← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[none, none, none, al],
+        ← mkAppM ``SemEnv.v #[env']]) n
+    | _ => throwError "lookup: opaque environment {env}"
+  | (``nsBind, #[_, _, _, k, x, rest]) => lookBind k x rest
+  | (``nsOptBind, #[_, _, _, o, x, rest]) =>
+    match o.consumeMData.getAppFnArgs with
+    | (``Option.some, #[_, k]) => lookBind k x rest
+    | _ => lookupNs rest n
+  | (``nsAppend, #[_, _, _, a, rest]) =>
+    match a.consumeMData.getAppFnArgs with
+    | (``alistToNs, #[_, _, _, al]) =>
+      let some l := listLit? al | throwError "alist not a literal"
+      match l with
+      | [] =>
+        let (v, h) ← lookupNs rest n
+        return (v, ← mkAppM ``lk_app_nil #[rest, nm, h])
+      | p :: tl =>
+        let (``Prod.mk, #[_, _, k, x]) := p.consumeMData.getAppFnArgs | throwError "alist entry"
+        let some ks := mlStringLit? k | throwError "alist key not a literal"
+        let tlE ← mkListLit (← inferType p) tl
+        if ks == n then return (x, ← mkAppM ``lk_app_same #[k, x, tlE, rest])
+        let (v, h) ← lookupNs (← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[none, none, none, tlE], rest]) n
+        let hne ← mkDecideProof (mkNot (← mkEq nm k))
+        return (v, ← mkAppM ``lk_app_ne #[hne, x, tlE, rest, h])
+    | _ => throwError "lookup: nsAppend of {a}"
+  | (``buildRecEnv, _) =>
+    -- a lookup hypothesis about the recursive group
+    let lctx ← getLCtx
+    for d in lctx do
+      if d.isImplementationDetail then continue
+      let ty ← instantiateMVars d.type
+      if let some (_, lhs, rhs) := ty.eq? then
+        if let (``nsLookup, #[_, _, _, _, _, ns', idt]) := lhs.getAppFnArgs then
+          if let (``Ident.short, #[_, _, k]) := idt.getAppFnArgs then
+            if mlStringLit? k == some n && (← isDefEq ns' ns) then
+              if let (``Option.some, #[_, v]) := rhs.getAppFnArgs then
+                return (v, d.toExpr)
+    throwError "lookup: no hypothesis for {n} in the recursive group"
+  | _ => throwError "lookup: unsupported namespace {ns}"
+where
+  lookBind (k x rest : Expr) : MetaM (Expr × Expr) := do
+    let some ks := mlStringLit? k | throwError "bound name not a literal"
+    if ks == n then return (x, ← mkAppM ``lk_bind_same #[k, x, rest])
+    let (v, h) ← lookupNs rest n
+    let hne ← mkDecideProof (mkNot (← mkEq (mlString n) k))
+    return (v, ← mkAppM ``lk_bind_ne #[hne, x, rest, h])
+
 def proveLookupG (env : Expr) (n : String) (v : Expr) (unfoldRec : Bool := true) : MetaM Expr := do
+  -- direct proof first
+  let direct? ← try
+      let (v', pf) ← lookupNs (← mkAppM ``SemEnv.v #[env]) n
+      if ← isDefEq v' v then pure (some pf) else pure none
+    catch _ => pure none
+  if let some pf := direct? then return pf
   let goal ← mkEq (← mkAppM ``nsLookup #[← mkAppM ``SemEnv.v #[env], shortIdent n])
     (← mkAppM ``Option.some #[v])
   let mvar ← mkFreshExprMVar goal

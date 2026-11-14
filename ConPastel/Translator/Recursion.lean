@@ -71,4 +71,29 @@ theorem AppReturns_recclosure {envC : SemEnv Value} {funs : List (VarN × VarN �
   obtain ⟨v, refs, hrel, hv⟩ := h σ s
   exact ⟨_, _, by simp [doOpApp, hnodup, hfind]; rfl, v, refs, hrel, hv⟩
 
+/-! ## Lookup steps (for direct lookup proofs) -/
+
+theorem lk_bind_same {β : Type} (k : VarN) (x : β) (e : Namespace ModN VarN β) :
+    nsLookup (nsBind k x e) (.short k) = some x := by
+  rw [nsLookup_nsBind_short]; simp
+
+theorem lk_bind_ne {β : Type} {k n : VarN} (h : n ≠ k) (x : β) (e : Namespace ModN VarN β) {r : Option β}
+    (hr : nsLookup e (.short n) = r) : nsLookup (nsBind k x e) (.short n) = r := by
+  rw [nsLookup_nsBind_short]; simp [h, hr]
+
+theorem lk_app_nil {β : Type} (e : Namespace ModN VarN β) (n : VarN) {r : Option β}
+    (hr : nsLookup e (.short n) = r) : nsLookup (nsAppend (alistToNs []) e) (.short n) = r := by
+  cases e; simpa [nsAppend, alistToNs] using hr
+
+theorem lk_app_same {β : Type} (k : VarN) (x : β) (al : List (VarN × β)) (e : Namespace ModN VarN β) :
+    nsLookup (nsAppend (alistToNs ((k, x) :: al)) e) (.short k) = some x := by
+  cases e; simp [nsAppend, alistToNs, List.lookup]
+
+theorem lk_app_ne {β : Type} {k n : VarN} (h : n ≠ k) (x : β) (al : List (VarN × β))
+    (e : Namespace ModN VarN β) {r : Option β} (hr : nsLookup (nsAppend (alistToNs al) e) (.short n) = r) :
+    nsLookup (nsAppend (alistToNs ((k, x) :: al)) e) (.short n) = r := by
+  cases e
+  have hb : (n == k) = false := beq_eq_false_iff_ne.mpr h
+  simpa [nsAppend, alistToNs, List.lookup, hb] using hr
+
 end ConPastel.Translator
