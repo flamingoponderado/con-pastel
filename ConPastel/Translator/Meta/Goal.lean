@@ -666,6 +666,11 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let unfolded := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
   if ← isSupportedCases unfolded then
     return ← solve (← replaceT unfolded)
+  -- a compiled sparse `casesOn` (e.g. literal patterns: cases + decidable tests)
+  if let .const un _ := unfolded.getAppFn then
+    if let .str _ last := un then
+      if last.startsWith "_sparseCasesOn" then
+        return ← solve (← replaceT unfolded)
   -- split on a discriminant
   let some info ← getMatcherInfo? fnName | throwError "no matcher info for {fnName}"
   let discrs := args[info.numParams + 1 : info.numParams + 1 + info.numDiscrs].toArray
@@ -675,6 +680,9 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     let τ ← whnfR (← inferType d)
     let .const I _ := τ.getAppFn | continue
     let some (.inductInfo _) := (← getEnv).find? I | continue
+    -- a constructor application is already split
+    if let .const dc _ := d.getAppFn then
+      if let some (.ctorInfo _) := (← getEnv).find? dc then continue
     unless d.isFVar do
       -- bind the discriminant: `m … d …` is `let z := d; m … z …`
       let letT := Expr.letE `z (← inferType d) d (← abstractDiscr t d) false
