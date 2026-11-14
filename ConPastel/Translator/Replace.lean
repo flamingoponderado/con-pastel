@@ -199,6 +199,18 @@ theorem arrayFoldlM_eq {m : Type u → Type v} [Monad m] {α : Type w} {β : Typ
     (f : β → α → m β) (init : β) (as : Array α) :
     as.foldlM f init 0 as.size = as.toList.foldlM f init := (Array.foldlM_toList ..).symm
 
+/-- `Nat.log2` by plain recursion (the library's is a fuelled `Nat.rec`). -/
+def log2 (n : Nat) : Nat := if 2 ≤ n then log2 (n / 2) + 1 else 0
+termination_by n
+decreasing_by omega
+
+theorem log2_eq (n : Nat) : Nat.log2 n = log2 n := by
+  rw [Nat.log2_def, log2.eq_def]
+  split
+  · rename_i h; rw [log2_eq (n / 2)]
+  · rfl
+termination_by n
+decreasing_by omega
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -209,6 +221,7 @@ cake_replace ByteArray.utf8DecodeChar? ConPastel.Impl.decodeChar ConPastel.Impl.
 cake_replace String.foldl ConPastel.Impl.stringFoldl ConPastel.Impl.stringFoldl_eq
 cake_replace List.nodupDecidable ConPastel.Impl.nodupDec ConPastel.Impl.nodupDec_eq
 
+cake_replace Nat.log2 ConPastel.Impl.log2 ConPastel.Impl.log2_eq
 cake_replace Nat.nextPowerOfTwo ConPastel.Impl.nextPowerOfTwo ConPastel.Impl.nextPowerOfTwo_eq
 
 /-! Opaque runtime primitives, under `RuntimeAssumptions` (their transcriptions
