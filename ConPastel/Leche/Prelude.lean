@@ -10,6 +10,7 @@ pipeline, and later stages reuse its units.
 -/
 
 set_option maxHeartbeats 0
+set_option linter.unusedSimpArgs false
 set_option maxRecDepth 200000
 
 namespace ConPastel.Leche
