@@ -238,6 +238,18 @@ theorem arrayFind?_eq (p : α → Bool) (as : Array α) : as.find? p = as.toList
 theorem arrayMapIdx_eq (f : Nat → α → β) (as : Array α) : as.mapIdx f = ⟨as.toList.mapIdx f⟩ := by apply Array.ext'; simp
 end ArrayOps
 
+/-! Conditionals applied to further arguments (e.g. a monadic state): push the
+arguments into the branches. -/
+theorem dite_app {α : Sort u} {β : α → Sort v} (P : Prop) [Decidable P] (f : P → (a : α) → β a)
+    (g : ¬P → (a : α) → β a) (a : α) : dite P f g a = dite P (fun h => f h a) (fun h => g h a) := by
+  by_cases h : P <;> simp [h]
+theorem ite_app {α : Sort u} {β : α → Sort v} (P : Prop) [Decidable P] (f g : (a : α) → β a) (a : α) :
+    ite P f g a = ite P (f a) (g a) := by
+  by_cases h : P <;> simp [h]
+theorem cond_app {α : Sort u} {β : α → Sort v} (b : Bool) (f g : (a : α) → β a) (a : α) :
+    cond b f g a = cond b (f a) (g a) := by
+  cases b <;> rfl
+
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -275,3 +287,6 @@ cake_rewrite ConPastel.Impl.arrayAppend_eq
 cake_rewrite ConPastel.Impl.arrayReverse_eq
 cake_rewrite ConPastel.Impl.arrayFind?_eq
 cake_rewrite ConPastel.Impl.arrayMapIdx_eq
+cake_rewrite ConPastel.Impl.dite_app
+cake_rewrite ConPastel.Impl.ite_app
+cake_rewrite ConPastel.Impl.cond_app
