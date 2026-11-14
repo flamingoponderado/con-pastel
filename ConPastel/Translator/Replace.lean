@@ -160,6 +160,21 @@ theorem stringFoldl_eq {α : Type u} (f : α → Char → α) (init : α) (s : S
     String.foldl f init s = stringFoldl f init s := by
   simp [stringFoldl, String.foldl_eq_foldl_toList]
 
+/-- Duplicate-freeness as a Boolean recursion. -/
+def nodupB {α : Type u} [DecidableEq α] : List α → Bool
+  | [] => true
+  | a :: as => !(as.elem a) && nodupB as
+
+theorem nodupB_iff {α : Type u} [DecidableEq α] : ∀ (l : List α), nodupB l = true ↔ l.Nodup
+  | [] => by simp [nodupB]
+  | a :: as => by simp [nodupB, nodupB_iff as, List.nodup_cons]
+
+def nodupDec {α : Type u} [DecidableEq α] (l : List α) : Decidable l.Nodup :=
+  if h : nodupB l = true then isTrue ((nodupB_iff l).mp h)
+  else isFalse (fun e => h ((nodupB_iff l).mpr e))
+
+theorem nodupDec_eq {α : Type u} [DecidableEq α] (l : List α) : List.nodupDecidable l = nodupDec l :=
+  Subsingleton.elim _ _
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -168,3 +183,4 @@ cake_replace instDecidableEqString ConPastel.Impl.stringDecEq ConPastel.Impl.str
 cake_replace ByteArray.utf8Decode? ConPastel.Impl.utf8Decode ConPastel.Impl.utf8Decode_eq
 cake_replace ByteArray.utf8DecodeChar? ConPastel.Impl.decodeChar ConPastel.Impl.decodeChar_eq
 cake_replace String.foldl ConPastel.Impl.stringFoldl ConPastel.Impl.stringFoldl_eq
+cake_replace List.nodupDecidable ConPastel.Impl.nodupDec ConPastel.Impl.nodupDec_eq
