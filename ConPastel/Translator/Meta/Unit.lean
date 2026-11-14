@@ -658,7 +658,13 @@ partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
         if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) then
           if let some (.defnInfo _) := env.find? c then
             if let some (k, _) ← splitKey e then
-              if !k.hasFVar && !k.hasMVar && !(← found.get).contains k then found.modify (·.push k)
+              if !k.hasFVar && !k.hasMVar && !(← found.get).contains k then
+                -- functions and constants only: no types, propositions or instances
+                let kty ← inferType k
+                let isTy ← isTypeFormerType kty
+                let isPr ← isProp kty
+                let isInst ← isInstance c
+                if !isTy && !isPr && !isInst then found.modify (·.push k)
       for a in e.getAppArgs do visit a
       unless e.getAppFn.isConst do visit e.getAppFn
     | .lam _ ty b _ | .forallE _ ty b _ =>
