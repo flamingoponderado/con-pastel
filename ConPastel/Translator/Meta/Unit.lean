@@ -135,7 +135,7 @@ def translateFunctionP (key val : Expr) (xn : Name) (xty invA invB : Expr) (deps
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp (invB.beta #[x, hp]) bodyT])
         let gst : GSt := { locals := #[{ fvar := x, cname := param, value := xv, rel := hx }] }
         let _ ← (solve g.mvarId!).run gst |>.run gctx
-        let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
+        let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
           mkApp (invB.beta #[x, hp]) (mkApp2 key x hp), hnodup, hfind, g]
         mkLambdaFVars #[x, xv, hx, hp] app
     finishUnit key uname cname (.function param (uname ++ `body) false) deps body hyps envC funs pf key inv
@@ -168,7 +168,7 @@ def translateFunction (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := d
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invB (val.beta #[x])])
         let gst : GSt := { locals := #[{ fvar := x, cname := param, value := xv, rel := hx }] }
         let _ ← (solve g.mvarId!).run gst |>.run gctx
-        let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
+        let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
           mkApp invB (mkApp key x), hnodup, hfind, g]
         mkLambdaFVars #[x, xv, hx] app
     finishUnit key uname cname (.function param (uname ++ `body) false) deps body hyps envC funs pf key inv
@@ -190,7 +190,7 @@ def translateThunk (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
         let env ← bodyEnv envC funs param xv
         let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invT val])
         let _ ← (solve g.mvarId!).run {} |>.run gctx
-        let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
+        let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, xv,
           mkApp invT key, hnodup, hfind, g]
         mkLambdaFVars #[x, xv, hx] app
     finishUnit key uname cname (.thunk param (uname ++ `body)) deps body hyps envC funs pf target inv
@@ -315,10 +315,10 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
           | some e => pure e
           | none => eqnApp as
         let _ ← (destructAndSolve g.mvarId! env invB f eqnAppS #[] p n).run gst |>.run gctx
-        let app ← mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, pv,
+        let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, pv,
           mkApp invB (mkApp ft p), hnodup, hfind, g]
         mkLambdaFVars #[p, ih, pv, hp] app
-    let pf ← mkAppOptM ``arrow_of_wf #[τ, resTy, invT, invB, r, hwf, ft, cl, pfH]
+    let pf ← withTransparency .all <| mkAppOptM ``arrow_of_wf #[τ, resTy, invT, invB, r, hwf, ft, cl, pfH]
     finishUnit key uname cname (.function param (uname ++ `body) tupled) deps body hyps envC funs pf ft inv
 
 /-- Is `c` defined by recursion (structural or well-founded)? -/
