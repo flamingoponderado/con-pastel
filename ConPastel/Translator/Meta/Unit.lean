@@ -712,6 +712,7 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
   if stack.length > 200 then throwError "unit dependency chain too deep at {key}"
   -- a mutual block: translate the constants its members' equations mention first
   -- (best effort), so the block is not restarted for every dependency it discovers
+  let mut extra := extra
   if extra.isEmpty then
     if let .const c _ := key.getAppFn then
       let ms ← mutualMembers c
@@ -725,6 +726,11 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
               let msg ← e.toMessageData.toString
               if (msg.splitOn "cake: need datatype").length > 1 then throw e
               s0.restore
+        -- every candidate that is a unit is a dependency up front (also those only
+        -- reached after unfolding, which the block's equations do not mention)
+        let envNow ← getEnv
+        extra := cands.filter fun k => (getUnit? envNow k).isSome
+
   let saved ← saveState
   needUnitRef.set none
   try
