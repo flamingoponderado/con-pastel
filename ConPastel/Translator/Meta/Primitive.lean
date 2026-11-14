@@ -107,4 +107,19 @@ elab "cake_replace_assuming " k:ident r:ident p:term : command => do
     pure P
   modifyEnv fun env => assumeReplaceExt.addEntry env (kc, rc, P)
 
+/-- `cake_alias A B "full.name"`: `A` an abbreviation of the (possibly private)
+constant `full.name`, and `B` a theorem stating its unfolding equation (to
+prove replacements of private library functions). -/
+elab "cake_alias " a:ident b:ident n:str : command => do
+  let src := n.getString.toName
+  liftTermElabM do
+    let ci ← getConstInfo src
+    let us := ci.levelParams.map Level.param
+    addDecl (Declaration.defnDecl (mkDefinitionValEx a.getId ci.levelParams ci.type (mkConst src us) .abbrev .safe []))
+    setReducibleAttribute a.getId
+    let some eqn ← getUnfoldEqnFor? src (nonRec := true) | throwError "no unfolding equation for {src}"
+    let eci ← getConstInfo eqn
+    addDecl (Declaration.thmDecl (mkTheoremValEx b.getId eci.levelParams eci.type
+      (mkConst eqn (eci.levelParams.map Level.param)) []))
+
 end ConPastel.Translator.Meta

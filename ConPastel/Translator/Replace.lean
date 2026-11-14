@@ -3,6 +3,8 @@ import ConPastel.Spec
 
 /-! # Replacements for library functions whose definitions do not translate -/
 
+cake_alias ConPastel.Impl.npGo ConPastel.Impl.npGo_eq "_private.Init.Data.Nat.Power2.Basic.0.Nat.nextPowerOfTwo.go"
+
 namespace ConPastel.Impl
 
 /-- `UInt8.utf8ByteSize` without its proof argument. -/
@@ -176,6 +178,22 @@ def nodupDec {α : Type u} [DecidableEq α] (l : List α) : Decidable l.Nodup :=
 
 theorem nodupDec_eq {α : Type u} [DecidableEq α] (l : List α) : List.nodupDecidable l = nodupDec l :=
   Subsingleton.elim _ _
+/-- `Nat.nextPowerOfTwo`'s loop without its proof parameter. -/
+def np2Go (n power : Nat) : Nat :=
+  if 0 < power ∧ power < n then np2Go n (power * 2) else power
+termination_by n - power
+
+theorem np2Go_eq (n power : Nat) (h : power > 0) : npGo n power h = np2Go n power := by
+  delta npGo; rw [npGo_eq, np2Go.eq_def]
+  by_cases hp : power < n
+  · simp only [hp, h, and_self, ite_true]
+    exact np2Go_eq n (power * 2) (by omega)
+  · simp [hp]
+termination_by n - power
+
+def nextPowerOfTwo (n : Nat) : Nat := np2Go n 1
+theorem nextPowerOfTwo_eq (n : Nat) : Nat.nextPowerOfTwo n = nextPowerOfTwo n :=
+  np2Go_eq n 1 (by decide)
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -185,6 +203,8 @@ cake_replace ByteArray.utf8Decode? ConPastel.Impl.utf8Decode ConPastel.Impl.utf8
 cake_replace ByteArray.utf8DecodeChar? ConPastel.Impl.decodeChar ConPastel.Impl.decodeChar_eq
 cake_replace String.foldl ConPastel.Impl.stringFoldl ConPastel.Impl.stringFoldl_eq
 cake_replace List.nodupDecidable ConPastel.Impl.nodupDec ConPastel.Impl.nodupDec_eq
+
+cake_replace Nat.nextPowerOfTwo ConPastel.Impl.nextPowerOfTwo ConPastel.Impl.nextPowerOfTwo_eq
 
 /-! Opaque runtime primitives, under `RuntimeAssumptions` (their transcriptions
 are checked against the runtime by `scripts/HashCheck.lean`). -/
