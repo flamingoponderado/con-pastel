@@ -1,4 +1,4 @@
-import ConPastel.Translator.Replace
+import ConPastel.Translator.Hoist
 import ConPastel.Translator.Meta.Datatype
 
 /-!
