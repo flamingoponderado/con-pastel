@@ -1466,6 +1466,15 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if let some mr := ctx.mrec? then
     if let .const cn _ := fn then
       if let some m := mr.members.find? (·.head == cn) then
+        -- over-applied (e.g. a monadic state argument): peel the extra arguments
+        if args.size > m.arity then
+          return ← solvePeel g env (mkAppN fn args.pop) args.back!
+        -- under-applied (a member as a function value): eta-expand
+        if args.size < m.arity then
+          let t' ← forallTelescope (← inferType t) fun xs _ => do
+            let xs := xs[:m.arity - args.size].toArray
+            mkLambdaFVars xs (mkAppN t xs)
+          return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
         if args.size == m.arity then
           let y ← if m.arity == 1 then pure args[0]! else
             args.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) args.back!
@@ -1482,7 +1491,17 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           assignProof g (← mkAppOptM ``Eval_app_ih #[none, none, m.invT, m.invB, env, none, none, m.cl, m.ft, y,
             hf, ← instantiateMVars (mkMVar gx), ihq])
           return
-  -- recursive calls
+  -- recursive calls (peel extra arguments, eta-expand partial applications)
+  if let some r := ctx.rec? then
+    if fn.isConstOf r.head && args.size > r.static.size + r.arity &&
+        (args[:r.static.size].toArray == r.static) then
+      return ← solvePeel g env (mkAppN fn args.pop) args.back!
+    if fn.isConstOf r.head && args.size ≥ r.static.size && args.size < r.static.size + r.arity &&
+        (args[:r.static.size].toArray == r.static) then
+      let t' ← forallTelescope (← inferType t) fun xs _ => do
+        let xs := xs[:r.static.size + r.arity - args.size].toArray
+        mkLambdaFVars xs (mkAppN t xs)
+      return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   if let some r := ctx.rec? then
     if fn.isConstOf r.head && args.size == r.static.size + r.arity &&
         (args[:r.static.size].toArray == r.static) then
