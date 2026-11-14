@@ -283,26 +283,32 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
   let param := "p"
   -- the parameter types, the result type and where arguments come from; the
   -- translation itself runs outside the parameters' scope (no leaks)
-  let (n, tys, resTy, wfSrc) ← forallTelescope (← inferType key) fun xs resTy => do
+  let (n, tys, resAbs, resTy0, dep, wfSrc) ← forallTelescope (← inferType key) fun xs resTy => do
     let tys ← xs.mapM inferType
-    if tys.any (·.hasFVar) || resTy.hasFVar then
-      throwError "{key}: dependent parameter or result types are not supported yet"
+    if tys.any (·.hasFVar) then
+      throwError "{key}: dependent parameter types are not supported yet"
     let wfSrc ← try wfArgSources key c xs catch _ => pure (#[], 0)
-    return (xs.size, tys, resTy, wfSrc)
+    return (xs.size, tys, ← mkLambdaFVars xs resTy, resTy, resTy.hasFVar, wfSrc)
+  -- the result type for given arguments (dependent results, e.g. `Decidable (a = b)`)
+  let resOf (as : Array Expr) : Expr := resAbs.beta as
   let tupled := n > 1
   let τ ← tupleTy tys.toList
   let invT ← invOf τ
-  let invB ← invOf resTy
+  -- the result invariant for given arguments, and as a function of the tuple
+  let invFor (as : Array Expr) : MetaM Expr := invOf (resOf as)
+  let invBf ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (← invFor (← tupleProjs p n).toArray)
+  let invBat (y : Expr) : Expr := if dep then invBf.beta #[y] else invBf.bindingBody!
   let f := key
+  let ftTy ← withLocalDeclD `p τ fun p => do mkForallFVars #[p] (resOf (← tupleProjs p n).toArray)
   let ft ← if tupled then do
       let tupName := uname ++ `tupled
       let tupVal ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (mkAppN f (← tupleProjs p n).toArray)
-      addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
+      addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] ftTy tupVal .abbrev .safe []))
       pure (mkConst tupName)
     else pure f
   let msr ← recursionMeasure key c static n τ
   let body ← mkFreshExprMVar (mkConst ``Exp)
-  let inv ← mkAppM ``Arrow #[invT, invB]
+  let inv ← if dep then mkAppM ``DARROW #[invT, invBf] else mkAppM ``Arrow #[invT, invBf.bindingBody!]
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx₀ => do
     let cl ← mkAppM ``Value.recclosure #[envC, funs, mlString cname]
     let wfr ← mkAppOptM ``measure #[τ, msr]
@@ -311,13 +317,14 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
     let pfH ← withLocalDeclD `p τ fun p => do
       let ihTy ← withLocalDeclD `y τ fun y => do
         mkForallFVars #[y] (← mkArrow (mkApp2 r y p) (← withLocalDeclD `yv (mkConst ``Value) fun yv => do
-          mkForallFVars #[yv] (← mkArrow (mkApp2 invT y yv) (← mkAppM ``AppReturns #[cl, yv, mkApp invB (mkApp ft y)]))))
+          mkForallFVars #[yv] (← mkArrow (mkApp2 invT y yv) (← mkAppM ``AppReturns #[cl, yv, mkApp (invBat y) (mkApp ft y)]))))
       withLocalDeclD `ih ihTy fun ih => do
       withLocalDeclD `pv (mkConst ``Value) fun pv => do
       withLocalDeclD `hp (mkApp2 invT p pv) fun hp => do
         let env ← bodyEnv envC funs param pv
-        let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp invB (mkApp ft p)])
-        let rf : RecFn := { head := c, static, ih, cl, cname, arity := n, argSrc := wfSrc.1, nPacked := wfSrc.2, lvls }
+        let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, body, mkApp (invBat p) (mkApp ft p)])
+        let depInfo : Option (Expr × Expr) := if dep then some (invBf, ft) else none
+        let rf : RecFn := { head := c, static, ih, cl, cname, arity := n, argSrc := wfSrc.1, nPacked := wfSrc.2, lvls, dep? := depInfo }
         let gctx := { gctx₀ with rec? := some rf }
         let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
         let eqnAppS (as : Array Expr) : MetaM Expr := do
@@ -325,11 +332,14 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
           match ← wfFunctionalEqn key c wfSrc.1 wfSrc.2 as with
           | some e => pure e
           | none => eqnApp as
-        let _ ← (destructAndSolve g.mvarId! env invB f eqnAppS #[] p n).run gst |>.run gctx
+        let _ ← (destructAndSolve g.mvarId! env invFor f eqnAppS #[] p n).run gst |>.run gctx
         let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname, mlString param, body, pv,
-          mkApp invB (mkApp ft p), hnodup, hfind, g]
+          mkApp (invBat p) (mkApp ft p), hnodup, hfind, g]
         mkLambdaFVars #[p, ih, pv, hp] app
-    let pf ← withTransparency .all <| mkAppOptM ``arrow_of_wf #[τ, resTy, invT, invB, r, hwf, ft, cl, pfH]
+    let βf ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (resOf (← tupleProjs p n).toArray)
+    let pf ← withTransparency .all <| if dep then
+        mkAppOptM ``darrow_of_wf #[τ, βf, invT, invBf, r, hwf, ft, cl, pfH]
+      else mkAppOptM ``arrow_of_wf #[τ, resTy0, invT, invBf.bindingBody!, r, hwf, ft, cl, pfH]
     finishUnit key uname cname (.function param (uname ++ `body) tupled) deps body hyps envC funs pf ft inv
 
 /-- Is `c` defined by recursion (structural or well-founded)? -/

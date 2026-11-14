@@ -46,6 +46,9 @@ structure RecFn where
   argSrc : Array (Bool × Nat) := #[]
   nPacked : Nat := 0
   lvls : List Level := []
+  /-- A dependent result type: the result invariant as a function of the
+  argument tuple, and the tupled function. -/
+  dep? : Option (Expr × Expr) := none
 
 structure GCtx where
   hbool : Expr
@@ -576,7 +579,31 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let τ := d.ty
   let dep ← withLocalDeclD `x τ fun x => do
     return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
-  if dep then throwError "dependent casesOn motive not supported"
+  if dep then
+    -- a newtype result (e.g. `Decidable (x = b)`): the projection commutes with the
+    -- case split, `(casesOn x alts).1 = casesOn x (fun fs => (alt fs).1)` (by cases)
+    let (``NEWTYPE, #[_, F, proj, A]) := inv.getAppFnArgs
+      | throwError "dependent casesOn motive not supported (invariant {inv})"
+    unless major.isFVar do throwError "dependent casesOn on a non-variable {major}"
+    let .const cn lvls := fn | throwError "bad casesOn {fn}"
+    let u ← getLevel F
+    let motive' ← withLocalDeclD `x τ fun x => mkLambdaFVars #[x] F
+    let alts' ← alts.mapM fun alt => do
+      forallTelescope (← inferType alt) fun fs _ => do mkLambdaFVars fs (mkApp proj (mkAppN alt fs)).headBeta
+    let t := mkAppN fn args
+    let t' := mkAppN (mkConst cn (u :: lvls.tail!)) (args[:np].toArray ++ #[motive', major] ++ alts')
+    let mv ← mkFreshExprMVar (← mkEq (mkApp proj t).headBeta t')
+    let subs ← mv.mvarId!.cases major.fvarId!
+    for sg in subs do sg.mvarId.refl
+    let heq ← instantiateMVars mv
+    let ce ← evalGoalCe g
+    let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp A t'])
+    solve gb.mvarId!
+    let motiveE ← withLocalDeclD `w F fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp A w])
+    let pf ← mkEqMP (← mkCongrArg motiveE (← mkEqSymm heq)) (← instantiateMVars gb)
+    let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp A (mkApp proj t).headBeta])
+    g.assign pf
+    return
   unless major.isFVar do
     let letT := Expr.letE `z τ major (mkAppN fn (args[:np].toArray ++ #[motive, .bvar 0] ++ alts)) false
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv letT])
@@ -1174,6 +1201,10 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let hl ← proveLookupG env r.cname r.cl ctx.unfoldRec
       let clEq ← withLocalDeclD `w (mkConst ``Value) fun w => do mkLambdaFVars #[w] (← mkEq w r.cl)
       let hf ← mkAppOptM ``Eval_var #[env, shortIdent r.cname, r.cl, clEq, hl, ← mkEqRefl r.cl]
+      if let some (invBf, ft) := r.dep? then
+        assignProof g (← mkAppOptM ``Eval_app_ihd #[none, none, invA, invBf, env, none, none, r.cl, ft, y,
+          hf, ← instantiateMVars (mkMVar gx), ihy])
+        return
       assignProof g (← mkAppOptM ``Eval_app_ih #[none, none, invA, inv, env, none, none, r.cl, none, y,
         hf, ← instantiateMVars (mkMVar gx), ihy])
       return
@@ -1205,7 +1236,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             if (d.binderInfo.isImplicit || d.binderInfo.isInstImplicit || d.binderInfo.isStrictImplicit ||
                 ty.isSort) && args[i]!.hasFVar then r := true
           return r
-        if openStatic then
+        if openStatic || cn == ``Decidable.isTrue || cn == ``Decidable.isFalse then
           let t' := (mkAppN (← instantiateValueLevelParams (.defnInfo di) lvls) args).headBeta
           return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- constants translated as thunks: `c ()`
@@ -1221,6 +1252,17 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             let hx ← mkAppM ``Eval_unit #[env]
             assignProof g (← mkAppM ``Eval_app_arrow #[hf, hx])
             return
+  -- under-applied tupled global units (as function values): eta-expand
+  if fn.isConst then
+    if let some (key, dargs) ← splitKey t then
+      if let some u := getUnit? (← getEnv) key then
+        if let .function _ _ true := u.kind then
+          let arity ← forallTelescope (← inferType key) fun xs _ => pure xs.size
+          if dargs.size < arity then
+            let t' ← forallTelescope (← inferType t) fun xs _ => do
+              let xs := xs[:arity - dargs.size].toArray
+              mkLambdaFVars xs (mkAppN t xs)
+            return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- fully applied tupled global units: call the tupled closure with a tuple
   if fn.isConst then
     if let some (key, dargs) ← splitKey t then
@@ -1233,6 +1275,11 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             let some gv := ctx.globals.get? key | throwNeedUnit key
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tupFn, hl, gv.cert]
+            if let (``DARROW, #[_, _, invT, _]) := gv.inv.getAppFnArgs then
+              let (_, gt) ← newEvalGoal env (mkApp invT tup)
+              solve gt
+              assignProof g (← mkAppM ``Eval_app_darrow #[hf, ← instantiateMVars (mkMVar gt)])
+              return
             let (``Arrow, #[_, _, invT, _]) := gv.inv.getAppFnArgs | throwError "tupled unit invariant"
             let (_, gt) ← newEvalGoal env (mkApp invT tup)
             solve gt

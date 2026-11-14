@@ -53,4 +53,31 @@ theorem Eval_mat_pair {α β γ : Type} {A : RefInv α} {B : RefInv β} {C : Ref
   have := Runs.add_clock hbr (by simp) a₂
   simpa [clauseEnv, List.append_assoc] using this
 
+/-! ## Dependent variants (results whose type depends on the arguments) -/
+
+theorem Eval_mat_pair_dep {α β : Type} {γ : α → β → Type} {A : RefInv α} {B : RefInv β}
+    {C : (a : α) → (b : β) → RefInv (γ a b)}
+    {env : SemEnv Value} {e body : Exp} {x y : VarN} {p : α × β} {f : (a : α) → (b : β) → γ a b}
+    (hxy : x ≠ y) (he : Eval env e (PAIR A B p))
+    (hb : ∀ a b, p = (a, b) → ∀ av bv, A a av → B b bv →
+      Eval (clauseEnv env [x, y] [av, bv]) body (C a b (f a b))) :
+    Eval env (.mat e [(.pcon none [.pvar x, .pvar y], body)]) (C p.1 p.2 (f p.1 p.2)) :=
+  Eval_mat_pair (C := fun (Q : Value → Prop) v => Q v) (f := fun a b => C a b (f a b)) hxy he hb
+
+theorem darrow_of_wf {α : Type} {β : α → Type} {A : RefInv α} {B : (x : α) → RefInv (β x)}
+    {r : α → α → Prop} (hwf : WellFounded r) {f : (x : α) → β x} {cl : Value}
+    (h : ∀ x, (∀ y, r y x → ∀ yv, A y yv → AppReturns cl yv (B y (f y))) →
+      ∀ xv, A x xv → AppReturns cl xv (B x (f x))) :
+    DARROW A B f cl := by
+  intro x
+  induction x using hwf.induction with
+  | _ x ih => exact h x ih
+
+theorem Eval_app_ihd {α : Type} {β : α → Type} {A : RefInv α} {B : (x : α) → RefInv (β x)}
+    {env : SemEnv Value} {ef ex : Exp} {cl : Value} {f : (x : α) → β x} {y : α}
+    (hf : Eval env ef (· = cl)) (hx : Eval env ex (A y))
+    (ih : ∀ yv, A y yv → AppReturns cl yv (B y (f y))) :
+    Eval env (.app .opapp [ef, ex]) (B y (f y)) :=
+  Eval_app hf hx fun _ yv hfv hy => hfv ▸ ih yv hy
+
 end ConPastel.Translator
