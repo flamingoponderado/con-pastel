@@ -772,6 +772,9 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       match ← reduceMatcher? t' with
       | .reduced r => pure r
       | _ => pure t'
+  -- last resort: the matcher's compiled body (e.g. literal patterns: decidable tests)
+  if unfolded.getAppFn != t.getAppFn then
+    return ← solve (← replaceT unfolded)
   throwError "cannot translate match {t}"
 
 partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
@@ -1133,6 +1136,24 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if t.isConstOf ``Unit.unit || t.isConstOf ``PUnit.unit then
     assignProof g (← mkAppM ``Eval_unit #[env])
     return
+  -- non-recursive definitions with an open (local-dependent) implicit or type argument
+  -- (e.g. `@Decidable.isTrue (a = b) h`): no closed unit key, so unfold in place
+  if let .const cn lvls := fn then
+    if let some (.defnInfo di) := (← getEnv).find? cn then
+      let lenv ← getEnv
+      let isRec := (Lean.Elab.Structural.eqnInfoExt.find? lenv cn).isSome || (Lean.Elab.WF.eqnInfoExt.find? lenv cn).isSome
+      if !isRec && !(← Meta.isMatcher cn) && !(replaceExt.getState lenv).contains cn then
+        let openStatic ← forallBoundedTelescope di.type args.size fun xs _ => do
+          let mut r := false
+          for i in [0:xs.size] do
+            let d ← xs[i]!.fvarId!.getDecl
+            let ty ← whnfD d.type
+            if (d.binderInfo.isImplicit || d.binderInfo.isInstImplicit || d.binderInfo.isStrictImplicit ||
+                ty.isSort) && args[i]!.hasFVar then r := true
+          return r
+        if openStatic then
+          let t' := (mkAppN (← instantiateValueLevelParams (.defnInfo di) lvls) args).headBeta
+          return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- constants translated as thunks: `c ()`
   if fn.isConst then
     if let some (key, dargs) ← splitKey t then
