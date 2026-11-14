@@ -263,6 +263,9 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
   let (env, p) ← evalGoalParts g
   let (inv, t) ← splitInv p
   let t := (← instantiateMVars t).headBeta
+  -- a beta-redex whose head lambda is wrapped in metadata
+  let t := if t.getAppFn.consumeMData.isLambda && t.getAppNumArgs > 0 then
+      (mkAppN t.getAppFn.consumeMData t.getAppArgs).headBeta else t
   let st ← get
   let ctx ← read
   -- locals
@@ -285,6 +288,17 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
           let pf ← mkEqMP (← mkCongrArg motive heq) (← instantiateMVars gb)
           g.assign pf
           return
+  -- `List.get l f` (dependent on `l`) as `List.getD l f.val default` for inhabited types
+  if let (``List.get, #[α, l, f]) := t.getAppFnArgs then
+    if let .some inh ← trySynthInstance (← mkAppM ``Inhabited #[α]) then
+      let heq ← mkAppOptM ``list_get_eq_getD #[α, inh, l, f]
+      let t' ← mkAppOptM ``List.getD #[α, l, ← mkAppM ``Fin.val #[f], ← mkAppOptM ``Inhabited.default #[α, inh]]
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+      g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+      return
   -- string literals: `s` is `String.ofByteArray ⟨⟨[bytes]⟩⟩ s.isValidUTF8` (structure eta)
   if let .lit (.strVal str) := t then
     let u8 := mkConst ``UInt8
@@ -931,6 +945,15 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let τ ← whnfR (← inferType args[ii.numParams + 1]!)
           if let some d := getDatatypeByType? (← getEnv) τ then
             return ← solveCases g env inv d fn ii.numParams args
+  -- `Nat.rec` whose step ignores the induction hypothesis is `Nat.casesOn`
+  if fn.isConstOf ``Nat.rec && args.size == 4 then
+    if let .lam n nty (.lam _ _ body _) bi := args[2]! then
+      if !body.hasLooseBVar 0 then
+        let step := Expr.lam n nty (body.lowerLooseBVars 1 1) bi
+        let .const _ lvls := fn | unreachable!
+        let t' := mkAppN (mkConst ``Nat.casesOn lvls) #[args[0]!, args[3]!, args[1]!, step]
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+        return ← solve g'
   -- Nat.casesOn with a non-dependent motive
   if fn.isConstOf ``Nat.casesOn && args.size == 4 then
     let n := args[1]!

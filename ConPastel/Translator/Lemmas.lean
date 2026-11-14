@@ -254,4 +254,9 @@ theorem Eval_eqrec {α : Type} {a : α} {motive : (b : α) → a = b → Type}
     Eval env e (I b h (Eq.rec (motive := motive) m h)) := by
   cases h; exact hm
 
+/-- Bounded list indexing as total indexing with a default (used for `List.get`). -/
+theorem list_get_eq_getD {α : Type u} [Inhabited α] (l : List α) (f : Fin l.length) :
+    l.get f = l.getD f.val default := by
+  simp [List.getD_eq_getElem?_getD]
+
 end ConPastel.Translator
