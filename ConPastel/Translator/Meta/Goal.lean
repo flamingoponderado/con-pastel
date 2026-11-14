@@ -236,7 +236,8 @@ def newEvalGoal (env p : Expr) : MetaM (Expr × MVarId) := do
 /-- Close `g` with the proof `pf`, unifying types (this fixes `?ce`). -/
 def assignProof (g : MVarId) (pf : Expr) : MetaM Unit := do
   let pty ← inferType pf
-  unless ← isDefEq pty (← g.getType) do
+  -- matchers (`instance_reducible`) only unfold at transparency `.all`
+  unless (← isDefEq pty (← g.getType)) || (← withTransparency .all (isDefEq pty (← g.getType))) do
     throwError "lemma does not fit goal:\n{pty}\nvs\n{← g.getType}"
   g.assign pf
 
@@ -858,7 +859,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       mkLambdaFVars #[h] (← instantiateMVars g')
     let pf ← mkAppOptM ``Eval_bool_rec #[none, inv, env, none, ceT, ceF, b, f, tt,
       ← instantiateMVars (mkMVar gb), hf, ht]
-    let _ := t'
+    let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
     assignProof g pf
     return
   -- dependent if-then-else: the branches see the condition (or its negation)
