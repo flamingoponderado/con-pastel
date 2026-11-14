@@ -1014,6 +1014,15 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
   let args := t.getAppArgs
+  -- under-applied `casesOn` (as a function value): eta-expand to its full arity
+  if let .const cn _ := fn then
+    if isAuxRecursor (← getEnv) cn then
+      let arity ← forallTelescope (← inferType fn) fun xs _ => pure xs.size
+      if args.size < arity then
+        let t' ← forallTelescope (← inferType t) fun xs _ => do
+          let xs := xs[:arity - args.size].toArray
+          mkLambdaFVars xs (mkAppN t xs)
+        return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- under-applied constructors (constructors as function values): eta-expand
   if let .const cn _ := fn then
     if let some (.ctorInfo ci) := (← getEnv).find? cn then
