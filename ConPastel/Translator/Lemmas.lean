@@ -330,4 +330,10 @@ theorem forIn'_eq_listForIn {m : Type u → Type v} [Monad m] {α : Type w} {β 
     congr 1; funext r; cases r with
     | done b => rfl
     | yield b => exact ih b
+/-- `for i in [a:b:s]` loops as `listForIn` over `List.range'`. -/
+theorem rangeForIn'_eq {m : Type u → Type v} [Monad m] {β : Type u} (r : Std.Legacy.Range) (init : β)
+    (f : Nat → β → m (ForInStep β)) :
+    Std.Legacy.Range.forIn' r init (fun a _ b => f a b) = listForIn (List.range' r.start r.size r.step) init f := by
+  have := Std.Legacy.Range.forIn'_eq_forIn'_range' r init (fun a _ b => f a b)
+  exact this.trans (forIn'_eq_listForIn _ _ _)
 end ConPastel.Impl

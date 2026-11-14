@@ -466,6 +466,26 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
         let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp inv (← inferType heq).appFn!.appArg!])
         g.assign pf
         return
+  -- `for i in [a:b:s]` loops (membership proof unused): `listForIn` over `List.range'`
+  if let (``Std.Legacy.Range.forIn', #[m, β, minst, rg, init, f]) := t.getAppFnArgs then
+    let f'? ← withLocalDeclD `a (mkConst ``Nat) fun a => do
+      let .forallE _ hty _ _ ← whnf (← inferType (mkApp f a)) | return none
+      withLocalDeclD `h hty fun h => withLocalDeclD `b β fun b => do
+        let e ← Meta.transform (mkApp3 f a h b).headBeta (pre := fun x => pure (.continue x.headBeta))
+        if e.containsFVar h.fvarId! then return none
+        return some (← mkLambdaFVars #[a, b] e)
+    if let some f' := f'? then
+      let heq ← mkAppOptM ``ConPastel.Impl.rangeForIn'_eq #[m, minst, β, rg, init, f']
+      let t' := (← inferType heq).appArg!
+      let ce ← evalGoalCe g
+      let R ← inferType t
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
+      let pf ← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb)
+      let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp inv (← inferType heq).appFn!.appArg!])
+      g.assign pf
+      return
   -- string literals: `s` is `String.ofByteArray ⟨⟨[bytes]⟩⟩ s.isValidUTF8` (structure eta)
   if let .lit (.strVal str) := t then
     let u8 := mkConst ``UInt8
