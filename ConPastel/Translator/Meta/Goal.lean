@@ -119,7 +119,7 @@ partial def lookupNs (ns : Expr) (n : String) : MetaM (Expr × Expr) := do
       let pairs ← (xl.zip vl).reverse.mapM fun (x, v) => mkAppM ``Prod.mk #[x, v]
       let pty ← mkAppM ``Prod #[mkConst ``VarN, mkConst ``Value]
       let al ← mkListLit pty pairs
-      lookupNs (← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[none, none, none, al],
+      lookupNs (← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[mkConst ``ModN, none, none, al],
         ← mkAppM ``SemEnv.v #[env']]) n
     | _ => throwError "lookup: opaque environment {env}"
   | (``nsBind, #[_, _, _, k, x, rest]) => lookBind k x rest
@@ -140,7 +140,7 @@ partial def lookupNs (ns : Expr) (n : String) : MetaM (Expr × Expr) := do
         let some ks := mlStringLit? k | throwError "alist key not a literal"
         let tlE ← mkListLit (← inferType p) tl
         if ks == n then return (x, ← mkAppM ``lk_app_same #[k, x, tlE, rest])
-        let (v, h) ← lookupNs (← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[none, none, none, tlE], rest]) n
+        let (v, h) ← lookupNs (← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[mkConst ``ModN, none, none, tlE], rest]) n
         let hne ← mkDecideProof (mkNot (← mkEq nm k))
         return (v, ← mkAppM ``lk_app_ne #[hne, x, tlE, rest, h])
     | _ => throwError "lookup: nsAppend of {a}"
@@ -170,8 +170,13 @@ def proveLookupG (env : Expr) (n : String) (v : Expr) (unfoldRec : Bool := true)
   -- direct proof first
   let direct? ← try
       let (v', pf) ← lookupNs (← mkAppM ``SemEnv.v #[env]) n
-      if ← isDefEq v' v then pure (some pf) else pure none
-    catch _ => pure none
+      if ← isDefEq v' v then pure (some pf) else
+        if (← IO.getEnv "CAKE_TRACE").isSome then cakeLog s!"[lookup-fallback] {n}: value mismatch"
+        pure none
+    catch e =>
+      if (← IO.getEnv "CAKE_TRACE").isSome then
+        cakeLog s!"[lookup-fallback] {n}: {(← e.toMessageData.toString).take 300}"
+      pure none
   if let some pf := direct? then return pf
   let goal ← mkEq (← mkAppM ``nsLookup #[← mkAppM ``SemEnv.v #[env], shortIdent n])
     (← mkAppM ``Option.some #[v])
@@ -225,10 +230,28 @@ def splitInv (p : Expr) : MetaM (Expr × Expr) := do
   | .app inv t => return (inv, t)
   | _ => throwError "invariant application expected: {p}"
 
+/-- `t` with the occurrences of the discriminant `d` abstracted (`d` need not
+be a free variable); fails rather than produce a `let` that changes nothing. -/
+def abstractDiscr (t d : Expr) : MetaM Expr := do
+  let b ← kabstract t d
+  unless b.hasLooseBVars do throwError "cannot abstract discriminant {d} in {t}"
+  return b
+
 mutual
 
 partial def solve (g : MVarId) : GoalM Unit := do
-  try solveCore g
+  let trace := (← IO.getEnv "CAKE_TRACE").isSome
+  let t0 ← IO.monoMsNow
+  if trace then
+    let (_, p) ← evalGoalParts g
+    cakeLog s!"[enter] {(← ppExpr p).pretty.take 160}"
+  try
+    solveCore g
+    if trace then
+      let dt := (← IO.monoMsNow) - t0
+      if dt > 1000 then
+        let (_, p) ← evalGoalParts g
+        cakeLog s!"[trace] {dt}ms {(← ppExpr p).pretty.take 300}"
   catch e =>
     let msg ← e.toMessageData.toString
     if (msg.splitOn needUnitTag).length > 1 || (msg.splitOn "[in ").length > 1 ||
@@ -621,7 +644,7 @@ partial def solveSparseCases (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let replaceT (t' : Expr) : GoalM MVarId := do
     g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
   unless d.isFVar do
-    let letT := Expr.letE `z (← inferType d) d (t.abstract #[d]) false
+    let letT := Expr.letE `z (← inferType d) d (← abstractDiscr t d) false
     return ← solve (← replaceT letT)
   splitOn g env inv t d fun t' => do
     let f := t'.getAppFn
@@ -654,7 +677,7 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     let some (.inductInfo _) := (← getEnv).find? I | continue
     unless d.isFVar do
       -- bind the discriminant: `m … d …` is `let z := d; m … z …`
-      let letT := Expr.letE `z (← inferType d) d (t.abstract #[d]) false
+      let letT := Expr.letE `z (← inferType d) d (← abstractDiscr t d) false
       return ← solve (← replaceT letT)
     return ← splitOn g env inv t d fun t' => do
       match ← reduceMatcher? t' with

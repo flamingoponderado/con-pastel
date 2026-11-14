@@ -87,4 +87,14 @@ def unitCount (env : Environment) : Nat :=
 def allUnits (env : Environment) : Array UnitInfo :=
   (unitExt.getState env).toArray.map (·.2)
 
+
+/-- Progress line: appended (and flushed) to the file named by `CAKE_LOG`, else stderr. -/
+def cakeLog (msg : String) : IO Unit := do
+  match ← IO.getEnv "CAKE_LOG" with
+  | some path =>
+    let h ← IO.FS.Handle.mk path .append
+    h.putStrLn msg
+    h.flush
+  | none => IO.eprintln msg
+
 end ConPastel.Translator.Meta

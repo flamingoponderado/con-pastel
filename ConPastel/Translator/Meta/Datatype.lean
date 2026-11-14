@@ -84,6 +84,7 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
   let env ← getEnv
   let stamp := nextStamp env
   logInfo m!"cake datatype t{stamp}: {τ} ({(← liftTermElabM (ctorFields τ)).size} constructors)"
+  cakeLog s!"[cake] datatype t{stamp}: {← liftTermElabM (do return (← ppExpr τ).pretty.take 120)}"
   let N := Name.mkStr `ConPastel.CakeT s!"t{stamp}"
   let .const I _ := τ.getAppFn | throwError "{τ} is not an inductive type"
   let some (.inductInfo ii) := env.find? I | throwError "{τ} is not an inductive type"
