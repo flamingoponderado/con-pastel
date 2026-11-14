@@ -347,6 +347,10 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
   | _ => solveApp g env inv t
 
 partial def solveLet (g : MVarId) (env inv : Expr) (n : Name) (ty v b : Expr) : GoalM Unit := do
+  -- lets of propositions, proofs and types have no runtime content: substitute
+  if (← isProp ty) || (← whnfD ty).isSort then
+    let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
+    return ← solve g'
   let cname ← freshCName
   let invV ← invOf ty
   let (_, gv) ← newEvalGoal env (mkApp invV v)
@@ -954,10 +958,18 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let ihTy ← whnfR (← inferType r.ih)
       let .forallE _ _ body _ := ihTy | throwError "bad IH"
       let .forallE _ relTy _ _ := body.instantiate1 y | throwError "bad IH"
-      let hdec ← closeWith relTy (← `(tactic| first
-        | decreasing_tactic
-        | (simp_wf; omega)
-        | (simp only [InvImage, Nat.lt_eq] at *; omega)))
+      let hdec ← try closeWith relTy (← `(tactic| first
+          | decreasing_tactic
+          | (simp_wf; omega)
+          | (simp only [InvImage, Nat.lt_eq] at *; omega)
+          | (subst_vars; simp_wf; omega)
+          | (subst_vars; simp only [WellFoundedRelation.rel, measure, InvImage, invImage, Nat.lt_wfRel] at *; omega)
+          | (subst_vars; simp_wf; decreasing_tactic)))
+        catch _ =>
+          let hyps ← (← getLCtx).foldlM (init := m!"") fun acc d => do
+            if d.isImplementationDetail then return acc
+            if ← isProp d.type then return acc ++ m!"\n  {d.userName} : {d.type}" else return acc
+          throwError "cannot prove the recursive call decreases: {← whnfR relTy}\nhypotheses:{hyps}"
       let ihy := mkApp2 r.ih y hdec
       let ihyTy ← whnfR (← inferType ihy)
       let .forallE _ _ ihB _ := ihyTy | throwError "bad IH at y"
