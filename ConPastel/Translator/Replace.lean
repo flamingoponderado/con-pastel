@@ -216,6 +216,28 @@ theorem arrayEraseIdx_eq {α : Type u} (a : Array α) (i : Nat) (h : i < a.size)
     a.eraseIdx i h = ⟨a.toList.eraseIdx i⟩ := by
   apply Array.ext'; simp
 
+/-! `Array` operations over the list (core `Array` loops recurse with proof parameters). -/
+section ArrayOps
+variable {α : Type u} {β : Type v}
+theorem arrayFoldl_eq (f : β → α → β) (init : β) (as : Array α) :
+    as.foldl f init 0 as.size = as.toList.foldl f init := (Array.foldl_toList ..).symm
+theorem arrayFoldr_eq (f : α → β → β) (init : β) (as : Array α) :
+    as.foldr f init as.size 0 = as.toList.foldr f init := (Array.foldr_toList ..).symm
+theorem arrayAny_eq (as : Array α) (p : α → Bool) : as.any p 0 as.size = as.toList.any p := by simp
+theorem arrayAll_eq (as : Array α) (p : α → Bool) : as.all p 0 as.size = as.toList.all p := by simp
+theorem arrayContains_eq [BEq α] (as : Array α) (a : α) : as.contains a = as.toList.contains a := by simp
+theorem arrayFilter_eq (p : α → Bool) (as : Array α) : as.filter p 0 as.size = ⟨as.toList.filter p⟩ := by
+  apply Array.ext'; simp
+theorem arrayFilterMap_eq (f : α → Option β) (as : Array α) : as.filterMap f 0 as.size = ⟨as.toList.filterMap f⟩ := by
+  apply Array.ext'; simp
+theorem arrayFlatMap_eq (f : α → Array β) (as : Array α) : as.flatMap f = ⟨as.toList.flatMap (fun x => (f x).toList)⟩ := by
+  apply Array.ext'; simp
+theorem arrayAppend_eq (as bs : Array α) : as ++ bs = ⟨as.toList ++ bs.toList⟩ := by apply Array.ext'; simp
+theorem arrayReverse_eq (as : Array α) : as.reverse = ⟨as.toList.reverse⟩ := by apply Array.ext'; simp
+theorem arrayFind?_eq (p : α → Bool) (as : Array α) : as.find? p = as.toList.find? p := by simp
+theorem arrayMapIdx_eq (f : Nat → α → β) (as : Array α) : as.mapIdx f = ⟨as.toList.mapIdx f⟩ := by apply Array.ext'; simp
+end ArrayOps
+
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -240,3 +262,16 @@ subtype (`resTerm_eq`), so the plain recursive specification is translated in
 place of the memo machinery (same results; the memo only saves work). -/
 cake_rewrite ConLeche.Expr.resTerm_eq
 cake_rewrite ConPastel.Impl.arrayEraseIdx_eq
+
+cake_rewrite ConPastel.Impl.arrayFoldl_eq
+cake_rewrite ConPastel.Impl.arrayFoldr_eq
+cake_rewrite ConPastel.Impl.arrayAny_eq
+cake_rewrite ConPastel.Impl.arrayAll_eq
+cake_rewrite ConPastel.Impl.arrayContains_eq
+cake_rewrite ConPastel.Impl.arrayFilter_eq
+cake_rewrite ConPastel.Impl.arrayFilterMap_eq
+cake_rewrite ConPastel.Impl.arrayFlatMap_eq
+cake_rewrite ConPastel.Impl.arrayAppend_eq
+cake_rewrite ConPastel.Impl.arrayReverse_eq
+cake_rewrite ConPastel.Impl.arrayFind?_eq
+cake_rewrite ConPastel.Impl.arrayMapIdx_eq
