@@ -824,6 +824,26 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     return ← solve (← replaceT t')
   let .const fnName lvls := t.getAppFn | unreachable!
   let args := t.getAppArgs
+  -- `match (d : Decidable P) with | isTrue h => a h | isFalse h => b h` is `@dite _ P d a b`
+  if let some info ← getMatcherInfo? fnName then
+    if info.numDiscrs == 1 && info.numAlts == 2 && args.size == info.numParams + 1 + 1 + 2 then
+      let d := args[info.numParams + 1]!
+      if let (``Decidable, #[P]) := (← whnfR (← inferType d)).getAppFnArgs then
+        let R ← inferType t
+        let a := args[info.numParams + 2]!
+        let b := args[info.numParams + 3]!
+        let t' ← mkAppOptM ``dite #[R, P, d, a, b]
+        let eqTy ← withLocalDeclD `x (← inferType d) fun x => do
+          mkForallFVars #[x] (← mkEq (mkAppN t.getAppFn (args.set! (info.numParams + 1) x))
+            (← mkAppOptM ``dite #[R, P, x, a, b]))
+        let eqAll ← closeWith eqTy (← `(tactic| (intro x; rcases x with ⟨b, r⟩; cases b <;> with_unfolding_all rfl)))
+        let heq := mkApp eqAll d
+        let ce ← evalGoalCe g
+        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+        solve gb.mvarId!
+        let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
+        g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+        return
   let mci ← getConstInfo fnName
   let unfolded := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
   if ← isSupportedCases unfolded then
