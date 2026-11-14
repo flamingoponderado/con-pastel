@@ -372,6 +372,11 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
   -- a beta-redex whose head lambda is wrapped in metadata
   let t := if t.getAppFn.consumeMData.isLambda && t.getAppNumArgs > 0 then
       (mkAppN t.getAppFn.consumeMData t.getAppArgs).headBeta else t
+  -- `(let x := v; b) a…` is `let x := v; b a…`
+  if let .letE n ty v b nd := t.getAppFn.consumeMData then
+    if t.getAppNumArgs > 0 then
+      let t' := Expr.letE n ty v (mkAppN b (t.getAppArgs.map (·.liftLooseBVars 0 1))) nd
+      return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   let st ← get
   let ctx ← read
   -- locals
@@ -498,6 +503,8 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     if let some (.inductInfo ii) := (← getEnv).find? I then
       if ii.ctors.length == 1 then
         let sty ← whnfR (← inferType sExp)
+        -- the structure must be a registered datatype (else `casesOn` would be undone by structure eta)
+        let _ ← invOf sty
         let .const _ lvls := sty.getAppFn | throwError "bad projection {t}"
         let params := sty.getAppArgs
         let R ← inferType t
@@ -621,6 +628,35 @@ partial def solveDecide (g : MVarId) (env c : Expr) : GoalM Unit := do
   let _ := t
   throwError "unsupported condition {c}"
 
+/-- A `casesOn` with a dependent motive whose result is a newtype (e.g.
+`Decidable (x = b)`): the projection commutes with the case split,
+`(casesOn x alts).1 = casesOn x (fun fs => (alt fs).1)` (proved by cases). -/
+partial def solveDepCasesNewtype (g : MVarId) (env inv fn : Expr) (np : Nat) (args : Array Expr) (τ : Expr) :
+    GoalM Unit := do
+  let major := args[np + 1]!
+  let alts := args[np + 2:].toArray
+  let (``NEWTYPE, #[_, F, proj, A]) := inv.getAppFnArgs
+    | throwError "dependent casesOn motive not supported (invariant {inv})"
+  unless major.isFVar do throwError "dependent casesOn on a non-variable {major}"
+  let .const cn lvls := fn | throwError "bad casesOn {fn}"
+  let u ← getLevel F
+  let motive' ← withLocalDeclD `x τ fun x => mkLambdaFVars #[x] F
+  let alts' ← alts.mapM fun alt => do
+    forallTelescope (← inferType alt) fun fs _ => do mkLambdaFVars fs (mkApp proj (mkAppN alt fs)).headBeta
+  let t := mkAppN fn args
+  let t' := mkAppN (mkConst cn (u :: lvls.tail!)) (args[:np].toArray ++ #[motive', major] ++ alts')
+  let mv ← mkFreshExprMVar (← mkEq (mkApp proj t).headBeta t')
+  let subs ← mv.mvarId!.cases major.fvarId!
+  for sg in subs do sg.mvarId.refl
+  let heq ← instantiateMVars mv
+  let ce ← evalGoalCe g
+  let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp A t'])
+  solve gb.mvarId!
+  let motiveE ← withLocalDeclD `w F fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp A w])
+  let pf ← mkEqMP (← mkCongrArg motiveE (← mkEqSymm heq)) (← instantiateMVars gb)
+  let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp A (mkApp proj t).headBeta])
+  g.assign pf
+
 partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Expr) (np : Nat)
     (args : Array Expr) : GoalM Unit := do
   let ctx ← read
@@ -630,31 +666,7 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let τ := d.ty
   let dep ← withLocalDeclD `x τ fun x => do
     return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
-  if dep then
-    -- a newtype result (e.g. `Decidable (x = b)`): the projection commutes with the
-    -- case split, `(casesOn x alts).1 = casesOn x (fun fs => (alt fs).1)` (by cases)
-    let (``NEWTYPE, #[_, F, proj, A]) := inv.getAppFnArgs
-      | throwError "dependent casesOn motive not supported (invariant {inv})"
-    unless major.isFVar do throwError "dependent casesOn on a non-variable {major}"
-    let .const cn lvls := fn | throwError "bad casesOn {fn}"
-    let u ← getLevel F
-    let motive' ← withLocalDeclD `x τ fun x => mkLambdaFVars #[x] F
-    let alts' ← alts.mapM fun alt => do
-      forallTelescope (← inferType alt) fun fs _ => do mkLambdaFVars fs (mkApp proj (mkAppN alt fs)).headBeta
-    let t := mkAppN fn args
-    let t' := mkAppN (mkConst cn (u :: lvls.tail!)) (args[:np].toArray ++ #[motive', major] ++ alts')
-    let mv ← mkFreshExprMVar (← mkEq (mkApp proj t).headBeta t')
-    let subs ← mv.mvarId!.cases major.fvarId!
-    for sg in subs do sg.mvarId.refl
-    let heq ← instantiateMVars mv
-    let ce ← evalGoalCe g
-    let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp A t'])
-    solve gb.mvarId!
-    let motiveE ← withLocalDeclD `w F fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp A w])
-    let pf ← mkEqMP (← mkCongrArg motiveE (← mkEqSymm heq)) (← instantiateMVars gb)
-    let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp A (mkApp proj t).headBeta])
-    g.assign pf
-    return
+  if dep then return ← solveDepCasesNewtype g env inv fn np args τ
   unless major.isFVar do
     let letT := Expr.letE `z τ major (mkAppN fn (args[:np].toArray ++ #[motive, .bvar 0] ++ alts)) false
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv letT])
@@ -708,7 +720,7 @@ partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) 
   let listTy ← mkAppM ``List #[α]
   let dep ← withLocalDeclD `x listTy fun x => do
     return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
-  if dep then throwError "dependent List.casesOn motive not supported"
+  if dep then return ← solveDepCasesNewtype g env inv fn 1 args listTy
   unless major.isFVar do
     let letT := Expr.letE `z listTy major (mkAppN fn #[α, motive, .bvar 0, nilAlt, consAlt]) false
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv letT])
@@ -875,31 +887,36 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     return ← solve (← replaceT t')
   let .const fnName lvls := t.getAppFn | unreachable!
   let args := t.getAppArgs
-  -- `match (d : Decidable P) with | isTrue h => a h | isFalse h => b h` is `@dite _ P d a b`
+  -- a `Decidable P` discriminant `d`: `t[d] = dite P (fun h => t[isTrue h]) (fun h => t[isFalse h])`
+  -- (by cases on `d`); each branch's match then reduces on that discriminant
   if let some info ← getMatcherInfo? fnName then
-    if info.numDiscrs == 1 && info.numAlts == 2 && args.size == info.numParams + 1 + 1 + 2 then
-      let d := args[info.numParams + 1]!
-      if let (``Decidable, #[P]) := (← whnfR (← inferType d)).getAppFnArgs then
-        let R ← inferType t
-        let a₀ := args[info.numParams + 2]!
-        let b₀ := args[info.numParams + 3]!
-        -- the alternatives in either order: the one over `¬P` is the false branch
-        let firstNeg ← do
-          let .forallE _ dom _ _ ← whnf (← inferType a₀) | pure false
-          pure (dom.isAppOfArity ``Not 1)
-        let (a, b) := if firstNeg then (b₀, a₀) else (a₀, b₀)
-        let t' ← mkAppOptM ``dite #[R, P, d, a, b]
-        let eqTy ← withLocalDeclD `x (← inferType d) fun x => do
-          mkForallFVars #[x] (← mkEq (mkAppN t.getAppFn (args.set! (info.numParams + 1) x))
-            (← mkAppOptM ``dite #[R, P, x, a, b]))
-        let eqAll ← closeWith eqTy (← `(tactic| (intro x; rcases x with ⟨b, r⟩; cases b <;> with_unfolding_all rfl)))
-        let heq := mkApp eqAll d
-        let ce ← evalGoalCe g
-        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
-        solve gb.mvarId!
-        let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
-        g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
-        return
+    for i in [0:info.numDiscrs] do
+      let pos := info.numParams + 1 + i
+      let d := args[pos]!
+      let (``Decidable, #[P]) := (← whnfR (← inferType d)).getAppFnArgs | continue
+      if d.getAppFn.isConstOf ``Decidable.isTrue || d.getAppFn.isConstOf ``Decidable.isFalse ||
+          d.getAppFn.isConstOf ``Decidable.intro then continue
+      let R ← inferType t
+      let tAt (x : Expr) : Expr := mkAppN t.getAppFn (args.set! pos x)
+      let branches (x : Expr) : MetaM (Expr × Expr) := do
+        let a ← withLocalDeclD `h P fun h => do mkLambdaFVars #[h] (tAt (← mkAppOptM ``Decidable.isTrue #[P, h]))
+        let b ← withLocalDeclD `h (mkNot P) fun h => do mkLambdaFVars #[h] (tAt (← mkAppOptM ``Decidable.isFalse #[P, h]))
+        let _ := x
+        pure (a, b)
+      let (a, b) ← branches d
+      let eqTy ← withLocalDeclD `x (← inferType d) fun x => do
+        mkForallFVars #[x] (← mkEq (tAt x) (← mkAppOptM ``dite #[R, P, x, a, b]))
+      let eqAll? ← try some <$> closeWith eqTy (← `(tactic| (intro x; rcases x with ⟨b, r⟩; cases b <;> with_unfolding_all rfl)))
+        catch _ => pure none
+      let some eqAll := eqAll? | continue
+      let heq := mkApp eqAll d
+      let t' ← mkAppOptM ``dite #[R, P, d, a, b]
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
+      g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+      return
   let mci ← getConstInfo fnName
   let unfolded := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
   if ← isSupportedCases unfolded then
