@@ -27,7 +27,7 @@ def allDatatypes (env : Environment) : Array DatatypeInfo :=
   ((datatypeExt.getState env).toList.map (·.2)).toArray.qsort (fun a b => a.stamp < b.stamp)
 
 def getDatatypeByType? (env : Environment) (ty : Expr) : Option DatatypeInfo :=
-  (allDatatypes env).find? (·.ty == ty)
+  (datatypeExt.getState env).fold (init := none) fun acc _ d => acc <|> (if d.ty == ty then some d else none)
 
 def nextStamp (env : Environment) : Nat :=
   2 + (datatypeExt.getState env).size
