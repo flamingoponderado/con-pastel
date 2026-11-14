@@ -315,6 +315,34 @@ def discrLetBody (t d : Expr) (pos : Nat) : MetaM Expr := do
   if ok then return positional
   abstractDiscr t d
 
+/-- A value of type `ty`, for defaults that are never used at runtime (total
+versions of bounded accessors): an `Inhabited` instance, else a constructor
+with defaulted fields. -/
+partial def defaultOf? (ty : Expr) (fuel : Nat := 6) : MetaM (Option Expr) := do
+  if fuel == 0 then return none
+  if let .some inh ← trySynthInstance (← mkAppM ``Inhabited #[ty]) then
+    return some (← mkAppOptM ``Inhabited.default #[ty, inh])
+  let ty ← whnfR ty
+  let .const I us := ty.getAppFn | return none
+  let some (.inductInfo ii) := (← getEnv).find? I | return none
+  if ← isProp ty then return none
+  let params := ty.getAppArgs[:ii.numParams].toArray
+  for c in ii.ctors do
+    let ci ← getConstInfo c
+    let mut cty ← instantiateForall (← instantiateTypeLevelParams ci.toConstantVal us) params
+    let mut args : Array Expr := #[]
+    let mut ok := true
+    while true do
+      let cty' ← whnf cty
+      let .forallE _ dom _ _ := cty' | break
+      if ← isProp dom then ok := false; break
+      if dom.getAppFn.isConstOf I then ok := false; break
+      let some v ← defaultOf? dom (fuel - 1) | ok := false; break
+      args := args.push v
+      cty := cty'.bindingBody!.instantiate1 v
+    if ok then return some (mkAppN (mkConst c us) (params ++ args))
+  return none
+
 mutual
 
 partial def solve (g : MVarId) : GoalM Unit := do
@@ -368,9 +396,9 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
           return
   -- `List.get l f` (dependent on `l`) as `List.getD l f.val default` for inhabited types
   if let (``List.get, #[α, l, f]) := t.getAppFnArgs then
-    if let .some inh ← trySynthInstance (← mkAppM ``Inhabited #[α]) then
-      let heq ← mkAppOptM ``list_get_eq_getD #[α, inh, l, f]
-      let t' ← mkAppOptM ``List.getD #[α, l, ← mkAppM ``Fin.val #[f], ← mkAppOptM ``Inhabited.default #[α, inh]]
+    if let some dflt ← defaultOf? α then
+      let heq ← mkAppOptM ``list_get_eq_getD' #[α, l, f, dflt]
+      let t' ← mkAppOptM ``List.getD #[α, l, ← mkAppM ``Fin.val #[f], dflt]
       let ce ← evalGoalCe g
       let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
       solve gb.mvarId!
@@ -379,9 +407,9 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
       return
   -- `Option.get o h` as `Option.getD o default` for inhabited types
   if let (``Option.get, #[α, o, h]) := t.getAppFnArgs then
-    if let .some inh ← trySynthInstance (← mkAppM ``Inhabited #[α]) then
-      let heq ← mkAppOptM ``option_get_eq_getD #[α, inh, o, h]
-      let t' ← mkAppOptM ``Option.getD #[α, o, ← mkAppOptM ``Inhabited.default #[α, inh]]
+    if let some dflt ← defaultOf? α then
+      let heq ← mkAppOptM ``option_get_eq_getD' #[α, o, h, dflt]
+      let t' ← mkAppOptM ``Option.getD #[α, o, dflt]
       let ce ← evalGoalCe g
       let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
       solve gb.mvarId!

@@ -263,6 +263,18 @@ theorem list_get_eq_getD {α : Type u} [Inhabited α] (l : List α) (f : Fin l.l
 decreasing proof (the translator reads the proof off; the value is `f y`). -/
 def recCall {α : Sort u} {β : α → Sort v} {P : Prop} (f : (a : α) → β a) (y : α) (_h : P) : β y := f y
 
+/-- Bounded list indexing as total indexing with any default. -/
+theorem list_get_eq_getD' {α : Type u} (l : List α) (f : Fin l.length) (d : α) :
+    l.get f = l.getD f.val d := by
+  simp [List.getD_eq_getElem?_getD]
+
+/-- `Option.get` as `Option.getD` with any default. -/
+theorem option_get_eq_getD' {α : Type u} (o : Option α) (h : o.isSome) (d : α) :
+    o.get h = o.getD d := by
+  cases o with
+  | none => simp at h
+  | some x => rfl
+
 /-- `Option.get` (dependent on its proof) as `Option.getD` for inhabited types. -/
 theorem option_get_eq_getD {α : Type u} [Inhabited α] (o : Option α) (h : o.isSome) :
     o.get h = o.getD default := by
