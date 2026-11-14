@@ -374,7 +374,7 @@ partial def solve (g : MVarId) : GoalM Unit := do
   let t0 ← IO.monoMsNow
   if trace then
     let (_, p) ← evalGoalParts g
-    cakeLog s!"[enter] {((← ppExpr p).pretty.replace "\n" " ").take 400}"
+    cakeLog s!"[enter] {((← ppExpr p).pretty.replace "\n" " ").take 1500}"
   try
     solveCore g
     if trace then
@@ -1332,9 +1332,13 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     if cn == tn ++ `casesOn then
       if let some (.inductInfo ii) := (← getEnv).find? tn then
         if args.size > ii.numParams + 1 then
-          let τ ← whnfR (← inferType args[ii.numParams + 1]!)
+          -- `whnfD`: the major's type may be behind a definition (e.g. `Id (ForInStep β)`)
+          let τ ← whnfD (← inferType args[ii.numParams + 1]!)
           if let some d ← findDatatype? τ then
             return ← solveCases g env inv d fn ii.numParams args
+          -- not registered yet: request it (closed types), rather than fall through
+          if !τ.hasFVar && !(← isProp τ) && (← newtypeInfo? τ).isNone then
+            let _ ← invOf τ
   -- `Nat.rec` whose step ignores the induction hypothesis is `Nat.casesOn`
   if fn.isConstOf ``Nat.rec && args.size == 4 then
     if let .lam n nty (.lam _ _ body _) bi := args[2]! then
