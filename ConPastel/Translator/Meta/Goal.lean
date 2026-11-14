@@ -273,7 +273,15 @@ partial def occursInProofOrType (e : Expr) (x : FVarId) : MetaM Bool := do
   if e.isFVar then return false
   if (← isProof e) || (← isType e) then return true
   match e with
-  | .app f a => return (← occursInProofOrType f x) || (← occursInProofOrType a x)
+  | .app .. =>
+    -- a proof argument's expected type may mention `x` (through other arguments)
+    let args := e.getAppArgs
+    for a in args do
+      if ← isProof a then return true
+    if ← occursInProofOrType e.getAppFn x then return true
+    for a in args do
+      if ← occursInProofOrType a x then return true
+    return false
   | .lam n t b bi | .forallE n t b bi =>
     if t.containsFVar x then return true
     withLocalDecl n bi t fun y => occursInProofOrType (b.instantiate1 y) x
