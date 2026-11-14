@@ -41,6 +41,16 @@ initialize replaceExt : SimplePersistentEnvExtension (Name × Name × Name) (Nam
     addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, r, t) => m.insert k (r, t)) m) {}
   }
 
+/-- Replacements under runtime assumptions `K ↦ (K', P)` with `P` a closed
+proposition `∀ xs, K xs = K' xs` (a field of `RuntimeAssumptions`): every unit
+takes the registered propositions as hypotheses, and `K xs` is translated as
+`K' xs` (e.g. `mixHash` as its transcription `leanMixHash`). -/
+initialize assumeReplaceExt : SimplePersistentEnvExtension (Name × Name × Expr) (Array (Name × Name × Expr)) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun a e => a.push e
+    addImportedFn := fun as => as.foldl (fun acc a => acc ++ a) #[]
+  }
+
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 

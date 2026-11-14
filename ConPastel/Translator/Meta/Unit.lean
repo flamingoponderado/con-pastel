@@ -75,10 +75,13 @@ def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (b
   withLocalDeclsDND (dts.toArray.map fun T => (`hc, mkApp (mkConst (T ++ `cakeHasCons)) envCc)) fun hcs => do
   let hasCons : NameMap Expr := (dts.zip hcs.toList).foldl (fun m (T, h) => m.insert T h) {}
   withLocalDeclD `hself (← groupLookupTy envC funs self) fun hself => do
+  let reps := assumeReplaceExt.getState (← getEnv)
+  withLocalDeclsDND (reps.map fun (_, _, P) => (`ha, P)) fun has => do
+  let assumed := (reps.zip has).map fun ((k, r, _), h) => (k, r, h)
   let rec go : List Expr → Array Expr → Std.HashMap Expr GlobalVar → MetaM α
     | [], acc, globals =>
-      k envC funs hnodup hfind (#[envC, funs, hnodup, hfind, hbool, hlist] ++ hcs ++ #[hself] ++ acc)
-        { hbool, hlist, hasCons, globals, unfoldRec := false }
+      k envC funs hnodup hfind (#[envC, funs, hnodup, hfind, hbool, hlist] ++ hcs ++ #[hself] ++ has ++ acc)
+        { hbool, hlist, hasCons, globals, unfoldRec := false, assumed }
     | d :: ds, acc, globals => do
       let some u := getUnit? (← getEnv) d | throwError "unit {d} missing"
       let (tgt, inv) ← unitTarget u
@@ -107,7 +110,8 @@ def finishUnit (key : Expr) (uname : Name) (cname : String) (kind : UnitKind) (d
       | none => pure m!"{mkFVar fv} (not in context)"
     throwError "certificate for {key} has leaked locals (mvars: {pf.hasMVar}): {descr}"
   addDecl (Declaration.thmDecl (mkTheoremValEx (uname ++ `cert) [] stmt pf []))
-  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := ← datatypeNames, deps }
+  let assumes := (assumeReplaceExt.getState (← getEnv)).map (·.2.2)
+  addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := ← datatypeNames, deps, assumes }
 
 /-- The body environment of a group entry. -/
 def bodyEnv (envC funs : Expr) (param : String) (xv : Expr) : MetaM Expr :=

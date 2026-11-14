@@ -92,4 +92,19 @@ elab "cake_replace " k:ident r:ident thm:ident : command => do
     unless ok do throwError "{tc} must state ∀ xs, {kc} xs = {rc} xs (same universe parameters, in order)"
   modifyEnv fun env => replaceExt.addEntry env (kc, rc, tc)
 
+/-- `cake_replace_assuming K K' P` with `P : Prop` closed, `∀ xs, K xs = K' xs`. -/
+elab "cake_replace_assuming " k:ident r:ident p:term : command => do
+  let kc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo k
+  let rc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo r
+  let P ← liftTermElabM do
+    let P ← instantiateMVars (← elabTerm p (mkSort .zero))
+    synthesizeSyntheticMVarsNoPostponing
+    let P ← instantiateMVars P
+    let ok ← forallTelescope P fun xs ty => do
+      let some (_, l, rr) := ty.eq? | return false
+      return l == mkAppN (mkConst kc) xs && rr == mkAppN (mkConst rc) xs
+    unless ok do throwError "{P} must state ∀ xs, {kc} xs = {rc} xs"
+    pure P
+  modifyEnv fun env => assumeReplaceExt.addEntry env (kc, rc, P)
+
 end ConPastel.Translator.Meta

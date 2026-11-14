@@ -1,4 +1,5 @@
 import ConPastel.Translator.Prims
+import ConPastel.Spec
 
 /-! # Replacements for library functions whose definitions do not translate -/
 
@@ -184,3 +185,8 @@ cake_replace ByteArray.utf8Decode? ConPastel.Impl.utf8Decode ConPastel.Impl.utf8
 cake_replace ByteArray.utf8DecodeChar? ConPastel.Impl.decodeChar ConPastel.Impl.decodeChar_eq
 cake_replace String.foldl ConPastel.Impl.stringFoldl ConPastel.Impl.stringFoldl_eq
 cake_replace List.nodupDecidable ConPastel.Impl.nodupDec ConPastel.Impl.nodupDec_eq
+
+/-! Opaque runtime primitives, under `RuntimeAssumptions` (their transcriptions
+are checked against the runtime by `scripts/HashCheck.lean`). -/
+cake_replace_assuming mixHash ConPastel.leanMixHash (∀ h k, mixHash h k = ConPastel.leanMixHash h k)
+cake_replace_assuming String.hash ConPastel.leanStringHash (∀ s, String.hash s = ConPastel.leanStringHash s)

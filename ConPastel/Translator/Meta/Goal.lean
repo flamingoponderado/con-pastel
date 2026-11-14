@@ -61,6 +61,8 @@ structure GCtx where
   rec? : Option RecFn := none
   /-- Unfold singleton recursive groups in lookups (the older commands). -/
   unfoldRec : Bool := true
+  /-- Runtime-assumption replacements in scope: `(K, K', hypothesis)`. -/
+  assumed : Array (Name × Name × Expr) := #[]
 
 structure GSt where
   locals : Array GLVar := #[]
@@ -890,6 +892,20 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let xs := xs[:ci.numParams + ci.numFields - args.size].toArray
           mkLambdaFVars xs (mkAppN t xs)
         return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
+  -- replacements under runtime assumptions (hypotheses `∀ xs, K xs = K' xs`)
+  if let .const c _ := fn then
+    if let some (_, rc, hyp) := ctx.assumed.find? (·.1 == c) then
+      let n ← forallTelescope (← inferType hyp) fun xs _ => pure xs.size
+      if args.size == n then
+        let heq := mkAppN hyp args
+        let t' := mkAppN (mkConst rc) args
+        let ce ← evalGoalCe g
+        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+        solve gb.mvarId!
+        let motive ← withLocalDeclD `x (← inferType t) fun x => do
+          mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+        g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+        return
   -- registered replacements `K xs = K' xs`
   if let .const c us := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
