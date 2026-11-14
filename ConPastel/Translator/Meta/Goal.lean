@@ -667,10 +667,33 @@ partial def solveDecide (g : MVarId) (env c : Expr) : GoalM Unit := do
     let (_, gb) ← newEvalGoal env (mkApp (mkConst ``NAT) b)
     solve ga; solve gb
     assignProof g (← mkAppM lem #[← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)])
+  -- integer comparisons: CakeML's `compare`, with `intCmp_spec` as the cast
+  let intCmp (op : Name) (sel : Expr → MetaM Expr) (a b : Expr) : GoalM Unit := do
+    let (_, ga) ← newEvalGoal env (mkApp (mkConst ``INT) a)
+    let (_, gb) ← newEvalGoal env (mkApp (mkConst ``INT) b)
+    solve ga; solve gb
+    let pf ← mkAppM ``Eval_int_cmp #[mkConst op, ← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)]
+    let heq ← sel (← mkAppM ``intCmp_spec #[a, b])
+    let (``Eval, #[_, ce, _]) := (← inferType pf).getAppFnArgs | throwError "bad integer comparison proof"
+    let motive ← withLocalDeclD `x (mkConst ``Bool) fun x => do
+      mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp (mkConst ``BOOL) x])
+    assignProof g (← mkEqMP (← mkCongrArg motive heq) pf)
   match c.getAppFnArgs with
-  | (``LT.lt, #[ty, _, a, b]) => if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_lt a b
-  | (``LE.le, #[ty, _, a, b]) => if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_le a b
-  | (``Eq, #[ty, a, b]) => if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_eq a b
+  | (``LT.lt, #[ty, _, a, b]) =>
+    if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_lt a b
+    if (← whnfR ty).isConstOf ``Int then
+      return ← intCmp ``Flapjack.Opb.lt (fun h => mkAppM ``And.left #[h]) a b
+  | (``LE.le, #[ty, _, a, b]) =>
+    if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_le a b
+    if (← whnfR ty).isConstOf ``Int then
+      return ← intCmp ``Flapjack.Opb.leq (fun h => do mkAppM ``And.left #[← mkAppM ``And.right #[h]]) a b
+  | (``Eq, #[ty, a, b]) =>
+    if (← whnfR ty).isConstOf ``Nat then return ← binNat ``Eval_nat_eq a b
+    if (← whnfR ty).isConstOf ``Int then
+      let (_, ga) ← newEvalGoal env (mkApp (mkConst ``INT) a)
+      let (_, gb) ← newEvalGoal env (mkApp (mkConst ``INT) b)
+      solve ga; solve gb
+      return ← assignProof g (← mkAppM ``Eval_int_eq #[← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)])
   | _ => pure ()
   -- any other instance: `decide c` is the projection of the instance (a newtype)
   let t ← mkAppOptM ``Decidable.decide #[c, none]
@@ -1125,6 +1148,19 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     if let .str _ last := fnName then
       if last.startsWith "_sparseCasesOn" then
         return ← solveSparseCases g env inv t
+  -- integers: `Int.ofNat n` is `n`'s value; `Int.add/sub/mul` are CakeML's integer arithmetic
+  if fn.isConstOf ``Nat.cast && args.size == 3 && (← whnfR args[0]!).isConstOf ``Int then
+    return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp (mkConst ``NAT) args[2]!]))
+  if fn.isConstOf ``Int.ofNat && args.size == 1 then
+    return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp (mkConst ``NAT) args[0]!]))
+  if (fn.isConstOf ``Int.add || fn.isConstOf ``Int.sub || fn.isConstOf ``Int.mul) && args.size == 2 then
+    let lem := if fn.isConstOf ``Int.add then ``Eval_int_add else if fn.isConstOf ``Int.sub then ``Eval_int_sub
+      else ``Eval_int_mul
+    let (_, ga) ← newEvalGoal env (mkApp (mkConst ``INT) args[0]!)
+    let (_, gb) ← newEvalGoal env (mkApp (mkConst ``INT) args[1]!)
+    solve ga; solve gb
+    assignProof g (← mkAppM lem #[← instantiateMVars (mkMVar ga), ← instantiateMVars (mkMVar gb)])
+    return
   -- Nat.add / Nat.mul as primitives (also reached after unfolding `+`, `*`)
   if (fn.isConstOf ``Nat.add || fn.isConstOf ``Nat.mul) && args.size == 2 then
     let lem := if fn.isConstOf ``Nat.add then ``Eval_nat_add else ``Eval_nat_mul
