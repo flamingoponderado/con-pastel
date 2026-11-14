@@ -214,38 +214,73 @@ def translateThunk (key : Expr) (extra : Array Expr := #[]) : MetaM Unit := do
         mkLambdaFVars #[x, xv, hx] app
     finishUnit key uname cname (.thunk param (uname ++ `body)) deps body hyps envC funs pf target inv
 
+/-- A well-founded definition's termination argument: a `Nat` measure
+(`WellFounded.Nat.fix`) or a relation with its well-foundedness proof. -/
+inductive WfSpec where
+  | nat (m : Expr)
+  | gen (r hwf : Expr)
+  deriving Inhabited
+
 /-- The parts of a well-founded definition's unfolding `v` (its value applied
 to the arguments): `c._unary fixed packed` or (one varying argument)
 `WellFounded.Nat.fix … packed`. Returns `(fixed, packed, α, motive, measure, F)`. -/
-def wfParts (c : Name) (v : Expr) : MetaM (Option (Array Expr × Expr × Expr × Expr × Expr × Expr)) := do
+def wfParts (c : Name) (v : Expr) : MetaM (Option (Array Expr × Expr × Expr × Expr × WfSpec × Expr)) := do
   let some info := Lean.Elab.WF.eqnInfoExt.find? (← getEnv) c | return none
+  let ofFix (fixed : Array Expr) (u packed : Expr) : Option (Array Expr × Expr × Expr × Expr × WfSpec × Expr) :=
+    match u.getAppFnArgs with
+    | (``WellFounded.Nat.fix, #[α, motive, m, F]) => some (fixed, packed, α, motive, .nat m, F)
+    | (``WellFounded.fix, #[α, motive, r, hwf, F]) => some (fixed, packed, α, motive, .gen r hwf, F)
+    | _ => none
   if let .const un ulvls := v.getAppFn then
     if un == info.declNameNonRec then
       let fixed := v.getAppArgs.pop
       let u := (mkAppN (← instantiateValueLevelParams (← getConstInfo un) ulvls) fixed).headBeta
-      let (``WellFounded.Nat.fix, #[α, motive, m, F]) := u.getAppFnArgs | return none
-      return some (fixed, v.getAppArgs.back!, α, motive, m, F)
-  if let (``WellFounded.Nat.fix, #[α, motive, m, F, x]) := v.getAppFnArgs then
-    return some (#[], x, α, motive, m, F)
+      return ofFix fixed u v.getAppArgs.back!
+  if v.isAppOfArity ``WellFounded.Nat.fix 5 || v.isAppOfArity ``WellFounded.fix 6 then
+    return ofFix #[] v.appFn! v.appArg!
   return none
 
-/-- The termination measure of a recursive unit, as a function of the tuple of
-its arguments: `sizeOf` of the structural argument, or the measure of a
-`termination_by` definition (`WellFounded.Nat.fix` in its `_unary` form). -/
-def recursionMeasure (key : Expr) (c : Name) (static : Array Expr) (n : Nat) (τ : Expr) : MetaM Expr := do
+/-- The well-founded relation of a recursion over `τ` given the packing `pk`
+of a `τ` value into Lean's own recursion domain: a measure, or the inverse
+image of Lean's relation. Returns `(r, wf)`. -/
+def wfRelOver (τ : Expr) (pk : Expr → MetaM (Expr × WfSpec)) : MetaM (Expr × Expr) := do
+  let (spec0, isNat) ← withLocalDeclD `p τ fun p => do
+    let (_, sp) ← pk p
+    match sp with
+    | .nat _ => pure (sp, true)
+    | .gen r hwf =>
+      if r.hasFVar || hwf.hasFVar then throwError "a well-founded relation depending on the arguments is not supported yet"
+      pure (sp, false)
+  if isNat then
+    let msr ← withLocalDeclD `p τ fun p => do
+      let (packed, sp) ← pk p
+      let .nat m := sp | unreachable!
+      mkLambdaFVars #[p] (m.beta #[packed]).headBeta
+    let wfr ← mkAppOptM ``measure #[τ, msr]
+    return (← mkAppOptM ``WellFoundedRelation.rel #[τ, wfr], ← mkAppOptM ``WellFoundedRelation.wf #[τ, wfr])
+  let .gen r hwf := spec0 | unreachable!
+  let pkF ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (← pk p).1
+  return (← mkAppOptM ``InvImage #[none, none, r, pkF], ← mkAppOptM ``InvImage.wf #[none, none, r, pkF, hwf])
+
+/-- The termination relation of a recursive unit over the tuple type `τ` of
+its arguments: `sizeOf` of the structural argument, or Lean's own
+termination argument (measure or relation) for a `termination_by` definition. -/
+def recursionRel (key : Expr) (c : Name) (static : Array Expr) (n : Nat) (τ : Expr) : MetaM (Expr × Expr) := do
   let env ← getEnv
   if (Lean.Elab.WF.eqnInfoExt.find? env c).isSome then
-    withLocalDeclD `p τ fun p => do
+    wfRelOver τ fun p => do
       let projs ← tupleProjs p n
       let v := (mkAppN (← keyValue key) projs.toArray).headBeta
-      let some (_, packed, _, _, m, _) ← wfParts c v
+      let some (_, packed, _, _, sp, _) ← wfParts c v
         | throwError "{c}: well-founded recursion of this shape is not supported yet: {v}"
-      mkLambdaFVars #[p] (m.beta #[packed]).headBeta
+      pure (packed, sp)
   else
     let some k ← structRecArg? c | throwError "{c}: no recursion information"
-    withLocalDeclD `p τ fun p => do
+    let msr ← withLocalDeclD `p τ fun p => do
       let comp := (← tupleProjs p n)[k - static.size]!
       mkLambdaFVars #[p] (← mkAppM ``SizeOf.sizeOf #[comp])
+    let wfr ← mkAppOptM ``measure #[τ, msr]
+    return (← mkAppOptM ``WellFoundedRelation.rel #[τ, wfr], ← mkAppOptM ``WellFoundedRelation.wf #[τ, wfr])
 
 /-- For a well-founded definition over the data parameters `xs`: for each,
 whether it is unchanged by recursive calls, else its index among the packed
@@ -268,7 +303,7 @@ recursive call carries Lean's own decreasing proof. -/
 def wfFunctionalEqn (key : Expr) (c : Name) (src : Array (Bool × Nat)) (nPacked : Nat) (as : Array Expr) :
     MetaM (Option Expr) := do
   let v := (mkAppN (← keyValue key) as).headBeta
-  let some (_, packed, α, motive, m, F) ← wfParts c v | return none
+  let some (_, packed, α, motive, sp, F) ← wfParts c v | return none
   let fty ← whnf (← instantiateForall (← inferType F) #[packed])
   let .forallE _ recTy _ _ := fty | return none
   let recFn ← forallTelescope recTy fun ys _ => do
@@ -279,7 +314,9 @@ def wfFunctionalEqn (key : Expr) (c : Name) (src : Array (Bool × Nat)) (nPacked
       mkLambdaFVars #[y'] (mkAppN key args)
     mkLambdaFVars ys (← mkAppOptM ``recCall #[α, motive, ← inferType ys[1]!, gf, ys[0]!, ys[1]!])
   let rhs := (mkApp2 F packed recFn).headBeta
-  let pf ← mkAppOptM ``WellFounded.Nat.fix_eq #[α, motive, m, F, packed]
+  let pf ← match sp with
+    | .nat m => mkAppOptM ``WellFounded.Nat.fix_eq #[α, motive, m, F, packed]
+    | .gen r hwf => mkAppOptM ``WellFounded.fix_eq #[α, motive, r, hwf, F, packed]
   return some (← mkExpectedTypeHint pf (← mkEq (mkAppN key as) rhs))
 
 /-- A recursive function unit, by well-founded induction on the structural
@@ -318,14 +355,11 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
       addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] ftTy tupVal .abbrev .safe []))
       pure (mkConst tupName)
     else pure f
-  let msr ← recursionMeasure key c static n τ
+  let (r, hwf) ← recursionRel key c static n τ
   let body ← mkFreshExprMVar (mkConst ``Exp)
   let inv ← if dep then mkAppM ``DARROW #[invT, invBf] else mkAppM ``Arrow #[invT, invBf.bindingBody!]
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx₀ => do
     let cl ← mkAppM ``Value.recclosure #[envC, funs, mlString cname]
-    let wfr ← mkAppOptM ``measure #[τ, msr]
-    let r ← mkAppOptM ``WellFoundedRelation.rel #[τ, wfr]
-    let hwf ← mkAppOptM ``WellFoundedRelation.wf #[τ, wfr]
     let pfH ← withLocalDeclD `p τ fun p => do
       let ihTy ← withLocalDeclD `y τ fun y => do
         mkForallFVars #[y] (← mkArrow (mkApp2 r y p) (← withLocalDeclD `yv (mkConst ``Value) fun yv => do
@@ -502,18 +536,33 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
       addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
       fts := fts.push (mkConst tupName)
     else fts := fts.push keys[i]!
-  -- the joint measure: each member's measure in Lean's `_mutual` definition
-  let M ← withLocalDeclD `s S fun s => do
-    let body ← sumCasesND taus (mkConst ``Nat) (fun i t => do
-      let (n, _, _, _, _) := infos[i]!
-      let v := (mkAppN (← keyValue keys[i]!) (← tupleProjs t n).toArray).headBeta
-      let some (_, packed, _, _, m, _) ← wfParts members[i]! v
-        | throwError "{members[i]!}: unexpected well-founded definition shape {v}"
-      pure (m.beta #[packed]).headBeta) s
-    mkLambdaFVars #[s] body
-  let wfr ← mkAppOptM ``measure #[S, M]
-  let r ← mkAppOptM ``WellFoundedRelation.rel #[S, wfr]
-  let hwf ← mkAppOptM ``WellFoundedRelation.wf #[S, wfr]
+  -- the joint termination relation: Lean's own (`_mutual`), through each summand's packing
+  let partsAt (i : Nat) (t : Expr) : MetaM (Expr × Expr × WfSpec) := do
+    let (n, _, _, _, _) := infos[i]!
+    let v := (mkAppN (← keyValue keys[i]!) (← tupleProjs t n).toArray).headBeta
+    let some (_, packed, α, _, sp, _) ← wfParts members[i]! v
+      | throwError "{members[i]!}: unexpected well-founded definition shape {v}"
+    pure (packed, α, sp)
+  let (α, isNat) ← withLocalDeclD `t infos[0]!.2.1 fun t => do
+    let (_, α, sp) ← partsAt 0 t
+    pure (α, match sp with | .nat _ => true | .gen .. => false)
+  let (r, hwf) ← if isNat then do
+      let M ← withLocalDeclD `s S fun s => do
+        mkLambdaFVars #[s] (← sumCasesND taus (mkConst ``Nat) (fun i t => do
+          let (packed, _, sp) ← partsAt i t
+          let .nat m := sp | throwError "mixed termination arguments in a mutual block"
+          pure (m.beta #[packed]).headBeta) s)
+      let wfr ← mkAppOptM ``measure #[S, M]
+      pure (← mkAppOptM ``WellFoundedRelation.rel #[S, wfr], ← mkAppOptM ``WellFoundedRelation.wf #[S, wfr])
+    else do
+      let (r', hwf') ← withLocalDeclD `t infos[0]!.2.1 fun t => do
+        let (_, _, sp) ← partsAt 0 t
+        let .gen r' hwf' := sp | throwError "mixed termination arguments in a mutual block"
+        if r'.hasFVar || hwf'.hasFVar then throwError "a well-founded relation depending on the arguments is not supported yet"
+        pure (r', hwf')
+      let repack ← withLocalDeclD `s S fun s => do
+        mkLambdaFVars #[s] (← sumCasesND taus α (fun i t => do pure (← partsAt i t).1) s)
+      pure (← mkAppOptM ``InvImage #[none, none, r', repack], ← mkAppOptM ``InvImage.wf #[none, none, r', repack, hwf'])
   let bodies ← members.mapM fun _ => mkFreshExprMVar (mkConst ``Exp)
   let memberSpecs := (List.range members.size).toArray.map fun i => (infos[i]!.2.2.2.2, param, bodies[i]!)
   withBlockHyps memberSpecs deps fun envC funs hnodup hfinds hselfs common has depHyps gctx₀ => do

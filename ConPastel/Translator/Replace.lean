@@ -216,3 +216,8 @@ are checked against the runtime by `scripts/HashCheck.lean`). -/
 cake_replace_assuming mixHash ConPastel.leanMixHash (∀ h k, mixHash h k = ConPastel.leanMixHash h k)
 cake_replace_assuming String.hash ConPastel.leanStringHash (∀ s, String.hash s = ConPastel.leanStringHash s)
 cake_rewrite ConPastel.Impl.arrayFoldlM_eq
+
+/-! con-leche's memoized expression walks: the result of a walk is fixed by its
+subtype (`resTerm_eq`), so the plain recursive specification is translated in
+place of the memo machinery (same results; the memo only saves work). -/
+cake_rewrite ConLeche.Expr.resTerm_eq
