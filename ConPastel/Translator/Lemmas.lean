@@ -271,3 +271,28 @@ theorem option_get_eq_getD {α : Type u} [Inhabited α] (o : Option α) (h : o.i
   | some x => rfl
 
 end ConPastel.Translator
+
+namespace ConPastel.Impl
+
+/-- `for x in l` without membership proofs. -/
+def listForIn {m : Type u → Type v} [Monad m] {α : Type w} {β : Type u} :
+    List α → β → (α → β → m (ForInStep β)) → m β
+  | [], b, _ => pure b
+  | a :: as, b, f => do
+    match ← f a b with
+    | .done b => pure b
+    | .yield b => listForIn as b f
+
+theorem forIn'_eq_listForIn {m : Type u → Type v} [Monad m] {α : Type w} {β : Type u}
+    (l : List α) (init : β) (f : α → β → m (ForInStep β)) :
+    List.forIn' l init (fun a _ b => f a b) = listForIn l init f := by
+  induction l generalizing init with
+  | nil => rfl
+  | cons a as ih =>
+    rw [show List.forIn' (a :: as) init (fun a _ b => f a b) = forIn' (a :: as) init (fun a _ b => f a b)
+      from rfl, List.forIn'_cons]
+    simp only [listForIn]
+    congr 1; funext r; cases r with
+    | done b => rfl
+    | yield b => exact ih b
+end ConPastel.Impl
