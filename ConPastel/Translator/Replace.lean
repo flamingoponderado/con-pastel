@@ -211,6 +211,11 @@ theorem log2_eq (n : Nat) : Nat.log2 n = log2 n := by
   · rfl
 termination_by n
 decreasing_by omega
+/-- `Array.eraseIdx` via the list (its loop recurses with a proof parameter). -/
+theorem arrayEraseIdx_eq {α : Type u} (a : Array α) (i : Nat) (h : i < a.size) :
+    a.eraseIdx i h = ⟨a.toList.eraseIdx i⟩ := by
+  apply Array.ext'; simp
+
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
@@ -234,3 +239,4 @@ cake_rewrite ConPastel.Impl.arrayFoldlM_eq
 subtype (`resTerm_eq`), so the plain recursive specification is translated in
 place of the memo machinery (same results; the memo only saves work). -/
 cake_rewrite ConLeche.Expr.resTerm_eq
+cake_rewrite ConPastel.Impl.arrayEraseIdx_eq

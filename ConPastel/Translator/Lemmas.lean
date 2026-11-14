@@ -300,6 +300,11 @@ theorem Eval_quot_lift {α β : Type} {r : α → α → Prop} {A : RefInv α} {
     obtain ⟨a, rfl, ha⟩ := hqv
     exact hfv a qv ha
 
+/-- `Decidable`'s fields taken apart (`Bool.rec` over the reflection proof) is `dite`. -/
+theorem bool_rec_reflects_eq_dite {P : Prop} {R : Sort u} (F : ¬P → R) (T : P → R) (b : Bool) (r : b.Reflects P) :
+    Bool.rec (motive := fun x => x.Reflects P → R) F T b r = @dite R P (Decidable.intro b r) T F := by
+  cases b <;> rfl
+
 end ConPastel.Translator
 
 namespace ConPastel.Impl

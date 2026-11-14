@@ -1128,6 +1128,30 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     assignProof g (← mkAppOptM ``Eval_eqrec #[α, a, motive, I, env, none, m, b, h,
       ← instantiateMVars (mkMVar gm)])
     return
+  -- `Bool.rec (motive := fun x => x.Reflects P → R) F T b r …`: a decision taken apart, i.e. `dite`
+  if fn.isConstOf ``Bool.rec && args.size ≥ 5 then
+    let motive := args[0]!
+    let isRefl ← withLocalDeclD `x (mkConst ``Bool) fun x => do
+      let m ← whnfR (motive.beta #[x]).headBeta
+      if let .forallE _ dom body _ := m then
+        if let (``Bool.Reflects, #[xb, P]) := dom.getAppFnArgs then
+          if xb == x && !body.hasLooseBVars && !body.containsFVar x.fvarId! && !P.containsFVar x.fvarId! then
+            return some (P, body)
+      return none
+    if let some (P, R) := isRefl then
+      let (F, T, b, r) := (args[1]!, args[2]!, args[3]!, args[4]!)
+      let heq ← mkAppOptM ``bool_rec_reflects_eq_dite #[P, R, F, T, b, r]
+      let rest := args[5:].toArray
+      let t5 := mkAppN fn args[:5].toArray
+      let d5 := (← inferType heq).appArg!
+      let t' := mkAppN d5 rest
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motiveE ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv (mkAppN w rest)])
+      let _ := t5
+      g.assign (← mkEqMP (← mkCongrArg motiveE (← mkEqSymm heq)) (← instantiateMVars gb))
+      return
   -- Bool.rec / Bool.casesOn / cond with a non-dependent motive: `if b then t else f`
   if (fn.isConstOf ``Bool.rec && args.size == 4) || (fn.isConstOf ``Bool.casesOn && args.size == 4) ||
       (fn.isConstOf ``cond && args.size == 4) then
