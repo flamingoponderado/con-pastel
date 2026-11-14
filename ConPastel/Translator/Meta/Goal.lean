@@ -271,6 +271,15 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
     assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, p, hl, lv.rel])
     return
+  -- string literals: `s` is `String.ofByteArray ⟨⟨[bytes]⟩⟩ s.isValidUTF8` (structure eta)
+  if let .lit (.strVal str) := t then
+    let u8 := mkConst ``UInt8
+    let bytes ← str.toUTF8.toList.mapM fun b => mkNumeral u8 b.toNat
+    let arr ← mkAppOptM ``Array.mk #[u8, ← mkListLit u8 bytes]
+    let ba := mkApp (mkConst ``ByteArray.mk) arr
+    let t' := mkApp2 (mkConst ``String.ofByteArray) ba (mkApp (mkConst ``String.isValidUTF8) t)
+    let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+    return ← solve g'
   -- literals
   if let some n := t.nat? then
     if inv.isConstOf ``NAT then
