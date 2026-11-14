@@ -1019,6 +1019,18 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let ctx ← read
   let fn := t.getAppFn
   let args := t.getAppArgs
+  -- `casesOn` of a constructor application (after reducible unfolding): iota-reduce
+  if let .const cn _ := fn then
+    let tn := cn.getPrefix
+    if cn == tn ++ `casesOn then
+      if let some (.inductInfo ii) := (← getEnv).find? tn then
+        if args.size > ii.numParams + 1 + ii.numIndices then
+          let major ← whnfR args[ii.numParams + 1 + ii.numIndices]!
+          if let .const mc _ := major.getAppFn then
+            if (← getEnv).find? mc matches some (.ctorInfo _) then
+              let t' ← whnfR t
+              if t' != t then
+                return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- under-applied `casesOn` (as a function value): eta-expand to its full arity
   if let .const cn _ := fn then
     if isAuxRecursor (← getEnv) cn then
@@ -1343,8 +1355,11 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let τ ← whnfD (← inferType args[ii.numParams + 1]!)
           if let some d ← findDatatype? τ then
             return ← solveCases g env inv d fn ii.numParams args
-          -- not registered yet: request it (closed types), rather than fall through
-          if !τ.hasFVar && !(← isProp τ) && (← newtypeInfo? τ).isNone then
+          -- not registered yet: request it (closed types, non-dependent motive), rather than fall through
+          let motive := args[ii.numParams]!
+          let depMotive ← withLocalDeclD `x τ fun x => do
+            return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
+          if !depMotive && !τ.hasFVar && !(← isProp τ) && (← newtypeInfo? τ).isNone then
             let _ ← invOf τ
   -- `Nat.rec` whose step ignores the induction hypothesis is `Nat.casesOn`
   if fn.isConstOf ``Nat.rec && args.size == 4 then
