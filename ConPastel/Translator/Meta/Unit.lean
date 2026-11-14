@@ -702,6 +702,24 @@ partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
         if let some (_, _, rhs) := ty.eq? then visit rhs
   found.get
 
+mutual
+/-- The dependency pre-pass of `key`'s mutual block: translate (best effort) the
+constants the members' equations mention; returns the candidates. -/
+partial def prepassBlock (key : Expr) (stack : List Expr := []) : MetaM (Array Expr) := do
+  let .const c _ := key.getAppFn | return #[]
+  let ms ← mutualMembers c
+  if ms.isEmpty then return #[]
+  let cands ← blockCandidates ms
+  for k in cands do
+    if (getUnit? (← getEnv) k).isNone && !stack.contains k && !(ms.contains k.getAppFn.constName!) then
+      let s0 ← saveState
+      try translateUnit k (key :: stack)
+      catch e =>
+        let msg ← e.toMessageData.toString
+        if (msg.splitOn "cake: need datatype").length > 1 then throw e
+        s0.restore
+  return cands
+
 /-- Translate `key`, first translating (recursively) the units it needs.
 Units needed only after unfolding (not visible in the body) are added to the
 dependencies explicitly (`extra`). -/
@@ -717,15 +735,7 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
     if let .const c _ := key.getAppFn then
       let ms ← mutualMembers c
       if !ms.isEmpty then
-        let cands ← blockCandidates ms
-        for k in cands do
-          if (getUnit? (← getEnv) k).isNone && !stack.contains k && !(ms.contains k.getAppFn.constName!) then
-            let s0 ← saveState
-            try translateUnit k (key :: stack)
-            catch e =>
-              let msg ← e.toMessageData.toString
-              if (msg.splitOn "cake: need datatype").length > 1 then throw e
-              s0.restore
+        let cands ← prepassBlock key stack
         -- every candidate that is a unit is a dependency up front (also those only
         -- reached after unfolding, which the block's equations do not mention)
         let envNow ← getEnv
@@ -751,5 +761,6 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
     | none =>
       saved.restore
       throwError "while translating {key}: {e.toMessageData}"
+end
 
 end ConPastel.Translator.Meta

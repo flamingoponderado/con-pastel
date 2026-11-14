@@ -226,6 +226,23 @@ elab "cake_unit " ts:(colGt term:max)+ : command => do
       instantiateMVars key
     cakeUnitCmd key
 
+/-- `cake_prepass f`: translate the dependencies of `f`'s mutual block (not the
+block itself), e.g. in a stage module that later modules import. -/
+elab "cake_prepass " t:term:max : command => do
+  let key ← liftTermElabM do
+    let key ← instantiateMVars (← Term.elabTerm t none)
+    Term.synthesizeSyntheticMVarsNoPostponing
+    instantiateMVars key
+  repeat
+    needDatatypeRef.set none
+    try
+      let _ ← liftTermElabM (prepassBlock key)
+      return
+    catch e =>
+      match ← needDatatypeRef.get with
+      | some τ => registerDatatype τ
+      | none => throw e
+
 /-- `cake_datatype T`: register the (closed) inductive type `T`. -/
 elab "cake_datatype " t:term:max : command => do
   let τ ← liftTermElabM do
