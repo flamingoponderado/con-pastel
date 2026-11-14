@@ -81,6 +81,8 @@ def newtypeInfo? (ty : Expr) : MetaM (Option (Name × Nat × Expr)) := do
 
 partial def invOf (ty : Expr) : MetaM Expr := do
   let ty ← whnfR (← instantiateMVars ty).headBeta
+  -- `Id α` is `α` (`Id` is only `implicit_reducible`)
+  if ty.isAppOfArity ``Id 1 then return ← invOf ty.appArg!
   if ty.isConstOf ``Nat then return mkConst ``NAT
   if ty.isConstOf ``Int then return mkConst ``INT
   if ty.isConstOf ``Bool then return mkConst ``BOOL
