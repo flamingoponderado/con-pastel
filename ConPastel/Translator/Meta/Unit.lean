@@ -99,6 +99,13 @@ def finishUnit (key : Expr) (uname : Name) (cname : String) (kind : UnitKind) (d
   let stmt := stmt.replace fun e => if e == bodyI then some (mkConst bodyName) else none
   let pf ← instantiateMVars (← mkLambdaFVars hyps pf)
   unless ← isDefEq (← inferType pf) stmt do throwError "certificate type mismatch for {key}"
+  if pf.hasFVar || stmt.hasFVar || pf.hasMVar then
+    let fvs := (collectFVars {} pf).fvarIds ++ (collectFVars {} stmt).fvarIds
+    let descr ← fvs.toList.mapM fun fv => do
+      match (← getLCtx).find? fv with
+      | some d => pure m!"{d.userName} : {d.type}"
+      | none => pure m!"{mkFVar fv} (not in context)"
+    throwError "certificate for {key} has leaked locals (mvars: {pf.hasMVar}): {descr}"
   addDecl (Declaration.thmDecl (mkTheoremValEx (uname ++ `cert) [] stmt pf []))
   addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := ← datatypeNames, deps }
 
@@ -274,9 +281,14 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
     return mergeDeps (← unitDepsOf key (← inferType (← eqnApp xs))) extra
   let (uname, cname) ← freshUnit
   let param := "p"
-  forallTelescope (← inferType key) fun xs resTy => do
-  let n := xs.size
-  let tys ← xs.mapM inferType
+  -- the parameter types, the result type and where arguments come from; the
+  -- translation itself runs outside the parameters' scope (no leaks)
+  let (n, tys, resTy, wfSrc) ← forallTelescope (← inferType key) fun xs resTy => do
+    let tys ← xs.mapM inferType
+    if tys.any (·.hasFVar) || resTy.hasFVar then
+      throwError "{key}: dependent parameter or result types are not supported yet"
+    let wfSrc ← try wfArgSources key c xs catch _ => pure (#[], 0)
+    return (xs.size, tys, resTy, wfSrc)
   let tupled := n > 1
   let τ ← tupleTy tys.toList
   let invT ← invOf τ
@@ -289,7 +301,6 @@ def translateRecursive (key : Expr) (extra : Array Expr := #[]) (functional : Bo
       pure (mkConst tupName)
     else pure f
   let msr ← recursionMeasure key c static n τ
-  let wfSrc ← try wfArgSources key c xs catch _ => pure (#[], 0)
   let body ← mkFreshExprMVar (mkConst ``Exp)
   let inv ← mkAppM ``Arrow #[invT, invB]
   withGroupHyps cname param body deps fun envC funs hnodup hfind hyps gctx₀ => do

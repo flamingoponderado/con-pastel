@@ -207,6 +207,11 @@ def proveLookupG (env : Expr) (n : String) (v : Expr) (unfoldRec : Bool := true)
 
 /-- Run a tactic to close a side goal. -/
 def closeWith (goal : Expr) (tac : Syntax.Tactic) : MetaM Expr := do
+  if (← IO.getEnv "CAKE_DEBUG_LOCAL").isSome then
+    let nm := Name.mkSimple ((← IO.getEnv "CAKE_DEBUG_LOCAL").getD "")
+    for fv in (collectFVars {} (← instantiateMVars goal)).fvarIds do
+      if let some d := (← getLCtx).find? fv then
+        if d.userName == nm then cakeLog s!"[closeWith mentions {nm}] {← ppExpr goal} BY {tac}"
   let mvar ← mkFreshExprMVar goal
   let remaining ← Tactic.run mvar.mvarId! (Tactic.evalTactic tac) |>.run'
   unless remaining.isEmpty do
@@ -239,6 +244,12 @@ def assignProof (g : MVarId) (pf : Expr) : MetaM Unit := do
   -- matchers (`instance_reducible`) only unfold at transparency `.all`
   unless (← isDefEq pty (← g.getType)) || (← withTransparency .all (isDefEq pty (← g.getType))) do
     throwError "lemma does not fit goal:\n{pty}\nvs\n{← g.getType}"
+  if (← IO.getEnv "CAKE_TRACE").isSome then
+    let lctx ← getLCtx
+    let pfI ← instantiateMVars pf
+    for fv in (collectFVars {} pfI).fvarIds do
+      unless lctx.contains fv do
+        throwError "proof uses a local not in scope ({mkFVar fv}) for goal {← g.getType}"
   g.assign pf
 
 /-- `B (f a)` with `B` and the Lean term split out of `P`. -/

@@ -62,6 +62,13 @@ def validateUTF8 (b : ByteArray) : Bool := validateGo b 0
 theorem validateUTF8_eq (b : ByteArray) : ByteArray.validateUTF8 b = validateUTF8 b :=
   validateGo_eq b 0 (Nat.zero_le _)
 
+/-- `Array.range` via `List.range` (`Array.ofFn.go` recurses with a proof parameter). -/
+def arrayRange (n : Nat) : Array Nat := ⟨List.range n⟩
+
+theorem arrayRange_eq (n : Nat) : Array.range n = arrayRange n := by
+  apply Array.ext'; simp [arrayRange]
+
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
+cake_replace Array.range ConPastel.Impl.arrayRange ConPastel.Impl.arrayRange_eq
