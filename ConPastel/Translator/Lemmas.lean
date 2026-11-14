@@ -263,4 +263,11 @@ theorem list_get_eq_getD {α : Type u} [Inhabited α] (l : List α) (f : Fin l.l
 decreasing proof (the translator reads the proof off; the value is `f y`). -/
 def recCall {α : Sort u} {β : α → Sort v} {P : Prop} (f : (a : α) → β a) (y : α) (_h : P) : β y := f y
 
+/-- `Option.get` (dependent on its proof) as `Option.getD` for inhabited types. -/
+theorem option_get_eq_getD {α : Type u} [Inhabited α] (o : Option α) (h : o.isSome) :
+    o.get h = o.getD default := by
+  cases o with
+  | none => simp at h
+  | some x => rfl
+
 end ConPastel.Translator

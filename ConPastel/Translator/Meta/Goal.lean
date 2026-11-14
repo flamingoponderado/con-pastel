@@ -266,6 +266,42 @@ def abstractDiscr (t d : Expr) : MetaM Expr := do
   unless b.hasLooseBVars do throwError "cannot abstract discriminant {d} in {t}"
   return b
 
+/-- Does the local `x` occur inside a proof or a type in `e`? (Then `e` may
+only typecheck with `x`'s definition unfolded.) -/
+partial def occursInProofOrType (e : Expr) (x : FVarId) : MetaM Bool := do
+  if !e.containsFVar x then return false
+  if e.isFVar then return false
+  if (← isProof e) || (← isType e) then return true
+  match e with
+  | .app f a => return (← occursInProofOrType f x) || (← occursInProofOrType a x)
+  | .lam n t b bi | .forallE n t b bi =>
+    if t.containsFVar x then return true
+    withLocalDecl n bi t fun y => occursInProofOrType (b.instantiate1 y) x
+  | .letE n t v b _ =>
+    if t.containsFVar x then return true
+    if ← occursInProofOrType v x then return true
+    withLocalDeclD n t fun y => occursInProofOrType (b.instantiate1 y) x
+  | .mdata _ b => occursInProofOrType b x
+  | .proj _ _ b => occursInProofOrType b x
+  | _ => return false
+
+/-- `let z := d; t[z]`'s body: the discriminant replaced at its argument
+position `pos` only when that keeps the application type-correct (shallow
+check), else all occurrences of `d` (e.g. alternatives' binder types). -/
+def discrLetBody (t d : Expr) (pos : Nat) : MetaM Expr := do
+  let args := t.getAppArgs
+  let positional := mkAppN t.getAppFn (args.set! pos (.bvar 0))
+  let ok ← withLocalDeclD `z (← inferType d) fun z => do
+    let e := positional.instantiate1 z
+    let mut fty ← inferType e.getAppFn
+    for a in e.getAppArgs do
+      let .forallE _ dom b _ ← whnf fty | return false
+      unless ← isDefEq (← inferType a) dom do return false
+      fty := b.instantiate1 a
+    return true
+  if ok then return positional
+  abstractDiscr t d
+
 mutual
 
 partial def solve (g : MVarId) : GoalM Unit := do
@@ -322,6 +358,17 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     if let .some inh ← trySynthInstance (← mkAppM ``Inhabited #[α]) then
       let heq ← mkAppOptM ``list_get_eq_getD #[α, inh, l, f]
       let t' ← mkAppOptM ``List.getD #[α, l, ← mkAppM ``Fin.val #[f], ← mkAppOptM ``Inhabited.default #[α, inh]]
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+      g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+      return
+  -- `Option.get o h` as `Option.getD o default` for inhabited types
+  if let (``Option.get, #[α, o, h]) := t.getAppFnArgs then
+    if let .some inh ← trySynthInstance (← mkAppM ``Inhabited #[α]) then
+      let heq ← mkAppOptM ``option_get_eq_getD #[α, inh, o, h]
+      let t' ← mkAppOptM ``Option.getD #[α, o, ← mkAppOptM ``Inhabited.default #[α, inh]]
       let ce ← evalGoalCe g
       let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
       solve gb.mvarId!
@@ -412,11 +459,10 @@ partial def solveLet (g : MVarId) (env inv : Expr) (n : Name) (ty v b : Expr) : 
     return ← solve g'
   -- a body that only typechecks with the definition unfolded (proofs about the
   -- bound value, e.g. Lean's own decreasing proofs): substitute
-  let opaqueOk ← withLocalDeclD n ty fun x => do
-    try Meta.check (b.instantiate1 x); pure true catch _ => pure false
+  -- (the solver's own discriminant lets `z` are built to typecheck opaquely)
+  let opaqueOk ← if n == `z then pure true else withLocalDeclD n ty fun x => do
+    return !(← occursInProofOrType (b.instantiate1 x) x.fvarId!)
   unless opaqueOk do
-    if n == `z then
-      throwError "a match with an equation hypothesis on a non-variable discriminant is not supported: {b.instantiate1 v}"
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
     return ← solve g'
   let cname ← freshCName
@@ -725,7 +771,7 @@ partial def solveSparseCases (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   let replaceT (t' : Expr) : GoalM MVarId := do
     g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
   unless d.isFVar do
-    let letT := Expr.letE `z (← inferType d) d (← abstractDiscr t d) false
+    let letT := Expr.letE `z (← inferType d) d (← discrLetBody t d idx) false
     return ← solve (← replaceT letT)
   splitOn g env inv t d fun t' => do
     let f := t'.getAppFn
@@ -766,7 +812,7 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if let some (.ctorInfo _) := (← getEnv).find? dc then continue
     unless d.isFVar do
       -- bind the discriminant: `m … d …` is `let z := d; m … z …`
-      let letT := Expr.letE `z (← inferType d) d (← abstractDiscr t d) false
+      let letT := Expr.letE `z (← inferType d) d (← discrLetBody t d (info.numParams + 1 + i)) false
       return ← solve (← replaceT letT)
     return ← splitOn g env inv t d fun t' => do
       match ← reduceMatcher? t' with

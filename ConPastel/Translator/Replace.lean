@@ -98,8 +98,65 @@ def stringDecEq (a b : String) : Decidable (a = b) :=
 
 theorem stringDecEq_eq (a b : String) : instDecidableEqString a b = stringDecEq a b :=
   Subsingleton.elim _ _
+/-- `ByteArray.utf8Decode?` without the proof parameter of its loop. -/
+def decodeGo (b : ByteArray) (i : Nat) (acc : Array Char) : Option (Array Char) :=
+  if i < b.size then
+    match b.utf8DecodeChar? i with
+    | none => none
+    | some c => decodeGo b (i + c.utf8Size) (acc.push c)
+  else some acc
+termination_by b.size - i
+decreasing_by have := Char.utf8Size_pos c; omega
+
+theorem decodeGo_eq (b : ByteArray) (i : Nat) (acc : Array Char) (hi : i ≤ b.size) :
+    ByteArray.utf8Decode?.go b i acc hi = decodeGo b i acc := by
+  rw [ByteArray.utf8Decode?.go.eq_def, decodeGo.eq_def]
+  by_cases h : i < b.size
+  · simp only [h, ite_true]
+    split
+    · rename_i h'; simp [h']
+    · rename_i c h'
+      simp only [h']
+      exact decodeGo_eq b _ _ _
+  · simp [h]
+termination_by b.size - i
+decreasing_by all_goals (expose_names; have := Char.utf8Size_pos c; omega)
+
+def utf8Decode (b : ByteArray) : Option (Array Char) := decodeGo b 0 #[]
+theorem utf8Decode_eq (b : ByteArray) : ByteArray.utf8Decode? b = utf8Decode b :=
+  decodeGo_eq b 0 #[] (Nat.zero_le _)
+open ByteArray.utf8DecodeChar? in
+/-- `FirstByte.done` as a Boolean test. -/
+def isDone : FirstByte → Bool
+  | .done => true
+  | _ => false
+
+open ByteArray.utf8DecodeChar? in
+theorem eq_done_of_isDone {f : FirstByte} (h : isDone f = true) : f = .done := by
+  cases f <;> simp_all [isDone]
+
+open ByteArray.utf8DecodeChar? in
+/-- `ByteArray.utf8DecodeChar?` without the equation-carrying match. -/
+def decodeChar (bytes : ByteArray) (i : Nat) : Option Char :=
+  if h₀ : i < bytes.size then
+    match parseFirstByte bytes[i] with
+    | .invalid => none
+    | .done => if h : isDone (parseFirstByte bytes[i]) = true then assemble₁ bytes[i] (eq_done_of_isDone h) else none
+    | .oneMore => if h₁ : i + 1 < bytes.size then assemble₂ bytes[i] bytes[i + 1] else none
+    | .twoMore => if h₁ : i + 2 < bytes.size then assemble₃ bytes[i] bytes[i + 1] bytes[i + 2] else none
+    | .threeMore =>
+      if h₁ : i + 3 < bytes.size then assemble₄ bytes[i] bytes[i + 1] bytes[i + 2] bytes[i + 3] else none
+  else none
+
+theorem decodeChar_eq (bytes : ByteArray) (i : Nat) : bytes.utf8DecodeChar? i = decodeChar bytes i := by
+  unfold ByteArray.utf8DecodeChar? decodeChar
+  split
+  · split <;> simp_all [isDone]
+  · rfl
 end ConPastel.Impl
 
 cake_replace ByteArray.validateUTF8 ConPastel.Impl.validateUTF8 ConPastel.Impl.validateUTF8_eq
 cake_replace Array.range ConPastel.Impl.arrayRange ConPastel.Impl.arrayRange_eq
 cake_replace instDecidableEqString ConPastel.Impl.stringDecEq ConPastel.Impl.stringDecEq_eq
+cake_replace ByteArray.utf8Decode? ConPastel.Impl.utf8Decode ConPastel.Impl.utf8Decode_eq
+cake_replace ByteArray.utf8DecodeChar? ConPastel.Impl.decodeChar ConPastel.Impl.decodeChar_eq
