@@ -244,7 +244,7 @@ partial def solve (g : MVarId) : GoalM Unit := do
   let t0 ← IO.monoMsNow
   if trace then
     let (_, p) ← evalGoalParts g
-    cakeLog s!"[enter] {(← ppExpr p).pretty.take 160}"
+    cakeLog s!"[enter] {((← ppExpr p).pretty.replace "\n" " ").take 400}"
   try
     solveCore g
     if trace then
@@ -271,6 +271,20 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
     assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, p, hl, lv.rel])
     return
+  -- `decide (b = true)` is `b` (avoids unfolding the `Bool` decidable-equality instance)
+  if inv.isConstOf ``BOOL then
+    if let (``Decidable.decide, #[prop, dinst]) := t.getAppFnArgs then
+      if let some (ty, b, tr) := prop.eq? then
+        if ty.isConstOf ``Bool && tr.isConstOf ``Bool.true then
+          let ce ← evalGoalCe g
+          let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv b])
+          solve gb.mvarId!
+          let heq ← mkEqSymm (← mkAppOptM ``Bool.decide_eq_true #[b, dinst])
+          let motive ← withLocalDeclD `x (mkConst ``Bool) fun x => do
+            mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+          let pf ← mkEqMP (← mkCongrArg motive heq) (← instantiateMVars gb)
+          g.assign pf
+          return
   -- string literals: `s` is `String.ofByteArray ⟨⟨[bytes]⟩⟩ s.isValidUTF8` (structure eta)
   if let .lit (.strVal str) := t then
     let u8 := mkConst ``UInt8
@@ -846,7 +860,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         -- structure eta: `S.casesOn s f = f s.1 … s.n` for any non-recursive structure
         if ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec && args.size ≥ ii.numParams + 3 then
           let major := args[ii.numParams + 1]!
-          if !(← isProp (← inferType major)) then
+          let mty ← whnfR (← inferType major)
+          -- registered datatypes have their own `casesOn` (and projections become `casesOn`)
+          if !(← isProp (← inferType major)) && (mty.hasFVar || (getDatatypeByType? (← getEnv) mty).isNone) then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
             let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
             let t' := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
@@ -860,11 +876,25 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     return
   if fn.isConstOf ``List.cons && args.size == 3 then
     let (``LIST, #[_, invA]) := (← whnfR inv).getAppFnArgs | throwError "list without LIST invariant"
-    let (_, g₁) ← newEvalGoal env (mkApp invA args[1]!)
-    let (_, g₂) ← newEvalGoal env (mkApp inv args[2]!)
-    solve g₁; solve g₂
-    assignProof g (← mkAppOptM ``Eval_cons #[args[0]!, invA, env, ctx.hlist, none, none, args[1]!, args[2]!,
-      ← instantiateMVars (mkMVar g₁), ← instantiateMVars (mkMVar g₂)])
+    -- the whole cons chain, solved element by element (no nesting: long literals)
+    let mut elems : Array Expr := #[]
+    let mut tl := t
+    while tl.isAppOfArity ``List.cons 3 do
+      elems := elems.push tl.appFn!.appArg!
+      tl := tl.appArg!
+    let mut pfs : Array Expr := #[]
+    for e in elems do
+      let (_, ge) ← newEvalGoal env (mkApp invA e)
+      solve ge
+      pfs := pfs.push (← instantiateMVars (mkMVar ge))
+    let (_, gt) ← newEvalGoal env (mkApp inv tl)
+    solve gt
+    let mut acc ← instantiateMVars (mkMVar gt)
+    let mut rest := tl
+    for i in (List.range elems.size).reverse do
+      acc ← mkAppOptM ``Eval_cons #[args[0]!, invA, env, ctx.hlist, none, none, elems[i]!, rest, pfs[i]!, acc]
+      rest ← mkAppOptM ``List.cons #[args[0]!, elems[i]!, rest]
+    assignProof g acc
     return
   if fn.isConstOf ``List.casesOn && args.size == 5 then
     return ← solveListCases g env inv fn args
