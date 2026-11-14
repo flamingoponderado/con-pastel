@@ -822,12 +822,14 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     let tn := cn.getPrefix
     if cn == tn ++ `casesOn then
       if let some (.inductInfo ii) := (← getEnv).find? tn then
-        if ii.ctors.length == 1 && ii.numIndices == 0 && args.size == ii.numParams + 3 then
+        -- structure eta: `S.casesOn s f = f s.1 … s.n` for any non-recursive structure
+        if ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec && args.size ≥ ii.numParams + 3 then
           let major := args[ii.numParams + 1]!
-          if (← newtypeInfo? (← inferType major)).isSome then
+          if !(← isProp (← inferType major)) then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
             let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
-            let t' := (mkAppN args[ii.numParams + 2]! projs.toArray).headBeta
+            let t' := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
+              args[ii.numParams + 3:].toArray).headBeta
             let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
             return ← solve g'
   -- lists
