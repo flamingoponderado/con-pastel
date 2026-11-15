@@ -709,15 +709,23 @@ partial def prepassBlock (key : Expr) (stack : List Expr := []) : MetaM (Array E
   let .const c _ := key.getAppFn | return #[]
   let ms ← mutualMembers c
   if ms.isEmpty then return #[]
+  let t0 ← IO.monoMsNow
   let cands ← blockCandidates ms
+  cakeLog s!"[prepass] {c}: {cands.size} candidates in {(← IO.monoMsNow) - t0}ms"
   for k in cands do
     if (getUnit? (← getEnv) k).isNone && !stack.contains k && !(ms.contains k.getAppFn.constName!) then
+      cakeLog s!"[prepass] {c}: candidate {((← ppExpr k).pretty.replace "\n" " ").take 120}"
       let s0 ← saveState
       try translateUnit k (key :: stack)
       catch e =>
         let msg ← e.toMessageData.toString
         if (msg.splitOn "cake: need datatype").length > 1 then throw e
+        -- keep the units (and datatypes) completed on the way: they are sound
+        let env ← getEnv
         s0.restore
+        setEnv env
+        cakeLog s!"[prepass] {c}: candidate failed: {msg.take 300}"
+  cakeLog s!"[prepass] {c}: done"
   return cands
 
 /-- Translate `key`, first translating (recursively) the units it needs.
@@ -750,6 +758,13 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
     withCurrHeartbeats (translateUnitOnce key extra)
     cakeLog s!"[cake] {(← IO.monoMsNow) - t0}ms unit {nm}"
   catch e =>
+    -- a missing datatype: register it in place and retry this unit only
+    if let some τ ← needDatatypeRef.get then
+     if (← IO.getEnv "CAKE_NOHOOK").isNone then
+      saved.restore
+      needDatatypeRef.set none
+      (← datatypeHookRef.get) τ
+      return ← translateUnit key stack extra
     match ← needUnitRef.get with
     | some dep =>
       saved.restore

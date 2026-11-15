@@ -12,6 +12,7 @@ itself), so that the stages translating the block start from these units.
 set_option maxHeartbeats 0
 set_option maxRecDepth 200000
 set_option linter.unusedSimpArgs false
+set_option linter.all false
 
 namespace ConPastel.Leche
 cake_prepass ConLeche.Cached.whnfCoreI

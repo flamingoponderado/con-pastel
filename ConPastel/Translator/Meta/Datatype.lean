@@ -226,6 +226,8 @@ elab "cake_unit " ts:(colGt term:max)+ : command => do
       instantiateMVars key
     cakeUnitCmd key
 
+initialize datatypeHookRef.set fun τ => liftCommandElabM (registerDatatype τ)
+
 /-- `cake_prepass f`: translate the dependencies of `f`'s mutual block (not the
 block itself), e.g. in a stage module that later modules import. -/
 elab "cake_prepass " t:term:max : command => do

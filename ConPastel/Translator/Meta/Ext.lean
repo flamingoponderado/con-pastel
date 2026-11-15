@@ -64,6 +64,11 @@ initialize assumeReplaceExt : SimplePersistentEnvExtension (Name × Name × Expr
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 
+/-- Registers a datatype in place (set by the datatype module), so that a unit
+needing one does not abort the whole translation. -/
+initialize datatypeHookRef : IO.Ref (Expr → MetaM Unit) ←
+  IO.mkRef (fun τ => throwError "cake: no datatype registration available for {τ}")
+
 end ConPastel.Translator.Meta
 
 namespace ConPastel.Translator.Meta

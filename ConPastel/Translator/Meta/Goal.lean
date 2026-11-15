@@ -109,8 +109,9 @@ partial def psigmaComps (e : Expr) (n : Nat) : Array Expr :=
   | (``PSigma.mk, #[_, _, a, b]) => #[a] ++ psigmaComps b (n - 1)
   | _ => #[Expr.proj ``PSigma 0 e] ++ psigmaComps (Expr.proj ``PSigma 1 e) (n - 1)
 
-def throwNeedUnit {α : Type} (key : Expr) : MetaM α := do
+def throwNeedUnit {α : Type} (key : Expr) (t : Expr := default) : MetaM α := do
   needUnitRef.set (some key)
+  cakeLog s!"[need-unit] {((← ppExpr key).pretty.replace "\n" " ").take 200} for term {((← ppExpr t).pretty.replace "\n" " ").take 500}"
   throwError "{needUnitTag}{key}"
 
 def getLevels (_args : Array Expr) : MetaM (List Level) := pure []
@@ -1149,7 +1150,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if last.startsWith "_sparseCasesOn" then
         return ← solveSparseCases g env inv t
   -- integers: `Int.ofNat n` is `n`'s value; `Int.add/sub/mul` are CakeML's integer arithmetic
-  if fn.isConstOf ``Nat.cast && args.size == 3 && (← whnfR args[0]!).isConstOf ``Int then
+  -- (`←` inside `&&` is hoisted before the guards: check the size first)
+  if fn.isConstOf ``Nat.cast && args.size == 3 then
+   if (← whnfR args[0]!).isConstOf ``Int then
     return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp (mkConst ``NAT) args[2]!]))
   if fn.isConstOf ``Int.ofNat && args.size == 1 then
     return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp (mkConst ``NAT) args[0]!]))
@@ -1591,7 +1594,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if dargs.isEmpty then
         if let some u := getUnit? (← getEnv) key then
           if let .thunk _ _ := u.kind then
-            let some gv := ctx.globals.get? key | throwNeedUnit key
+            let some gv := ctx.globals.get? key | throwNeedUnit key t
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] key
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
@@ -1618,7 +1621,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let arity ← forallTelescope (← inferType key) fun xs _ => pure xs.size
           if dargs.size == arity then
             let tup ← dargs.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) dargs.back!
-            let some gv := ctx.globals.get? key | throwNeedUnit key
+            let some gv := ctx.globals.get? key | throwNeedUnit key t
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tupFn, hl, gv.cert]
             if let (``DARROW, #[_, _, invT, _]) := gv.inv.getAppFnArgs then
@@ -1635,7 +1638,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if fn.isConst then
     if let some (key, dargs) ← splitKey t then
       if dargs.isEmpty then
-        let some gv := ctx.globals.get? key | throwNeedUnit key
+        let some gv := ctx.globals.get? key | throwNeedUnit key t
         let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
         assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv key, hl, gv.cert])
         return
