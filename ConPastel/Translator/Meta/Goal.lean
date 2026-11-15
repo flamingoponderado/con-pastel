@@ -1449,6 +1449,16 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         let t' := mkAppN (mkConst ``Nat.casesOn lvls) #[args[0]!, args[3]!, args[1]!, step]
         let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
         return ← solve g'
+  -- `List.rec` whose cons step ignores the induction hypothesis is `List.casesOn`
+  -- (compiled list matches), possibly applied to further arguments
+  if fn.isConstOf ``List.rec && args.size ≥ 5 then
+    if let .lam n1 t1 (.lam n2 t2 (.lam _ _ body _) bi2) bi1 := args[3]! then
+      if !body.hasLooseBVar 0 then
+        let step := Expr.lam n1 t1 (.lam n2 t2 (body.lowerLooseBVars 1 1) bi2) bi1
+        let .const _ lvls := fn | unreachable!
+        let t' := mkAppN (mkConst ``List.casesOn lvls) (#[args[0]!, args[1]!, args[4]!, args[2]!, step] ++ args[5:])
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+        return ← solve g'
   -- Nat.casesOn with a non-dependent motive
   if fn.isConstOf ``Nat.casesOn && args.size == 4 then
     let n := args[1]!
