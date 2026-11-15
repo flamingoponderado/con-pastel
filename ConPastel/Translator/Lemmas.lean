@@ -288,6 +288,21 @@ theorem option_get_eq_getD' {α : Type u} (o : Option α) (h : o.isSome) (d : α
   | none => simp at h
   | some x => rfl
 
+/-- The last element, or `d` for the empty list (structural, no proofs). -/
+def lastD {α : Type u} : List α → α → α
+  | [], d => d
+  | [a], _ => a
+  | _ :: b :: l, d => lastD (b :: l) d
+
+theorem list_getLast_eq_lastD {α : Type u} (l : List α) (h : l ≠ []) (d : α) :
+    l.getLast h = lastD l d := by
+  induction l with
+  | nil => exact absurd rfl h
+  | cons x xs ih =>
+    cases xs with
+    | nil => rfl
+    | cons y ys => simp [lastD, List.getLast_cons_cons, ih]
+
 /-- `Option.get` (dependent on its proof) as `Option.getD` for inhabited types. -/
 theorem option_get_eq_getD {α : Type u} [Inhabited α] (o : Option α) (h : o.isSome) :
     o.get h = o.getD default := by

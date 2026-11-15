@@ -482,6 +482,17 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
       let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
       g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
       return
+  -- `List.getLast l h` as `lastD l default` for inhabited types
+  if let (``List.getLast, #[α, l, h]) := t.getAppFnArgs then
+    if let some dflt ← defaultOf? α then
+      let heq ← mkAppOptM ``list_getLast_eq_lastD #[α, l, h, dflt]
+      let t' ← mkAppOptM ``lastD #[α, l, dflt]
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+      g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+      return
   -- `Option.get o h` as `Option.getD o default` for inhabited types
   if let (``Option.get, #[α, o, h]) := t.getAppFnArgs then
     if let some dflt ← defaultOf? α then
