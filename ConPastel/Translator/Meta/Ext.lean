@@ -61,6 +61,14 @@ initialize assumeReplaceExt : SimplePersistentEnvExtension (Name × Name × Expr
     addImportedFn := fun as => as.foldl (fun acc a => acc ++ a) #[]
   }
 
+/-- Ghost types (`cake_ghost T`): refined by `GHOST T`, every value
+translated as `()`. -/
+initialize ghostExt : SimplePersistentEnvExtension Name NameSet ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun s n => s.insert n
+    addImportedFn := fun as => as.foldl (fun acc a => a.foldl (·.insert ·) acc) {}
+  }
+
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 

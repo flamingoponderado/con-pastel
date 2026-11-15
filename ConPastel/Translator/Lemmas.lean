@@ -161,6 +161,19 @@ theorem Eval_unit (env : SemEnv Value) : Eval env (.con none []) (UNIT ()) := by
   rw [Flapjack.EvaluateHOL.evaluate]
   simp [doConCheck, buildConv, Flapjack.EvaluateHOL.evaluate]
 
+/-! ## Ghost types
+
+A ghost type's values are not computed: every value is represented by `()`.
+Only sound for a type the program never inspects (it is only built, passed
+on and discarded), e.g. con-leche's `CheckError`, whose contents never
+reach the verdict; a function that inspects a ghost value has no proof. -/
+
+def GHOST (α : Type) : RefInv α := fun _ v => v = .conv none []
+
+theorem Eval_ghost (env : SemEnv Value) (α : Type) (a : α) :
+    Eval env (.con none []) (GHOST α a) :=
+  Eval_unit env
+
 theorem findRecFun_mem {α β : Type} {n : VarN} :
     ∀ {funs : List (VarN × α × β)} {r : α × β}, findRecFun n funs = some r → n ∈ funs.map (·.1)
   | [], _, h => by simp [findRecFun] at h

@@ -98,6 +98,8 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if ty.isConstOf ``Int then return mkConst ``INT
   if ty.isConstOf ``Bool then return mkConst ``BOOL
   if ty.isConstOf ``Unit || ty.isAppOfArity ``PUnit 0 then return mkConst ``UNIT
+  if let .const c [] := ty then
+    if (ghostExt.getState (← getEnv)).contains c then return ← mkAppM ``GHOST #[ty]
   if ty.isAppOfArity ``List 1 then
     return ← mkAppM ``LIST #[← invOf ty.appArg!]
   if ty.isAppOfArity ``Quot 2 then

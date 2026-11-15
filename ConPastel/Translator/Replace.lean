@@ -269,6 +269,12 @@ cake_replace_assuming mixHash ConPastel.leanMixHash (∀ h k, mixHash h k = ConP
 cake_replace_assuming String.hash ConPastel.leanStringHash (∀ s, String.hash s = ConPastel.leanStringHash s)
 cake_rewrite ConPastel.Impl.arrayFoldlM_eq
 
+/-! con-leche's errors only decide that a file is rejected: nothing inspects
+an error's contents (they are rethrown, paired with a position, or dropped),
+so `CheckError` is a ghost type. This is how the opaque `partial def
+Expr.hasStrLitGo` (it only picks an error's kind) needs no assumption. -/
+cake_ghost ConLeche.CheckError
+
 /-! con-leche's memoized expression walks: the result of a walk is fixed by its
 subtype (`resTerm_eq`), so the plain recursive specification is translated in
 place of the memo machinery (same results; the memo only saves work). -/

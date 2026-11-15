@@ -402,6 +402,11 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     if t.getAppNumArgs > 0 then
       let t' := Expr.letE n ty v (mkAppN b (t.getAppArgs.map (·.liftLooseBVars 0 1))) nd
       return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
+  -- ghost values: `()`, whatever the term
+  let invW ← whnfR inv
+  if invW.isAppOfArity ``GHOST 1 then
+    assignProof g (← mkAppOptM ``Eval_ghost #[env, invW.appArg!, t])
+    return
   let st ← get
   let ctx ← read
   -- locals
