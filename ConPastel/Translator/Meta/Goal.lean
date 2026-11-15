@@ -1005,6 +1005,39 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if let some info ← getMatcherInfo? fnName then
     for i in [0:info.numDiscrs] do
       if ← solveDecSplit g env inv t (info.numParams + 1 + i) then return
+  -- `match h : (b : Bool) with | true => A h | false => B h` (non-dependent):
+  -- `if h : b = true then A h else B _` (the alternatives' `h` mention `b` itself,
+  -- so the discriminant cannot be let-bound)
+  if let some info ← getMatcherInfo? fnName then
+    if info.numDiscrs == 1 && info.numAlts == 2 && info.altNumParams == #[1, 1] &&
+        (info.discrInfos[0]!.hName?.isSome) then
+      let d := args[info.numParams + 1]!
+      let motive := args[info.numParams]!
+      if (← whnfD (← inferType d)).isConstOf ``Bool && !d.isFVar &&
+          (motive.isLambda && !motive.bindingBody!.hasLooseBVars) then
+        let mci ← getConstInfo fnName
+        let altCtors ← forallTelescope (← instantiateTypeLevelParams mci.toConstantVal lvls) fun xs _ => do
+          (List.range 2).toArray.mapM fun j => do
+            forallTelescope (← inferType xs[info.numParams + 2 + j]!) fun _ r => pure r.appArg!
+        let jt? := altCtors.findIdx? (·.isConstOf ``Bool.true)
+        let jf? := altCtors.findIdx? (·.isConstOf ``Bool.false)
+        if let (some jt, some jf) := (jt?, jf?) then
+          let altT := args[info.numParams + 2 + jt]!
+          let altF := args[info.numParams + 2 + jf]!
+          let cond ← mkEq d (mkConst ``Bool.true)
+          let thenF ← withLocalDeclD `h cond fun h => do mkLambdaFVars #[h] (altT.beta #[h])
+          let elseF ← withLocalDeclD `h (mkNot cond) fun h => do
+            mkLambdaFVars #[h] (altF.beta #[← mkAppM ``Iff.mpr #[← mkAppOptM ``Bool.eq_false_iff #[d], h]])
+          let t' ← mkAppM ``dite #[cond, thenF, elseF]
+          let heq ← closeWith (← mkEq t t') (← `(tactic|
+            (split <;> rename_i hh <;> first | rw [dif_pos hh] | rw [dif_neg (by simp [hh])])))
+          let ce ← evalGoalCe g
+          let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+          solve gb.mvarId!
+          let mot ← withLocalDeclD `x (← inferType t) fun x => do
+            mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+          g.assign (← mkEqMP (← mkCongrArg mot (← mkEqSymm heq)) (← instantiateMVars gb))
+          return
   let mci ← getConstInfo fnName
   let unfolded := (mkAppN (← instantiateValueLevelParams mci lvls) args).headBeta
   if ← isSupportedCases unfolded then

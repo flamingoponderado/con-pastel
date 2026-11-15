@@ -273,6 +273,8 @@ cake_rewrite ConPastel.Impl.arrayFoldlM_eq
 subtype (`resTerm_eq`), so the plain recursive specification is translated in
 place of the memo machinery (same results; the memo only saves work). -/
 cake_rewrite ConLeche.Expr.resTerm_eq
+cake_rewrite ConLeche.Expr.resBool_eq
+cake_rewrite ConLeche.Expr.resNat_eq
 cake_rewrite ConPastel.Impl.arrayEraseIdx_eq
 
 cake_rewrite ConPastel.Impl.arrayFoldl_eq
