@@ -244,13 +244,27 @@ def wfParts (c : Name) (v : Expr) : MetaM (Option (Array Expr × Expr × Expr ×
 of a `τ` value into Lean's own recursion domain: a measure, or the inverse
 image of Lean's relation. Returns `(r, wf)`. -/
 def wfRelOver (τ : Expr) (pk : Expr → MetaM (Expr × WfSpec)) : MetaM (Expr × Expr) := do
-  let (spec0, isNat) ← withLocalDeclD `p τ fun p => do
+  let (spec0, isNat, fiber) ← withLocalDeclD `p τ fun p => do
     let (_, sp) ← pk p
     match sp with
-    | .nat _ => pure (sp, true)
+    | .nat _ => pure (sp, true, none)
     | .gen r hwf =>
-      if r.hasFVar || hwf.hasFVar then throwError "a well-founded relation depending on the arguments is not supported yet"
-      pure (sp, false)
+      if r.hasFVar || hwf.hasFVar then
+        -- the relation mentions the (fixed) parameters: relate tuples with the
+        -- same relation, by that relation (`wf_fiber`)
+        let rP ← mkLambdaFVars #[p] r
+        let hP ← mkLambdaFVars #[p] hwf
+        if rP.hasFVar || hP.hasFVar then
+          throwError "a well-founded relation depending on outer variables is not supported"
+        pure (sp, false, some (rP, hP))
+      else pure (sp, false, none)
+  if let some (rP, hP) := fiber then
+    let pkF ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (← pk p).1
+    let rel ← withLocalDeclD `a τ fun a => withLocalDeclD `b τ fun b => do
+      let ra := (rP.beta #[a]).headBeta
+      let rb := (rP.beta #[b]).headBeta
+      mkLambdaFVars #[a, b] (mkAnd (← mkEq ra rb) (mkApp2 rb (pkF.beta #[a]).headBeta (pkF.beta #[b]).headBeta))
+    return (rel, ← mkAppOptM ``ConPastel.Translator.wf_fiber #[none, none, rP, pkF, hP])
   if isNat then
     let msr ← withLocalDeclD `p τ fun p => do
       let (packed, sp) ← pk p

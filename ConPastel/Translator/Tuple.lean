@@ -64,6 +64,24 @@ theorem Eval_mat_pair_dep {α β : Type} {γ : α → β → Type} {A : RefInv �
     Eval env (.mat e [(.pcon none [.pvar x, .pvar y], body)]) (C p.1 p.2 (f p.1 p.2)) :=
   Eval_mat_pair (C := fun (Q : Value → Prop) v => Q v) (f := fun a b => C a b (f a b)) hxy he hb
 
+/-- Lean's termination relation may mention the fixed parameters (`rP q`, at
+the argument tuple `q`): recursion keeps them, so the relation on tuples is
+"same fixed part, and Lean's relation there on the packed values". -/
+theorem wf_fiber {τ : Sort u} {α : Sort v} (rP : τ → α → α → Prop) (pk : τ → α)
+    (h : ∀ q, WellFounded (rP q)) :
+    WellFounded (fun a b => rP a = rP b ∧ rP b (pk a) (pk b)) := by
+  have aux : ∀ (R : α → α → Prop) c, Acc R c → ∀ q, rP q = R → pk q = c →
+      Acc (fun a b => rP a = rP b ∧ rP b (pk a) (pk b)) q := by
+    intro R c hc
+    induction hc with
+    | intro c _ ih =>
+      intro q hq hc
+      constructor
+      intro p ⟨hp, hr⟩
+      rw [hq, hc] at hr
+      exact ih (pk p) hr p (hp.trans hq) rfl
+  exact ⟨fun q => aux (rP q) (pk q) ((h q).apply (pk q)) q rfl rfl⟩
+
 theorem darrow_of_wf {α : Type} {β : α → Type} {A : RefInv α} {B : (x : α) → RefInv (β x)}
     {r : α → α → Prop} (hwf : WellFounded r) {f : (x : α) → β x} {cl : Value}
     (h : ∀ x, (∀ y, r y x → ∀ yv, A y yv → AppReturns cl yv (B y (f y))) →

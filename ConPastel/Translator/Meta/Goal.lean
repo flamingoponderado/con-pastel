@@ -1514,7 +1514,15 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       -- the IH at y: ∀ yv, A y yv → AppReturns cl yv (B (f y))
       let ihTy ← whnfR (← inferType r.ih)
       let .forallE _ _ body _ := ihTy | throwError "bad IH"
-      let .forallE _ relTy _ _ := body.instantiate1 y | throwError "bad IH"
+      let .forallE _ relTy0 _ _ := body.instantiate1 y | throwError "bad IH"
+      -- a fibred relation (`wf_fiber`): the fixed parts agree definitionally
+      let relW ← whnfR relTy0
+      let (relTy, fixEq?) ← do
+        if relW.isAppOfArity ``And 2 then
+          if let some (_, l, r) := relW.appFn!.appArg!.eq? then
+            if ← isDefEq l r then pure (relW.appArg!, some (← mkEqRefl l)) else pure (relTy0, none)
+          else pure (relTy0, none)
+        else pure (relTy0, none)
       let hint ← decHintRef.get
       decHintRef.set none
       let hinted ← match hint with
@@ -1539,6 +1547,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             if d.isImplementationDetail then return acc
             if ← isProp d.type then return acc ++ m!"\n  {d.userName} : {d.type}" else return acc
           throwError "cannot prove the recursive call decreases: {← whnfR relTy}\nhypotheses:{hyps}"
+      let hdec ← match fixEq? with
+        | some e => mkAppM ``And.intro #[e, hdec]
+        | none => pure hdec
       let ihy := mkApp2 r.ih y hdec
       let ihyTy ← whnfR (← inferType ihy)
       let .forallE _ _ ihB _ := ihyTy | throwError "bad IH at y"
