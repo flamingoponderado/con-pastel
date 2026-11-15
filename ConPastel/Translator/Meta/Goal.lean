@@ -368,6 +368,48 @@ partial def defaultOf? (ty : Expr) (fuel : Nat := 6) : MetaM (Option Expr) := do
     if ok then return some (mkAppN (mkConst c us) (params ++ args))
   return none
 
+/-- `I.rec ps motive minors is major rest…` as `I.casesOn ps motive is major
+minors' rest…` when no minor premise uses its induction hypotheses (a single,
+non-mutual inductive; the minors must be lambdas over fields and IHs). -/
+def recAsCasesOn? (recN : Name) (lvls : List Level) (args : Array Expr) : MetaM (Option Expr) := do
+  let some (.recInfo rv) := (← getEnv).find? recN | return none
+  unless rv.numMotives == 1 do return none
+  let I := recN.getPrefix
+  let some (.inductInfo ii) := (← getEnv).find? I | return none
+  unless ii.all.length == 1 && !ii.isNested do return none
+  let np := rv.numParams; let nm := rv.numMinors; let ni := rv.numIndices
+  unless args.size ≥ np + 1 + nm + ni + 1 do return none
+  unless (← getEnv).contains (I ++ `casesOn) do return none
+  let params := args[:np].toArray
+  let mut minors : Array Expr := #[]
+  for k in [0:nm] do
+    let rule := rv.rules[k]!
+    let nf := rule.nfields
+    let cty ← instantiateTypeLevelParams (← getConstInfo rule.ctor).toConstantVal (lvls.drop (lvls.length - ii.levelParams.length))
+    let cty ← instantiateForall cty params
+    let nRec ← forallTelescope cty fun fs _ => do
+      let mut c := 0
+      for f in fs do
+        if (← whnfR (← inferType f)).getAppFn.isConstOf I then c := c + 1
+      return c
+    -- peel the field and IH binders
+    let mut m := args[np + 1 + k]!
+    let mut binders : Array (Name × Expr × BinderInfo) := #[]
+    for _ in [0:nf + nRec] do
+      let .lam n ty b bi := m | return none
+      binders := binders.push (n, ty, bi)
+      m := b
+    if (List.range nRec).any (m.hasLooseBVar ·) then return none
+    let mut body := m.lowerLooseBVars nRec nRec
+    for (n, ty, bi) in binders[:nf].toArray.reverse do
+      body := .lam n ty body bi
+    minors := minors.push body
+  let motive := args[np]!
+  let indices := args[np + 1 + nm : np + 1 + nm + ni].toArray
+  let major := args[np + 1 + nm + ni]!
+  let rest := args[np + 1 + nm + ni + 1:].toArray
+  return some (mkAppN (mkConst (I ++ `casesOn) lvls) (params ++ #[motive] ++ indices ++ #[major] ++ minors ++ rest))
+
 mutual
 
 partial def solve (g : MVarId) : GoalM Unit := do
@@ -1089,9 +1131,13 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         if args.size > ii.numParams + 1 + ii.numIndices then
           let major ← whnfR args[ii.numParams + 1 + ii.numIndices]!
           if let .const mc _ := major.getAppFn then
-            if (← getEnv).find? mc matches some (.ctorInfo _) then
-              let t' ← whnfR t
-              if t' != t then
+            if let some (.ctorInfo mci) := (← getEnv).find? mc then
+              -- one iota step (a full `whnfR` would go on unfolding reducible
+              -- auxiliaries in the selected branch, e.g. sparse `casesOn`s)
+              let base := ii.numParams + 1 + ii.numIndices + 1
+              if args.size ≥ base + ii.ctors.length && major.getAppNumArgs == mci.numParams + mci.numFields then
+                let fields := major.getAppArgs[mci.numParams:].toArray
+                let t' := (mkAppN (mkAppN args[base + mci.cidx]! fields) args[base + ii.ctors.length:].toArray).headBeta
                 return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- under-applied `casesOn` (as a function value): eta-expand to its full arity
   if let .const cn _ := fn then
@@ -1449,16 +1495,13 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         let t' := mkAppN (mkConst ``Nat.casesOn lvls) #[args[0]!, args[3]!, args[1]!, step]
         let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
         return ← solve g'
-  -- `List.rec` whose cons step ignores the induction hypothesis is `List.casesOn`
-  -- (compiled list matches), possibly applied to further arguments
-  if fn.isConstOf ``List.rec && args.size ≥ 5 then
-    if let .lam n1 t1 (.lam n2 t2 (.lam _ _ body _) bi2) bi1 := args[3]! then
-      if !body.hasLooseBVar 0 then
-        let step := Expr.lam n1 t1 (.lam n2 t2 (body.lowerLooseBVars 1 1) bi2) bi1
-        let .const _ lvls := fn | unreachable!
-        let t' := mkAppN (mkConst ``List.casesOn lvls) (#[args[0]!, args[1]!, args[4]!, args[2]!, step] ++ args[5:])
-        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
-        return ← solve g'
+  -- `I.rec` whose minor premises ignore their induction hypotheses is
+  -- `I.casesOn` (compiled matches), possibly applied to further arguments
+  if let .const recN lvls := fn then
+    if recN != ``Nat.rec then
+    if let some t' ← recAsCasesOn? recN lvls args then
+      let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
+      return ← solve g'
   -- Nat.casesOn with a non-dependent motive
   if fn.isConstOf ``Nat.casesOn && args.size == 4 then
     let n := args[1]!
