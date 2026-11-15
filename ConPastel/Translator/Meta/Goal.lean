@@ -1404,10 +1404,12 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {τ}"
           let fields := args[ci.numParams:].toArray
           let mut pfs : Array Expr := #[]
+          -- recursive fields are recognised as at registration: up to `normType`
+          let τn ← normType τ
           for j in [0:fields.size] do
             if dataFlags[j]! then
-              let fty ← inferType fields[j]!
-              let fi := if fty == τ then mkConst (d.name ++ `cakeInv)
+              let fty ← normType (← inferType fields[j]!)
+              let fi := if fty == τn then mkConst (d.name ++ `cakeInv)
                 else mkConst (d.name ++ Name.mkSimple s!"f{k}_{j}")
               let (_, gj) ← newEvalGoal env (mkApp fi fields[j]!)
               solve gj
