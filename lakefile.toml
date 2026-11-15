@@ -13,7 +13,7 @@ path = "deps/flapjack"
 [[lean_lib]]
 name = "ConPastel"
 # the translator recurses deeply on large definitions (interpreted meta code)
-moreLeanArgs = ["--tstack=262144"]
+moreLeanArgs = ["--tstack=8388608"]
 
 # Translator experiments; each is an independent translation (not imported together).
 [[lean_lib]]
