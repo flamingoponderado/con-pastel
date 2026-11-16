@@ -1,4 +1,5 @@
 import ConPastel.Leche.Frontend
+import ConPastel.Program.Command
 
 /-!
 # The con-pastel program and its correctness
