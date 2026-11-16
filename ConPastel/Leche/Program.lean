@@ -54,7 +54,7 @@ cake_unit conPastelEntry
 cake_program conPastelP conPastelEntry
 
 /-- The CakeML program. -/
-def conPastelProg : List Flapjack.AstHOL.Dec := conPastelP.prog
+noncomputable def conPastelProg : List Flapjack.AstHOL.Dec := conPastelP.prog
 
 /-- **con-pastel's correctness**: under the runtime assumptions, for every
 input file the CakeML program terminates, and only terminates, writing
