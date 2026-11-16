@@ -87,10 +87,17 @@ structure GCtx where
   assumed : Array (Name × Name × Expr) := #[]
   /-- The mutual block being translated, if any. -/
   mrec? : Option MutRec := none
+  /-- A parallel round of member solves: a missing global unit is recorded (in
+  `needUnitsAllRef`) and its goal closed by `sorry` instead of aborting, so that
+  one round finds all of them. Such a round's result is always discarded. -/
+  collectNeeds : Bool := false
 
 structure GSt where
   locals : Array GLVar := #[]
   fresh : Nat := 0
+  /-- Lean's own decreasing proof for the recursive call being translated
+  (per solve, so that member solves can run in parallel threads). -/
+  decHint : Option Expr := none
 
 abbrev GoalM := StateRefT GSt (ReaderT GCtx MetaM)
 
@@ -99,8 +106,6 @@ def needUnitTag : String := "cake: need unit "
 
 initialize needUnitRef : IO.Ref (Option Expr) ← IO.mkRef none
 
-/-- Lean's own decreasing proof for the recursive call being translated. -/
-initialize decHintRef : IO.Ref (Option Expr) ← IO.mkRef none
 
 /-- The `n` components of a packed (`PSigma`) argument tuple. -/
 partial def psigmaComps (e : Expr) (n : Nat) : Array Expr :=
@@ -109,8 +114,15 @@ partial def psigmaComps (e : Expr) (n : Nat) : Array Expr :=
   | (``PSigma.mk, #[_, _, a, b]) => #[a] ++ psigmaComps b (n - 1)
   | _ => #[Expr.proj ``PSigma 0 e] ++ psigmaComps (Expr.proj ``PSigma 1 e) (n - 1)
 
+/-- A missing global unit in a collecting round: record it, close `g` by `sorry`. -/
+def recordNeedUnit (g : MVarId) (key : Expr) (t : Expr) : MetaM Unit := do
+  needUnitsAllRef.modify (·.push key)
+  cakeLog s!"[need-unit] {((← ppExpr key).pretty.replace "\n" " ").take 200} for term {((← ppExpr t).pretty.replace "\n" " ").take 200} (collected)"
+  g.assign (← mkSorry (← g.getType) false)
+
 def throwNeedUnit {α : Type} (key : Expr) (t : Expr := default) : MetaM α := do
   needUnitRef.set (some key)
+  needUnitsAllRef.modify (·.push key)
   cakeLog s!"[need-unit] {((← ppExpr key).pretty.replace "\n" " ").take 200} for term {((← ppExpr t).pretty.replace "\n" " ").take 500}"
   throwError "{needUnitTag}{key}"
 
@@ -451,6 +463,17 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     return
   let st ← get
   let ctx ← read
+  -- a cached field (`cake_cached`): a projection of the stored value
+  if let .const f _ := t.getAppFn then
+    if t.getAppNumArgs == 1 then
+      if let some (d, c) := cachedFieldOf? (← getEnv) f then
+        let s := t.appArg!
+        let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {d.ty}"
+        let (_, gs) ← newEvalGoal env (mkApp (mkConst (d.name ++ `cakeInv)) s)
+        solve gs
+        assignProof g (← mkAppOptM (d.name ++ Name.mkSimple s!"cake_cf{c}")
+          #[some env, some hc, none, some s, some (← instantiateMVars (mkMVar gs))])
+        return
   -- locals
   if t.isFVar then
     let some lv := st.locals.find? (·.fvar == t) | throwError "unknown local {t}"
@@ -863,18 +886,24 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   for k in [0:d.ctors.size] do
     let (c, _, dataFlags) := d.ctors[k]!
     let cty ← instantiateForall (← instantiateTypeLevelParams (← getConstInfo c).toConstantVal lvls) params
+    let m := d.cached.size
+    let cnames ← (List.range m).mapM fun _ => freshCName "c"
     let names ← (dataFlags.toList.filter id).mapM fun _ => freshCName "f"
-    let nameList ← mkListLit (mkConst ``VarN) (names.map mlString)
+    let nameList ← mkListLit (mkConst ``VarN) ((cnames ++ names).map mlString)
     let hnd ← closeWith (← mkAppM ``List.Nodup #[nameList]) (← `(tactic| decide))
     let bk ← mkFreshExprMVar (mkConst ``Exp)
     let hk ← forallTelescope cty fun as _ => do
       let ctorApp := mkAppN (mkAppN (mkConst c lvls) params) as
       withLocalDeclD `heq (← mkEq major ctorApp) fun heq => do
       let dataAs := (as.toList.zip dataFlags.toList).filterMap fun (a, b) => if b then some a else none
+      -- the cached fields' stored values come first
+      withLocalDeclsDND ((Array.range m).map fun i => (Name.mkSimple s!"z{i}", mkConst ``Value)) fun zs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i _ => (Name.mkSimple s!"w{i}", mkConst ``Value)) fun ws => do
       let invs ← dataAs.toArray.mapM fun a => do (invOf (← inferType a) : MetaM Expr)
+      withLocalDeclsDND ((Array.range m).map fun i => (Name.mkSimple s!"hz{i}",
+          mkApp2 (mkConst (d.name ++ Name.mkSimple s!"c{i}")) (mkApp (mkConst d.cached[i]!) ctorApp) zs[i]!)) fun hzs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i a => (Name.mkSimple s!"hw{i}", mkApp2 invs[i]! a ws[i]!)) fun hws => do
-        let wList ← mkListLit (mkConst ``Value) ws.toList
+        let wList ← mkListLit (mkConst ``Value) (zs.toList ++ ws.toList)
         let envK ← mkAppM ``clauseEnv #[env, nameList, wList]
         let branchT := (mkAppN alts[k]! as).headBeta
         let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envK, bk, mkApp inv branchT])
@@ -884,8 +913,8 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
           modify fun s => { s with locals := s.locals.push lv }
         solve gb.mvarId!
         modify fun s => { s with locals := saved }
-        mkLambdaFVars (as ++ #[heq] ++ ws ++ hws) (← instantiateMVars gb)
-    lemArgs := lemArgs ++ names.toArray.map (some ∘ mlString) ++ #[some hnd, some bk, some hk]
+        mkLambdaFVars (as ++ #[heq] ++ zs ++ ws ++ hzs ++ hws) (← instantiateMVars gb)
+    lemArgs := lemArgs ++ (cnames ++ names).toArray.map (some ∘ mlString) ++ #[some hnd, some bk, some hk]
   assignProof g (← mkAppOptM (d.name ++ `cake_mat) lemArgs)
 
 partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) : GoalM Unit := do
@@ -1485,6 +1514,26 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let (_, _, dataFlags) := d.ctors[k]!
           let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {τ}"
           let fields := args[ci.numParams:].toArray
+          -- cached fields: bind the data fields first (each is evaluated once, and the
+          -- cached values read the children's stored fields)
+          if !d.cached.isEmpty then
+            let pending := (List.range fields.size).filter fun j => dataFlags[j]! && !fields[j]!.isFVar
+            if !pending.isEmpty then
+              let rec bindAll (js : List Nat) (fs : Array Expr) (acc : Array Expr) : MetaM Expr := do
+                match js with
+                | [] => mkLetFVars acc (mkAppN fn (args[:ci.numParams].toArray ++ fs))
+                | j :: rest =>
+                  withLetDecl `cf (← inferType fs[j]!) fs[j]! fun x => bindAll rest (fs.set! j x) (acc.push x)
+              let t' ← bindAll pending fields #[]
+              return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
+          let mut cpfs : Array Expr := #[]
+          for c in [0:d.cached.size] do
+            let some rhs ← unfoldDefinition? (mkApp (mkConst d.cached[c]!) t)
+              | throwError "cannot unfold cached field {d.cached[c]!}"
+            let rhs ← whnfCore rhs
+            let (_, gc) ← newEvalGoal env (mkApp (mkConst (d.name ++ Name.mkSimple s!"c{c}")) rhs)
+            solve gc
+            cpfs := cpfs.push (← instantiateMVars (mkMVar gc))
           let mut pfs : Array Expr := #[]
           -- recursive fields are recognised as at registration: up to `normType`
           let τn ← normType τ
@@ -1496,9 +1545,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
               let (_, gj) ← newEvalGoal env (mkApp fi fields[j]!)
               solve gj
               pfs := pfs.push (← instantiateMVars (mkMVar gj))
-          let nd := pfs.size
+          let nd := cpfs.size + pfs.size
           let lemArgs : Array (Option Expr) := #[some env, some hc] ++ Array.replicate nd none ++
-            fields.map some ++ pfs.map some
+            fields.map some ++ cpfs.map some ++ pfs.map some
           assignProof g (← mkAppOptM (d.name ++ Name.mkSimple s!"con{k}") lemArgs)
           return
   -- casesOn of datatypes, with a non-dependent motive
@@ -1587,7 +1636,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         if let .proj _ i sv := x then
           if let some v ← Meta.projectCore? sv.consumeMData i then return .done v
         return .continue)
-      decHintRef.set (some args[5]!)
+      modify fun st => { st with decHint := some args[5]! }
       return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- calls to members of the mutual block: the joint induction hypothesis at `inj_j y`
   if let some mr := ctx.mrec? then
@@ -1647,8 +1696,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             if ← isDefEq l r then pure (relW.appArg!, some (← mkEqRefl l)) else pure (relTy0, none)
           else pure (relTy0, none)
         else pure (relTy0, none)
-      let hint ← decHintRef.get
-      decHintRef.set none
+      let hint := (← get).decHint
+      modify fun st => { st with decHint := none }
       let hinted ← match hint with
         | none => pure none
         | some h => do
@@ -1729,7 +1778,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if dargs.isEmpty then
         if let some u := getUnit? (← getEnv) key then
           if let .thunk _ _ := u.kind then
-            let some gv := ctx.globals.get? key | throwNeedUnit key t
+            let some gv := ctx.globals.get? key |
+              if ctx.collectNeeds then recordNeedUnit g key t else throwNeedUnit key t
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] key
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
@@ -1756,7 +1806,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let arity ← forallTelescope (← inferType key) fun xs _ => pure xs.size
           if dargs.size == arity then
             let tup ← dargs.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) dargs.back!
-            let some gv := ctx.globals.get? key | throwNeedUnit key t
+            let some gv := ctx.globals.get? key |
+              if ctx.collectNeeds then recordNeedUnit g key t else throwNeedUnit key t
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tupFn, hl, gv.cert]
             if let (``DARROW, #[_, _, invT, _]) := gv.inv.getAppFnArgs then
@@ -1773,7 +1824,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if fn.isConst then
     if let some (key, dargs) ← splitKey t then
       if dargs.isEmpty then
-        let some gv := ctx.globals.get? key | throwNeedUnit key t
+        let some gv := ctx.globals.get? key |
+          if ctx.collectNeeds then recordNeedUnit g key t else throwNeedUnit key t
         let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
         assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv key, hl, gv.cert])
         return

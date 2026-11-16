@@ -13,12 +13,12 @@
 #   4. build/con-pastel      : the assembly linked with con_pastel_ffi.c.
 #
 # Memory: step 1 needs the full Lean build (hours, see README); step 3 runs
-# cake with a $(CAKE_HEAP) MiB heap.
+# cake with a $(CAKE_HEAP) MiB heap (about 3 minutes).
 
 CAKE_VERSION = v3479
 CAKE_SHA256  = e110bfcba19d6524ee4748608a67a275647445a048928cf623c2c9a973e31c9a
 CAKE_URL     = https://github.com/CakeML/cakeml/releases/download/$(CAKE_VERSION)/cake-x64-64.tar.gz
-CAKE_HEAP   ?= 40000
+CAKE_HEAP   ?= 30000
 CAKE_STACK  ?= 8000
 CAKEFLAGS    = --sexp=true --exclude_prelude=true --skip_type_inference=true
 

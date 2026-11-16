@@ -114,7 +114,9 @@ partial def invOf (ty : Expr) : MetaM Expr := do
     if let some (.inductInfo _) := (← getEnv).find? I then
       if !ty.hasFVar && !ty.hasMVar then
         if let some d ← findDatatype? ty then return mkConst (d.name ++ `cakeInv)
-        needDatatypeRef.set (some (← normType ty))
+        let nty ← normType ty
+        needDatatypeRef.set (some nty)
+        needDatatypesAllRef.modify (·.push nty)
         throwError "cake: need datatype {ty}"
   if let .forallE n a b bi := ty then
     -- a leading proof argument: the value exists regardless

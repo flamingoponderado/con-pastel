@@ -13,11 +13,14 @@ and `funs`:
 ∀ envC funs, (funs names distinct) → findRecFun nᵤ funs = some (p, bodyᵤ) →
   HasBoolCons envC.c → HasListCons envC.c → T.cakeHasCons envC.c → … →
   nsLookup (buildRecEnv funs envC envC.v) (.short nᵤ) = some (recclosure envC funs nᵤ) →
-  (for each dependency d)
-    nsLookup (buildRecEnv funs envC envC.v) (.short n_d) = some (recclosure envC funs n_d) →
-    INV d (recclosure envC funs n_d) →
+  (for each dependency d) ∀ v_d,
+    nsLookup (buildRecEnv funs envC envC.v) (.short n_d) = some v_d →
+    INV d v_d →
   INV u (recclosure envC funs nᵤ)
 ```
+
+A dependency's value is arbitrary: it may be a closure of the same group or
+of an earlier `Dletrec` (when `cake_program` splits the units into groups).
 
 Function units are refined against the function (or, for several arguments
 of a recursive function, its tupled form `c.cake_tupled`); constants are
@@ -54,6 +57,11 @@ def groupLookupTy (envC funs : Expr) (n : String) : MetaM Expr := do
   mkEq (← mkAppM ``nsLookup #[ns, shortIdent n])
     (← mkAppM ``Option.some #[← mkAppM ``Value.recclosure #[envC, funs, mlString n]])
 
+/-- `nsLookup (buildRecEnv funs envC envC.v) (.short n) = some v` -/
+def groupLookupTyV (envC funs : Expr) (n : String) (v : Expr) : MetaM Expr := do
+  let ns ← mkAppM ``buildRecEnv #[funs, envC, ← mkAppM ``SemEnv.v #[envC]]
+  mkEq (← mkAppM ``nsLookup #[ns, shortIdent n]) (← mkAppM ``Option.some #[v])
+
 /-- Introduce the hypotheses of a unit certificate (see the module doc) and
 run `k` with them. `body` is the unit's (metavariable) body. -/
 def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (body : Expr)
@@ -85,10 +93,10 @@ def withGroupHyps {α : Type} [Inhabited α] (self : String) (param : String) (b
     | d :: ds, acc, globals => do
       let some u := getUnit? (← getEnv) d | throwError "unit {d} missing"
       let (tgt, inv) ← unitTarget u
-      let value ← mkAppM ``Value.recclosure #[envC, funs, mlString u.cname]
-      withLocalDeclD `hl (← groupLookupTy envC funs u.cname) fun hl => do
+      withLocalDeclD `vd (mkConst ``Value) fun value => do
+      withLocalDeclD `hl (← groupLookupTyV envC funs u.cname value) fun hl => do
       withLocalDeclD `hv (mkApp2 inv tgt value) fun hv => do
-        go ds (acc ++ #[hl, hv]) (globals.insert d { cname := u.cname, value, inv, cert := hv })
+        go ds (acc ++ #[value, hl, hv]) (globals.insert d { cname := u.cname, value, inv, cert := hv })
   go deps.toList #[] {}
 
 /-- Finish a unit: name the body, state and check the certificate, register. -/
@@ -442,10 +450,10 @@ def withBlockHyps {α : Type} [Inhabited α] (members : Array (String × String 
     | d :: ds, acc, globals => do
       let some u := getUnit? (← getEnv) d | throwError "unit {d} missing"
       let (tgt, inv) ← unitTarget u
-      let value ← mkAppM ``Value.recclosure #[envC, funs, mlString u.cname]
-      withLocalDeclD `hl (← groupLookupTy envC funs u.cname) fun hl => do
+      withLocalDeclD `vd (mkConst ``Value) fun value => do
+      withLocalDeclD `hl (← groupLookupTyV envC funs u.cname value) fun hl => do
       withLocalDeclD `hv (mkApp2 inv tgt value) fun hv => do
-        go ds (acc ++ #[hl, hv]) (globals.insert d { cname := u.cname, value, inv, cert := hv })
+        go ds (acc ++ #[value, hl, hv]) (globals.insert d { cname := u.cname, value, inv, cert := hv })
   go deps.toList #[] {}
 
 /-- Case analysis on a nested sum `τ₀ ⊕' (τ₁ ⊕' …)` with a non-dependent result:
@@ -501,6 +509,64 @@ partial def sumCasesStep (tys : List Expr) (C : Expr → MetaM Expr) (ihTyAt : E
     let r ← withLocalDeclD `s restTy fun s' => do
       mkLambdaFVars #[s'] (← sumCasesStep rest C ihTyAt ctx' alt s' (i + 1))
     mkAppOptM ``PSum.casesOn #[τ, sty.appArg!, motive, s, l, r]
+
+/-- The constants used by `es` (transitively) that are missing from `env0`, in
+dependency order: the auxiliary declarations (e.g. `_proof_i_j`) a solve running in
+another thread added to its own copy of the environment. -/
+partial def newConstsSince (env0 : Environment) (es : Array Expr) : MetaM (Array ConstantInfo) := do
+  let env ← getEnv
+  let seen ← IO.mkRef (∅ : NameSet)
+  let out ← IO.mkRef (#[] : Array ConstantInfo)
+  let rec go (n : Name) : MetaM Unit := do
+    if env0.contains n || (← seen.get).contains n then return
+    seen.modify (·.insert n)
+    let some ci := env.find? n | throwError "newConstsSince: unknown constant {n}"
+    for m in ci.type.getUsedConstants do go m
+    if let some v := ci.value? (allowOpaque := true) then
+      for m in v.getUsedConstants do go m
+    out.modify (·.push ci)
+  for e in es do
+    for n in e.getUsedConstants do go n
+  out.get
+
+/-- Add constants collected by `newConstsSince` to the environment. -/
+def addConstInfos (cis : Array ConstantInfo) : MetaM Unit := do
+  for ci in cis do
+    if (← getEnv).contains ci.name then continue
+    match ci with
+    | .thmInfo v => addDecl (.thmDecl v)
+    | .defnInfo v => addDecl (.defnDecl v)
+    | .opaqueInfo v => addDecl (.opaqueDecl v)
+    | _ => throwError "addConstInfos: unexpected constant kind for {ci.name}"
+
+/-- Member proofs kept across the retries of a parallel round: a round that
+needed more units still solved most members, in a context that the retry only
+extends (more dependency hypotheses). The context is recorded so the proofs can
+be moved into the retry's (fresh) local variables; types are compared after the
+move, and a member is re-solved if anything does not match. -/
+structure MutCache where
+  block : Array Name
+  cnames : Array String
+  unames : Array Name
+  fixed : Array Expr
+  fixedTys : Array (Option Expr)
+  deps : Array Expr
+  depFVars : Array Expr
+  depTys : Array Expr
+  pih : Array (Option (Expr × Expr × Expr × Expr))
+  results : Array (Option (Expr × Expr × Array ConstantInfo))
+  deriving Inhabited
+
+initialize mutualCacheRef : IO.Ref (Option MutCache) ← IO.mkRef none
+
+/-- Rename string literals (the members' CakeML names, which shift when a retry
+translates further units first). -/
+def renameStrLits (m : Array (String × String) × Array (Name × Name)) (e : Expr) : Expr :=
+  if m.1.isEmpty && m.2.isEmpty then e else e.replace fun x => match x with
+    | .lit (.strVal s) => (m.1.find? (·.1 == s)).map fun (_, t) => .lit (.strVal t)
+    | .const n ls => (m.2.find? (·.1 == n)).map fun (_, t) => .const t ls
+    | _ => none
+initialize mutualRoundRef : IO.Ref Nat ← IO.mkRef 0
 
 /-- A well-founded mutual block: all members translated together, by one
 well-founded induction over the sum of their argument tuples. -/
@@ -597,26 +663,220 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
       let inj ← withLocalDeclD `t infos[i]!.2.1 fun t => do mkLambdaFVars #[t] (← sumInj taus i t)
       pure { head := members[i]!, arity := infos[i]!.1, cl := cls[i]!, cname := infos[i]!.2.2.2.2, inj,
              invT := invTs[i]!, invB := invBs[i]!, ft := fts[i]! }
-    -- the induction step, by cases on the summand
-    let step ← withLocalDeclD `s S fun s => do
-      let pf ← sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do
-        let (n, _, _, _, cname) := infos[i]!
-        let _ := cname
-        withLocalDeclD `pv (mkConst ``Value) fun pv => do
-        withLocalDeclD `hp (mkApp2 invTs[i]! p pv) fun hp => do
-          let env ← bodyEnv envC funs param pv
-          let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, bodies[i]!, mkApp invBs[i]! (mkApp fts[i]! p)])
-          let mr : MutRec := { members := bms, ih, s := ← sumInj taus i p, r }
-          let gctx := { gctx₀ with mrec? := some mr }
-          let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
-          let eqnApp (as : Array Expr) : MetaM Expr := pure (mkAppN (mkConst eqns[i]!) as)
-          let t0 ← IO.monoMsNow
-          let _ ← (destructAndSolve g.mvarId! env (fun _ => pure invBs[i]!) keys[i]! eqnApp #[] p n).run gst |>.run gctx
-          cakeLog s!"[mutual] member {i} {members[i]!} solved in {(← IO.monoMsNow) - t0}ms"
-          let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname,
-            mlString param, bodies[i]!, pv, mkApp invBs[i]! (mkApp fts[i]! p), hnodup, hfinds[i]!, g]
-          mkLambdaFVars #[pv, hp] app) s
+    -- one member's case of the induction step: `∀ pv, invT p pv → AppReturns …`,
+    -- in the local context of the case split (`p`, `ih`); also returns the body
+    let solveMember (i : Nat) (p ih : Expr) (collect : Bool := false) : MetaM (Expr × Expr) := do
+      let (n, _, _, _, cname) := infos[i]!
+      withLocalDeclD `pv (mkConst ``Value) fun pv => do
+      withLocalDeclD `hp (mkApp2 invTs[i]! p pv) fun hp => do
+        let env ← bodyEnv envC funs param pv
+        let g ← mkFreshExprMVar (← mkAppM ``Eval #[env, bodies[i]!, mkApp invBs[i]! (mkApp fts[i]! p)])
+        let mr : MutRec := { members := bms, ih, s := ← sumInj taus i p, r }
+        let gctx := { gctx₀ with mrec? := some mr, collectNeeds := collect }
+        let gst : GSt := { locals := #[{ fvar := p, cname := param, value := pv, rel := hp }] }
+        let eqnApp (as : Array Expr) : MetaM Expr := pure (mkAppN (mkConst eqns[i]!) as)
+        let t0 ← IO.monoMsNow
+        let _ ← (destructAndSolve g.mvarId! env (fun _ => pure invBs[i]!) keys[i]! eqnApp #[] p n).run gst |>.run gctx
+        cakeLog s!"[mutual] member {i} {members[i]!} solved in {(← IO.monoMsNow) - t0}ms"
+        let app ← withTransparency .all <| mkAppOptM ``AppReturns_recclosure #[envC, funs, mlString cname,
+          mlString param, bodies[i]!, pv, mkApp invBs[i]! (mkApp fts[i]! p), hnodup, hfinds[i]!, g]
+        pure (← instantiateMVars bodies[i]!, ← instantiateMVars (← mkLambdaFVars #[pv, hp] app))
+    let sequentialStep : MetaM Expr := withLocalDeclD `s S fun s => do
+      let pf ← sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do pure (← solveMember i p ih).2) s
       mkLambdaFVars #[s] pf
+    -- the members' cases are independent: solve them in parallel threads
+    -- (`CAKE_PAR` workers, default 8; `CAKE_PAR=1` is the sequential translation).
+    -- Each case is first a placeholder in the case split, then filled with the
+    -- thread's closed result. Any failure reruns sequentially, so errors and
+    -- need-unit/need-datatype requests are reported exactly as before.
+    let par := ((← IO.getEnv "CAKE_PAR").bind String.toNat?).getD 8
+    let step ← if par ≤ 1 then sequentialStep else do
+      let saved ← saveState
+      -- the context, for moving proofs between rounds
+      let fixed := #[envC, funs, hnodup] ++ hfinds ++ common ++ hselfs ++ has
+      let fixedTys ← fixed.mapIdxM fun j x => do
+        -- the entries mention the members' bodies (metavariables): not compared
+        if j ≥ 3 && j < 3 + hfinds.size then pure none
+        else pure (some (← instantiateMVars (← inferType x)))
+      let depTys ← depHyps.mapM fun x => do instantiateMVars (← inferType x)
+      let cache? := (← mutualCacheRef.get).filter (·.block == members)
+      mutualCacheRef.set none
+      -- the base substitution (old context ↦ this one), if the contexts match
+      let cnamesNow := infos.map (·.2.2.2.2)
+      let unamesNow := infos.map (·.2.2.2.1)
+      -- the members' CakeML names and unit constants (`u_k`, `u_k.tupled`, …)
+      let ren : Array (String × String) × Array (Name × Name) := match cache? with
+        | some c => ((c.cnames.zip cnamesNow).filter fun (a, b) => a != b,
+            ((c.unames.zip unamesNow).filter fun (a, b) => a != b).flatMap fun (a, b) =>
+              #[(a, b), (a ++ `tupled, b ++ `tupled), (a ++ `body, b ++ `body)])
+        | none => (#[], #[])
+      let base? : Option (Array Expr × Array Expr) ← do
+        let some c := cache? | pure none
+        if c.fixed.size != fixed.size || c.depFVars.size != 3 * c.deps.size then
+          cakeLog s!"[mutual] previous round not reusable: context size {c.fixed.size} vs {fixed.size}"
+          pure none else
+        let mut olds := c.fixed
+        let mut news := fixed
+        let mut okDeps := true
+        for j in [0:c.deps.size] do
+          match deps.findIdx? (· == c.deps[j]!) with
+          | some j' =>
+            olds := olds ++ c.depFVars.extract (3 * j) (3 * j + 3)
+            news := news ++ depHyps.extract (3 * j') (3 * j' + 3)
+          | none => okDeps := false
+        if !okDeps then
+          cakeLog s!"[mutual] previous round not reusable: a dependency is gone"
+          pure none else
+        let mut okTys := true
+        for j in [0:fixed.size] do
+          if let (some o, some n) := (c.fixedTys[j]!, fixedTys[j]!) then
+            if (renameStrLits ren o).replaceFVars olds news != n then
+              okTys := false
+              cakeLog s!"[mutual] previous round not reusable: hypothesis {j} type differs" 
+        for j in [0:c.deps.size] do
+          if let some j' := deps.findIdx? (· == c.deps[j]!) then
+            for t in [0:3] do
+              if (renameStrLits ren c.depTys[3 * j + t]!).replaceFVars olds news != depTys[3 * j' + t]! then
+                okTys := false
+                cakeLog s!"[mutual] previous round not reusable: dependency {j} hypothesis {t} type differs" 
+        pure (if okTys then some (olds, news) else none)
+      -- distinct auxiliary-declaration names in every round (kept proofs carry theirs)
+      let round ← mutualRoundRef.modifyGet fun r => (r, r + 1)
+      let dg ← getDeclNGen
+      setDeclNGen { dg with idx := dg.idx + (round + 1) * (members.size + 1) }
+      let jobs ← IO.mkRef (#[] : Array (Nat × MVarId × (Unit → EIO Exception (Expr × Expr × Array ConstantInfo))))
+      let reused ← IO.mkRef (#[] : Array (Nat × Expr × Expr × Array ConstantInfo))
+      let pihs ← IO.mkRef (Array.replicate members.size (none : Option (Expr × Expr × Expr × Expr)))
+      let skel ← withLocalDeclD `s S fun s => do
+        let pf ← sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do
+          let ty ← withLocalDeclD `pv (mkConst ``Value) fun pv => do
+            mkForallFVars #[pv] (← mkArrow (mkApp2 invTs[i]! p pv)
+              (← mkAppM ``AppReturns #[cls[i]!, pv, mkApp invBs[i]! (mkApp fts[i]! p)]))
+          let ph ← mkFreshExprSyntheticOpaqueMVar ty
+          let pTy ← instantiateMVars (← inferType p)
+          let ihTy ← instantiateMVars (← inferType ih)
+          pihs.modify (·.set! i (some (p, ih, pTy, ihTy)))
+          -- a proof kept from the previous round, moved into this context
+          let kept ← do
+            let (some (olds, news), some c) := (base?, cache?) | pure none
+            let (some (b, opf, aux), some (op, oih, opTy, oihTy)) := (c.results[i]?.join, c.pih[i]?.join) | pure none
+            let olds := olds ++ #[op, oih]
+            let news := news ++ #[p, ih]
+            if (renameStrLits ren opTy).replaceFVars olds news != pTy ||
+                (renameStrLits ren oihTy).replaceFVars olds news != ihTy then
+              cakeLog s!"[mutual] member {i}: argument or induction hypothesis type differs"
+              pure none
+            else pure (some (renameStrLits ren b, (renameStrLits ren opf).replaceFVars olds news, aux))
+          -- a kept proof is kernel-checked on its own (in a worker) before it is
+          -- used; if that fails, the member is solved afresh
+          let otherFinds := ((List.range members.size).filter (· != i)).toArray.map (hfinds[·]!)
+          let keptOk (b pf : Expr) (aux : Array ConstantInfo) : MetaM Bool := do
+            let s0 ← saveState
+            let ok ← try
+                addConstInfos aux
+                bodies[i]!.mvarId!.assign b
+                let fvs := (← getLCtx).getFVars.filter fun x => !otherFinds.contains x
+                let ty' ← instantiateMVars (← mkForallFVars fvs ty)
+                let val ← instantiateMVars (← mkLambdaFVars fvs pf)
+                if ty'.hasMVar || val.hasMVar || val.hasSorry then pure false else
+                match Kernel.Environment.addDecl (← getEnv).toKernelEnv (← getOptions)
+                    (.thmDecl (mkTheoremValEx `_cake_keep_check [] ty' val [])) with
+                | .ok _ => pure true
+                | .error _ => pure false
+              catch _ => pure false
+            s0.restore
+            pure ok
+          if kept.isSome then reused.modify (·.push (i, default, default, #[]))
+          let mctx ← readThe Meta.Context
+          let mst ← getThe Meta.State
+          let env0 ← getEnv
+          let job : MetaM (Expr × Expr × Array ConstantInfo) := do
+              if let some (b, pf, aux) := kept then
+                let t0 ← IO.monoMsNow
+                if ← keptOk b pf aux then
+                  cakeLog s!"[mutual] member {i} {members[i]!} kept (checked in {(← IO.monoMsNow) - t0}ms)"
+                  addConstInfos aux
+                  return (b, pf, ← newConstsSince env0 #[b, pf])
+                cakeLog s!"[mutual] member {i} {members[i]!}: kept proof rejected, solving"
+              let (b, pf) ← solveMember i p ih (collect := true)
+              pure (b, pf, ← newConstsSince env0 #[b, pf])
+          let act ← Core.wrapAsync (fun (_ : Unit) => job.run' mctx mst) none
+          jobs.modify (·.push (i, ph.mvarId!, act))
+          pure ph) s
+        mkLambdaFVars #[s] pf
+      let js ← jobs.get
+      let nKept := (← reused.get).size
+      let next ← IO.mkRef 0
+      -- a worker keeps going after a failure, so that one round collects every
+      -- unit and datatype the block still needs (and keeps every finished member)
+      let worker : BaseIO (Array (Nat × Expr × Expr × Array ConstantInfo) × Bool) := do
+        let mut out := #[]
+        let mut failed := false
+        repeat
+          let k ← next.modifyGet fun k => (k, k + 1)
+          if h : k < js.size then
+            let (i, _, act) := js[k]
+            match ← (act ()).toBaseIO with
+            | .ok (b, pf, aux) => out := out.push (i, b, pf, aux)
+            | .error _ => failed := true
+          else break
+        return (out, failed)
+      needUnitsAllRef.set #[]
+      needDatatypesAllRef.set #[]
+      let t0 ← IO.monoMsNow
+      cakeLog s!"[mutual] solving {js.size} members with {par} workers ({nKept} kept from the previous round)"
+      let tasks ← (List.range (min par js.size)).toArray.mapM fun _ => BaseIO.asTask worker .dedicated
+      let mut fresh : Array (Nat × Expr × Expr × Array ConstantInfo) := #[]
+      let mut anyFailed := false
+      for t in tasks do
+        let (out, failed) ← IO.wait t
+        fresh := fresh ++ out
+        anyFailed := anyFailed || failed
+      cakeLog s!"[mutual] parallel members done in {(← IO.monoMsNow) - t0}ms"
+      -- requests first: a round that recorded any is discarded even if every
+      -- member "succeeded" (its proofs then contain `sorry`); its complete
+      -- members are kept for the retry
+      let dedup (xs : Array Expr) : Array Expr := xs.foldl (fun acc x => if acc.contains x then acc else acc.push x) #[]
+      let dts := dedup (← needDatatypesAllRef.get)
+      let units := dedup (← needUnitsAllRef.get)
+      if dts.size + units.size > 0 then
+        let mut results := Array.replicate members.size (none : Option (Expr × Expr × Array ConstantInfo))
+        for (i, b, pf, aux) in fresh do
+          if !pf.hasSorry then results := results.set! i (some (b, pf, aux))
+        let nKeep := results.foldl (fun n r => if r.isSome then n + 1 else n) 0
+        mutualCacheRef.set (some { block := members, cnames := cnamesNow, unames := unamesNow, fixed, fixedTys, deps, depFVars := depHyps, depTys,
+                                   pih := ← pihs.get, results })
+        cakeLog s!"[mutual] parallel round needs {dts.size} datatypes, {units.size} units; {nKeep} members kept"
+      if h : 0 < dts.size then
+        -- the retry loop registers it and retries the block
+        saved.restore
+        needUnitRef.set none
+        needDatatypeRef.set (some dts[0])
+        throwError "cake: need datatype {dts[0]}"
+      else if h : 0 < units.size then
+        -- the retry loop translates all of them, then retries the block once
+        saved.restore
+        needDatatypeRef.set none
+        needUnitRef.set (some units[0])
+        pendingUnitsRef.set (units.extract 1 units.size)
+        throwError "{needUnitTag}{units[0]}"
+      if anyFailed then
+        cakeLog s!"[mutual] a parallel member failed: rerunning sequentially"
+        saved.restore
+        sequentialStep
+      else
+        -- in member order, so that the environment does not depend on thread timing
+        for (i, b, pf, aux) in fresh.qsort (·.1 < ·.1) do
+          addConstInfos aux
+          bodies[i]!.mvarId!.assign b
+          let some (_, ph, _) := js.find? (·.1 == i) | throwError "lost member {i}"
+          ph.assign pf
+        let step ← instantiateMVars skel
+        if step.hasExprMVar || step.hasSorry then
+          cakeLog s!"[mutual] parallel step has unassigned metavariables or sorry: rerunning sequentially"
+          saved.restore
+          sequentialStep
+        else pure step
     cakeLog s!"[mutual] induction step built"
     let joint ← withLocalDeclD `s S fun s => do
       mkLambdaFVars #[s] (← withTransparency .all <| mkAppOptM ``WellFounded.induction #[S, r, hwf, Pred, s, step])
@@ -714,6 +974,22 @@ partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
     if let some eqn ← getUnfoldEqnFor? c (nonRec := true) then
       forallTelescope (← inferType (mkConst eqn)) fun _ ty => do
         if let some (_, _, rhs) := ty.eq? then visit rhs
+  -- cached computed fields: a constructor application translates the field's
+  -- definition at that constructor, so what it calls is needed too
+  -- (and the solver unfolds the non-recursive helpers it calls, e.g. `mkAppData`
+  -- into `packData`/`hash32`: follow those a few levels)
+  let before := (← found.get).size
+  for (_, fs) in (cachedExt.getState env).toList do
+    for f in fs do
+      if let some v := (env.find? f).bind (·.value?) then visit v
+  let mut frontier := (← found.get).extract before (← found.get).size
+  for _ in [0:3] do
+    let start := (← found.get).size
+    for k in frontier do
+      if let .const c _ := k.getAppFn then
+        if !(← isRecursiveDef c) then
+          if let some v := (env.find? c).bind (·.value?) then visit v
+    frontier := (← found.get).extract start (← found.get).size
   found.get
 
 mutual
@@ -753,7 +1029,7 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
   -- a mutual block: translate the constants its members' equations mention first
   -- (best effort), so the block is not restarted for every dependency it discovers
   let mut extra := extra
-  if extra.isEmpty then
+  if extra.isEmpty && (← IO.getEnv "CAKE_NOPREPASS").isNone then
     if let .const c _ := key.getAppFn then
       let ms ← mutualMembers c
       if !ms.isEmpty then
@@ -765,6 +1041,7 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
 
   let saved ← saveState
   needUnitRef.set none
+  pendingUnitsRef.set #[]
   try
     let t0 ← IO.monoMsNow
     let nm := (← ppExpr key).pretty.take 120
@@ -783,10 +1060,18 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
     | some dep =>
       saved.restore
       needUnitRef.set none
+      let pending ← pendingUnitsRef.get
+      pendingUnitsRef.set #[]
       if extra.contains dep then
         throwError "while translating {key}: unit {dep} is in scope but still needed: {e.toMessageData}"
       translateUnit dep (key :: stack)
-      translateUnit key stack (extra.push dep)
+      let mut extra' := extra.push dep
+      -- the other units a parallel round asked for, all before the one retry
+      for d in pending do
+        unless extra'.contains d do
+          translateUnit d (key :: stack)
+          extra' := extra'.push d
+      translateUnit key stack extra'
     | none =>
       saved.restore
       throwError "while translating {key}: {e.toMessageData}"

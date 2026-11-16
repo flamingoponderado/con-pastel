@@ -1,19 +1,26 @@
 import ConPastel.Program.Assemble
 import ConPastel.Program.Scale
+import ConPastel.Program.Groups
 import ConPastel.Translator.Meta.Unit
 
 /-!
 # `cake_program`: assemble the translated units into a program
 
 `cake_program P entry` builds, from every registered unit:
-* `P.funs`, the single recursive group (one entry per unit);
-* `P.cert_k`, unit `%k`'s certificate instantiated at `initEnv` and `P.funs`,
-  in registration order (a unit's dependencies are registered before it);
+* the groups `P.g_k`: classes of mutually recursive units (peers), in
+  dependency order, merged into groups of at least 64 units. One `Dletrec`
+  per group: CakeML's compiler handles thousands of small groups in minutes,
+  but one group of thousands of functions in hours (see `Groups`);
+* `P.L_k`, the flat variable bindings before group `k`, and the
+  distinctness of all names (`P.nodupL_k`, checked once on character codes);
+* `P.cert_k`, unit `%k`'s certificate instantiated at its group's
+  environment, with each dependency's lookup proved from membership
+  (same group: `groupLookup_of_mem`; earlier group: `depLookup`);
 * `P.prog`, the program, and `P.correct`: for every input, `P.prog`
   completes, writing `entry`'s verdict on the input bytes.
 
 The program declares every registered datatype in one `Dtype` (stamps from 2,
-in registration order), then the group, then the main program.
+in registration order), then the groups, then the main program.
 -/
 
 namespace ConPastel.Program
@@ -283,7 +290,7 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let mut tdParts : Array (Expr × Expr × Expr × Array String) := #[]
   for d in dts do
     let ctors ← d.ctors.toList.mapM fun (_, cn, flags) => do
-      mkAppM ``Prod.mk #[mlString cn, ← mkListLit astT (List.replicate (flags.toList.filter id).length tyVar)]
+      mkAppM ``Prod.mk #[mlString cn, ← mkListLit astT (List.replicate (d.cached.size + (flags.toList.filter id).length) tyVar)]
     let tv ← mkListLit (mkConst ``TvarN) []
     let tn := mlString d.name.toString
     let cs ← mkListLit ctorTy ctors
@@ -323,7 +330,7 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     let i := dts.size - 1 - i'
     let d := dts[i]!
     for (_, cn, flags) in d.ctors.reverse do
-      let n := (flags.toList.filter id).length
+      let n := d.cached.size + (flags.toList.filter id).length
       let ce := mlString cn
       clEntries := clEntries.push (← mkAppM ``Prod.mk #[ce, ← mkAppM ``Prod.mk #[mkRawNatLit n,
         mkApp2 (mkConst ``Stamp.typeStamp) ce (mkRawNatLit (2 + i))]])
@@ -389,69 +396,181 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     addThmT n ty (← proveCons lookupPf ty)
     hcsCache := hcsCache.insert d.name (mkConst n)
   tick "constructor facts"
-  -- the group: entries sorted by name, in a balanced tree of chunks
+  -- the groups: classes of mutually dependent units (peers), in dependency
+  -- order, merged into groups of at least `groupSize` units
   let fty ← funTy
-  let mut ents0 : Array (String × UnitInfo × Expr) := #[]
-  for u in us do
+  let byName : Std.HashMap Name UnitInfo := us.foldl (fun m u => m.insert u.name u) {}
+  let idxOf : Std.HashMap Name Nat := (us.mapIdx fun i u => (u.name, i)).foldl (fun m (n, i) => m.insert n i) {}
+  let mut parent : Array Nat := Array.range us.size
+  let rec find (parent : Array Nat) (i : Nat) (fuel : Nat) : Nat :=
+    match fuel with
+    | 0 => i
+    | f + 1 => if parent[i]! == i then i else find parent parent[i]! f
+  for i in [0:us.size] do
+    for p in us[i]!.peers do
+      let some j := idxOf.get? p | throwError "peer {p} of {us[i]!.key} is not a unit"
+      let ri := find parent i us.size
+      let rj := find parent j us.size
+      if ri != rj then parent := parent.set! ri rj
+  let rootOf (i : Nat) : Nat := find parent i us.size
+  -- classes in order of first appearance; their dependency classes
+  let mut classOrder : Array Nat := #[]
+  let mut members : Std.HashMap Nat (Array Nat) := {}
+  for i in [0:us.size] do
+    let r := rootOf i
+    unless members.contains r do classOrder := classOrder.push r
+    members := members.insert r ((members.getD r #[]).push i)
+  let mut cdeps : Std.HashMap Nat (Array Nat) := {}
+  for r in classOrder do
+    let mut ds : Array Nat := #[]
+    for i in members.getD r #[] do
+      for d in depNamesOf env us[i]! do
+        let some j := idxOf.get? d | throwError "dependency {d} of {us[i]!.key} is not a unit"
+        let rd := rootOf j
+        if rd != r && !ds.contains rd then ds := ds.push rd
+    cdeps := cdeps.insert r ds
+  -- Kahn's algorithm, keeping the original order where possible
+  let mut placed : Std.HashSet Nat := {}
+  let mut orderC : Array Nat := #[]
+  let mut todoC := classOrder
+  while !todoC.isEmpty do
+    let (ready, rest) := todoC.partition fun r => (cdeps.getD r #[]).all placed.contains
+    if ready.isEmpty then throwError "cake_program: cyclic dependencies between unit classes"
+    for r in ready do
+      placed := placed.insert r
+      orderC := orderC.push r
+    todoC := rest
+  -- `CAKE_GROUP_SIZE` overrides the size (for testing the multi-group assembly)
+  let groupSize := ((← IO.getEnv "CAKE_GROUP_SIZE").bind String.toNat?).getD 64
+  let mut groupsI : Array (Array Nat) := #[]
+  let mut cur : Array Nat := #[]
+  for r in orderC do
+    cur := cur ++ members.getD r #[]
+    if cur.size ≥ groupSize then
+      groupsI := groupsI.push cur
+      cur := #[]
+  unless cur.isEmpty do groupsI := groupsI.push cur
+  let m := groupsI.size
+  let mut groupOf : Std.HashMap Name Nat := {}
+  for k in [0:m] do
+    for i in groupsI[k]! do groupOf := groupOf.insert us[i]!.name k
+  let entryOf (u : UnitInfo) : MetaM Expr := do
     let (param, body) := match u.kind with
       | .function p b _ => (p, b)
       | .thunk p b => (p, b)
-    ents0 := ents0.push (u.cname, u, ← mkAppM ``Prod.mk #[mlString u.cname, ← mkAppM ``Prod.mk #[mlString param, mkConst body]])
-  let ents := ents0.qsort fun a b => keyLt a.1 b.1
-  for i in [1:ents.size] do
-    unless keyLt ents[i-1]!.1 ents[i]!.1 do throwError "cake_program: duplicate unit name {ents[i]!.1}"
-  let elems := ents.map (·.2.2)
-  let chunk := 32
-  let nLeaves := (ents.size + chunk - 1) / chunk
-  let mut leaves : Array FTree := #[]
-  for li in [0:nLeaves] do
-    let es := elems.extract (li * chunk) (min ents.size ((li + 1) * chunk))
+    mkAppM ``Prod.mk #[mlString u.cname, ← mkAppM ``Prod.mk #[mlString param, mkConst body]]
+  -- per group: the list `P.g_k`, membership of its entries, the binding lists
+  let bindTy ← mkAppM ``Prod #[mkConst ``VarN, mkConst ``Value]
+  let bindL ← mkAppM ``List #[bindTy]
+  let gListTy ← mkAppM ``List #[fty]
+  addDef (P ++ `L_0) bindL (mkApp (mkConst ``List.nil [0]) bindTy)
+  let mut gConsts : Array Expr := #[]
+  let mut lConsts : Array Expr := #[mkConst (P ++ `L_0)]
+  let mut envs : Array Expr := #[]
+  let mut gmem : Std.HashMap Name Expr := {}
+  let mut gEntries : Array (Array Expr) := #[]
+  let mut ents : Array (String × UnitInfo) := #[]
+  for k in [0:m] do
+    let es ← groupsI[k]!.mapM fun i => entryOf us[i]!
     let sfx := suffixes fty es
-    let n := P ++ Name.mkSimple s!"funsL_{li}"
-    addDef n (← mkAppM ``List #[fty]) sfx[0]!
-    leaves := leaves.push (.leaf (mkConst n) es sfx (li * chunk))
-  let (tree, _) ← (buildTree P fty leaves chunk 0 nLeaves).run 0
-  addDef (P ++ `funs) (← mkAppM ``List #[fty]) tree.const
-  let funs := mkConst (P ++ `funs)
-  let fstFn ← withLocalDeclD `p fty fun p => do mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p])
-  let namesXs ← mkAppM ``List.map #[fstFn, funs]
-  addDef (P ++ `fnames) llc (lit0 lc (ents.toList.map fun e => charsE e.1))
-  let fkeys ← keysCheck (P ++ `fkeys) ``sortedN (mkConst (P ++ `fnames))
-  addThmT (P ++ `nodup) (← mkAppM ``List.Nodup #[namesXs])
-    (← nodupOfNames ``nodup_names_sorted namesXs (mkConst (P ++ `fnames)) fkeys)
-  let nodup := mkConst (P ++ `nodup)
-  tick "group"
-  -- per unit: membership, lookup and entry facts
+    let gn := P ++ Name.mkSimple s!"g_{k}"
+    addDef gn gListTy sfx[0]!
+    let g := mkConst gn
+    let E := mkApp2 (mkConst ``flatEnv) envCc lConsts[k]!
+    for j in [0:es.size] do
+      let u := us[groupsI[k]![j]!]!
+      let n := P ++ Name.mkSimple s!"gmem_{u.cname.drop 1}"
+      addThmT n (← memTy fty es[j]! g) (memChain fty es sfx j)
+      gmem := gmem.insert u.name (mkConst n)
+      ents := ents.push (u.cname, u)
+    let ln := P ++ Name.mkSimple s!"L_{k+1}"
+    addDef ln bindL (← mkAppM ``HAppend.hAppend #[mkApp2 (mkConst ``groupBinds) g E, lConsts[k]!])
+    gConsts := gConsts.push g
+    lConsts := lConsts.push (mkConst ln)
+    envs := envs.push E
+    gEntries := gEntries.push es
+  tick s!"{m} groups"
+  -- distinctness of all names, in the order of the final binding list
+  let mut lnames : Array String := #[]
+  for k' in [0:m] do
+    let k := m - 1 - k'
+    for i in groupsI[k]! do lnames := lnames.push us[i]!.cname
+  let sortedNames := lnames.qsort keyLt
+  for i in [1:sortedNames.size] do
+    unless keyLt sortedNames[i-1]! sortedNames[i]! do throwError "cake_program: duplicate unit name {sortedNames[i]!}"
+  addDef (P ++ `lnames) llc (lit0 lc (lnames.toList.map charsE))
+  let fuel := (Nat.log2 lnames.size) + 2
+  let keys := mkApp4 (mkConst ``List.map [0, 0]) lc (mkApp (mkConst ``List [0]) (mkConst ``Nat)) (mkConst ``charKey)
+    (mkConst (P ++ `lnames))
+  let lkTy ← mkEq (mkApp (mkConst ``sortedN) (mkApp2 (mkConst ``msortF) (mkRawNatLit fuel) keys)) (mkConst ``Bool.true)
+  addThmT (P ++ `lkeys) lkTy (← mkEqRefl (mkConst ``Bool.true))
+  let fstB ← withLocalDeclD `p bindTy fun p => do mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p])
+  let keysOf (L : Expr) : MetaM Expr := mkAppM ``List.map #[fstB, L]
+  let xsM ← keysOf lConsts[m]!
+  addThmT (P ++ Name.mkSimple s!"nodupL_{m}") (← mkAppM ``List.Nodup #[xsM])
+    (mkAppN (mkConst ``nodup_names_msort) #[xsM, mkConst (P ++ `lnames), mkRawNatLit fuel, ← mkEqRefl xsM,
+      mkConst (P ++ `lkeys)])
+  let mut nodupL : Array Expr := Array.replicate (m + 1) (mkConst (P ++ Name.mkSimple s!"nodupL_{m}"))
+  let mut nodupG : Array Expr := Array.replicate m (mkConst (P ++ Name.mkSimple s!"nodupL_{m}"))
+  for k' in [0:m] do
+    let k := m - 1 - k'
+    let hk1 := nodupL[k+1]!
+    let nL := P ++ Name.mkSimple s!"nodupL_{k}"
+    addThmT nL (← mkAppM ``List.Nodup #[← keysOf lConsts[k]!])
+      (mkAppN (mkConst ``nodup_rest_of) #[gConsts[k]!, envs[k]!, lConsts[k]!, hk1])
+    nodupL := nodupL.set! k (mkConst nL)
+    let fstFn ← withLocalDeclD `p fty fun p => do mkLambdaFVars #[p] (← mkAppM ``Prod.fst #[p])
+    let nG := P ++ Name.mkSimple s!"nodupG_{k}"
+    addThmT nG (← mkAppM ``List.Nodup #[← mkAppM ``List.map #[fstFn, gConsts[k]!]])
+      (mkAppN (mkConst ``nodup_group_of) #[gConsts[k]!, envs[k]!, lConsts[k]!, hk1])
+    nodupG := nodupG.set! k (mkConst nG)
+  tick "distinctness"
+  -- per unit: find and self-lookup in its group
   let mut lookups : Std.HashMap Name Expr := {}
   let mut finds : Std.HashMap Name Expr := {}
-  let mut memsU : Std.HashMap Name Expr := {}
-  for k in [0:ents.size] do
-    let (cname, u, _) := ents[k]!
-    let tag := cname.drop 1
+  for (cname, u) in ents do
+    let some k := groupOf.get? u.name | unreachable!
+    let some mem := gmem.get? u.name | unreachable!
     let (param, body) := match u.kind with
       | .function p b _ => (p, b)
       | .thunk p b => (p, b)
     let g := mlString cname
     let x := mlString param
     let b := mkConst body
-    let memN := P ++ Name.mkSimple s!"mem_{tag}"
-    addThmT memN (← memTy fty elems[k]! funs) (tree.mem fty k)
-    memsU := memsU.insert u.name (mkConst memN)
+    let tag := cname.drop 1
     let lkN := P ++ Name.mkSimple s!"lookup_{tag}"
-    addThmT lkN (← groupLookupTy envC funs cname)
-      (mkAppN (mkConst ``groupLookup_of_mem) #[funs, envC, g, x, b, mkConst memN])
+    addThmT lkN (← groupLookupTy envs[k]! gConsts[k]! cname)
+      (mkAppN (mkConst ``groupLookup_of_mem) #[gConsts[k]!, envs[k]!, g, x, b, mem])
     lookups := lookups.insert u.name (mkConst lkN)
-    let findTy ← mkEq (← mkAppM ``findRecFun #[g, funs]) (← mkAppM ``Option.some #[← mkAppM ``Prod.mk #[x, b]])
+    let findTy ← mkEq (← mkAppM ``findRecFun #[g, gConsts[k]!]) (← mkAppM ``Option.some #[← mkAppM ``Prod.mk #[x, b]])
     let findN := P ++ Name.mkSimple s!"find_{tag}"
     addThmT findN findTy
-      (mkAppN (mkConst ``findRecFun_of_mem) #[mkConst ``VarN, mkConst ``Exp, funs, g, x, b, nodup, mkConst memN])
+      (mkAppN (mkConst ``findRecFun_of_mem) #[mkConst ``VarN, mkConst ``Exp, gConsts[k]!, g, x, b, nodupG[k]!, mem])
     finds := finds.insert u.name (mkConst findN)
   tick "lookups"
+  -- `(n_d, value of d) ∈ L_k` for a unit `d` of a group before `k`
+  let valueOf (d : UnitInfo) : MetaM Expr := do
+    let some j := groupOf.get? d.name | unreachable!
+    mkAppM ``Value.recclosure #[envs[j]!, gConsts[j]!, mlString d.cname]
+  let memL (d : UnitInfo) (k : Nat) : MetaM Expr := do
+    let some j := groupOf.get? d.name | unreachable!
+    let some mem := gmem.get? d.name | unreachable!
+    let (param, body) := match d.kind with
+      | .function p b _ => (p, b)
+      | .thunk p b => (p, b)
+    let a ← mkAppM ``Prod.mk #[mlString d.cname, ← valueOf d]
+    let gb (i : Nat) := mkApp2 (mkConst ``groupBinds) gConsts[i]! envs[i]!
+    let mut pf := mkAppN (mkConst ``mem_appL) #[bindTy, a, gb j, lConsts[j]!,
+      mkAppN (mkConst ``mem_groupBinds) #[gConsts[j]!, envs[j]!, mlString d.cname, mlString param, mkConst body, mem]]
+    for i in [j+1:k] do
+      pf := mkAppN (mkConst ``mem_appR) #[bindTy, a, gb i, lConsts[i]!, pf]
+    return pf
   -- certificates, in registration order, all under `h : RuntimeAssumptions`
   withLocalDeclD `h (mkConst ``ConPastel.RuntimeAssumptions) fun hrt => do
   let mut certs : Std.HashMap Name Expr := {}
   for u in us do
     let tag := u.cname.drop 1
+    let some k := groupOf.get? u.name | unreachable!
     let some lkC := lookups.get? u.name | unreachable!
     let some hfind := finds.get? u.name | unreachable!
     let hcs ← u.datatypes.mapM fun T => do
@@ -462,23 +581,33 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
       let i2 := mkIdent `h.mixHash
       let i3 := mkIdent `h.stringHash
       closeWith a (← `(tactic| first | exact $i1:ident | exact $i2:ident | exact $i3:ident))
-    let mut args : Array Expr := #[envC, funs, nodup, hfind, hbool, hlist] ++ hcs ++ #[lkC] ++ has
+    let mut args : Array Expr := #[envs[k]!, gConsts[k]!, nodupG[k]!, hfind, hbool, hlist] ++ hcs ++ #[lkC] ++ has
     for p in u.peers do
+      unless groupOf.get? p == some k do throwError "peer {p} of {u.key} is in another group"
       let some pf := finds.get? p | throwError "peer {p} of {u.key} not assembled"
       let some pl := lookups.get? p | throwError "peer {p} of {u.key} not assembled"
       args := args ++ #[pf, pl]
     for d in depNamesOf env u do
-      let some dl := lookups.get? d | throwError "dependency {d} of {u.key} not assembled"
       let some dc := certs.get? d | throwError "dependency {d} of {u.key} not assembled"
-      args := args ++ #[dl, dc]
+      let some du := byName.get? d | throwError "dependency {d} of {u.key} is not a unit"
+      let some j := groupOf.get? d | unreachable!
+      let dv ← valueOf du
+      if j == k then
+        let some dl := lookups.get? d | throwError "dependency {d} of {u.key} not assembled"
+        args := args ++ #[dv, dl, dc]
+      else
+        unless j < k do throwError "dependency {d} of {u.key} is in a later group"
+        let dl := mkAppN (mkConst ``depLookup) #[envCc, gConsts[k]!, lConsts[k]!, mlString du.cname, dv,
+          nodupL[k+1]!, ← memL du k]
+        args := args ++ #[dv, dl, dc]
     ConPastel.Translator.Meta.cakeLog s!"[cake_program] cert {u.name} ({args.size} args)"
     addThm (P ++ Name.mkSimple s!"cert_{tag}") (← mkLambdaFVars #[hrt] (mkAppN (mkConst u.cert) args))
     certs := certs.insert u.name (mkApp (mkConst (P ++ Name.mkSimple s!"cert_{tag}")) hrt)
   tick "certificates"
-  -- the constructor-arity condition: one derivation per unit, then up the tree
+  -- the constructor-arity condition: one derivation per unit, then per group
   let cx : CokCtx := { tbl, mems }
   let mut cokU : Std.HashMap Name Expr := {}
-  for (cname, u, _) in ents do
+  for (cname, u) in ents do
     let body := match u.kind with
       | .function _ b _ => b
       | .thunk _ b => b
@@ -487,53 +616,50 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     let n := P ++ Name.mkSimple s!"cok_{cname.drop 1}"
     addThmT n (mkApp2 (mkConst ``COk) tbl (mkConst body)) pf
     cokU := cokU.insert u.name (mkConst n)
-  let rec cokTree (t : FTree) : MetaM Expr := do
-    match t with
-    | .leaf c es sfx start =>
-      let mut p := mkApp (mkConst ``COkF.nil) tbl
-      for j' in [0:es.size] do
-        let j := es.size - 1 - j'
-        let (_, u, _) := ents[start + j]!
-        let (``Prod.mk, #[_, _, f, r]) := es[j]!.getAppFnArgs | unreachable!
-        let (``Prod.mk, #[_, _, x, e]) := r.getAppFnArgs | unreachable!
-        let some hu := cokU.get? u.name | unreachable!
-        p := mkAppN (mkConst ``COkF.cons) #[tbl, f, x, e, sfx[j+1]!, hu, p]
-      let n := c.constName! ++ `cok
-      addThmT n (mkApp2 (mkConst ``COkF) tbl c) p
-      return mkConst n
-    | .node c l r _ =>
-      let pl ← cokTree l
-      let pr ← cokTree r
-      let n := c.constName! ++ `cok
-      addThmT n (mkApp2 (mkConst ``COkF) tbl c) (mkAppN (mkConst ``COkF_append) #[tbl, l.const, r.const, pl, pr])
-      return mkConst n
-  let cokRoot ← cokTree tree
-  let conOkPf := mkAppN (mkConst ``conOkFuns_of_COkF) #[tbl, mkConst (P ++ `tblNodup), funs, cokRoot]
-  let hcon := mkAppN (mkConst ``group_conOk_of) #[envC, cl, hc, funs, conOkPf]
+  let mut hcons : Array Expr := #[]
+  for k in [0:m] do
+    let es := gEntries[k]!
+    let sfx := suffixes fty es
+    let mut p := mkApp (mkConst ``COkF.nil) tbl
+    for j' in [0:es.size] do
+      let j := es.size - 1 - j'
+      let u := us[groupsI[k]![j]!]!
+      let (``Prod.mk, #[_, _, f, r]) := es[j]!.getAppFnArgs | unreachable!
+      let (``Prod.mk, #[_, _, x, e]) := r.getAppFnArgs | unreachable!
+      let some hu := cokU.get? u.name | unreachable!
+      p := mkAppN (mkConst ``COkF.cons) #[tbl, f, x, e, sfx[j+1]!, hu, p]
+    let n := P ++ Name.mkSimple s!"cokG_{k}"
+    addThmT n (mkApp2 (mkConst ``COkF) tbl gConsts[k]!) p
+    let conOkPf := mkAppN (mkConst ``conOkFuns_of_COkF) #[tbl, mkConst (P ++ `tblNodup), gConsts[k]!, mkConst n]
+    hcons := hcons.push (mkAppN (mkConst ``group_conOk_of) #[envC, cl, hc, gConsts[k]!, conOkPf])
   tick "constructor arities"
   -- the program and its correctness
+  let gsTy ← mkAppM ``List #[gListTy]
+  addDef (P ++ `gs) gsTy (lit0 gListTy gConsts.toList)
+  let gs := mkConst (P ++ `gs)
+  let gsSfx := suffixes gListTy gConsts
+  let mut hok := mkApp (mkConst ``GroupsOk.nil) envCc
+  for k' in [0:m] do
+    let k := m - 1 - k'
+    hok := mkAppN (mkConst ``GroupsOk.cons) #[envCc, gConsts[k]!, gsSfx[k+1]!, nodupG[k]!, hcons[k]!, hok]
+  addThmT (P ++ `hok) (mkApp2 (mkConst ``GroupsOk) envCc gs) hok
+  let hLmTy ← mkEq (mkApp3 (mkConst ``bindsAfter) envCc gs (mkConst (P ++ `L_0))) lConsts[m]!
+  addThmT (P ++ `hLm) hLmTy (← mkEqRefl lConsts[m]!)
   let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
   let loc := mkConst ``Flapjack.Misc.Location.unknownLoc
-  let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dtype #[loc, tds],
-    ← mkAppM ``List.cons #[← mkAppM ``Dec.dletrec #[loc, funs], mainDecs]]
+  let dletrecs ← mkAppM ``List.map #[mkApp (mkConst ``Dec.dletrec) loc, gs]
+  let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dtype #[loc, tds], ← mkAppM ``HAppend.hAppend #[dletrecs, mainDecs]]
   addDef (P ++ `prog) (← mkAppM ``List #[mkConst ``Dec]) prog
-  let some mE := memsU.get? eu.name | unreachable!
-  let some mR := memsU.get? ru.name | unreachable!
-  let memOf (u : UnitInfo) (m : Expr) : MetaM Expr := do
-    let (param, body) := match u.kind with
-      | .function p b _ => (p, b)
-      | .thunk p b => (p, b)
-    return mkAppN (mkConst ``name_mem_of_mem) #[mkConst ``VarN, mkConst ``Exp, funs, mlString u.cname,
-      mlString param, mkConst body, m]
-  let hmemE ← memOf eu mE
-  let hmemR ← memOf ru mR
+  let lookupFinal (u : UnitInfo) : MetaM Expr := do
+    return mkAppN (mkConst ``lookup_flat) #[lConsts[m]!, mlString u.cname, ← valueOf u, nodupL[m]!, ← memL u m]
   let ne (a b : String) : MetaM Expr := do closeWith (mkNot (← mkEq (mlString a) (mlString b))) (← `(tactic| decide))
   let some ce := certs.get? eu.name | unreachable!
   let some cr := certs.get? ru.name | unreachable!
-  let pf ← mkAppOptM ``program_completes_dt #[tds, funs, toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup,
-    nodup, hcon, hmemE, hmemR, ce, cr, hlist, ← ne eu.cname ConPastel.Main.bufName,
-    ← ne eu.cname ConPastel.Main.readAllName, ← ne ru.cname ConPastel.Main.bufName,
-    ← ne ru.cname ConPastel.Main.readAllName]
+  let pf ← mkAppOptM ``program_completes_groups #[tds, gs, lConsts[m]!, mkConst (P ++ `hLm),
+    toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup, mkConst (P ++ `hok),
+    ← valueOf eu, ← valueOf ru, ← lookupFinal eu, ce, ← lookupFinal ru, cr, hlist,
+    ← ne eu.cname ConPastel.Main.bufName, ← ne eu.cname ConPastel.Main.readAllName,
+    ← ne ru.cname ConPastel.Main.bufName, ← ne ru.cname ConPastel.Main.readAllName]
   addThm (P ++ `correct) (← mkLambdaFVars #[hrt] pf)
   tick "correct"
 

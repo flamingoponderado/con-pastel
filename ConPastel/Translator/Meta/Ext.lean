@@ -15,6 +15,8 @@ structure DatatypeInfo where
   stamp : Nat
   /-- Per constructor: its Lean name, its CakeML name, and which fields are data. -/
   ctors : Array (Name × String × Array Bool)
+  /-- Cached computed fields (`cake_cached`): stored first in every constructor. -/
+  cached : Array Name := #[]
   deriving Inhabited
 
 initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap DatatypeInfo) ←
@@ -28,6 +30,23 @@ def allDatatypes (env : Environment) : Array DatatypeInfo :=
 
 def getDatatypeByType? (env : Environment) (ty : Expr) : Option DatatypeInfo :=
   ((datatypeExt.getState env).toList.find? (·.2.ty == ty)).map (·.2)
+
+/-- Cached computed fields per inductive type (`cake_cached T f₁ …`): each
+`fᵢ : T → _` is stored in every CakeML constructor of `T`, so reading it is a
+projection (as Lean's `@[computed_field]`s are) instead of a recomputation. -/
+initialize cachedExt : SimplePersistentEnvExtension (Name × Array Name) (NameMap (Array Name)) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, fs) => m.insert k fs
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, fs) => m.insert k fs) m) {}
+  }
+
+def getCached (env : Environment) (I : Name) : Array Name :=
+  ((cachedExt.getState env).find? I).getD #[]
+
+/-- The datatype and index of a cached field `f`, if it is one. -/
+def cachedFieldOf? (env : Environment) (f : Name) : Option (DatatypeInfo × Nat) :=
+  ((datatypeExt.getState env).toList.findSome? fun (_, d) =>
+    (d.cached.findIdx? (· == f)).map (d, ·))
 
 def nextStamp (env : Environment) : Nat :=
   2 + (datatypeExt.getState env).size
@@ -71,6 +90,15 @@ initialize ghostExt : SimplePersistentEnvExtension Name NameSet ←
 
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
+
+/-- Every unit key / datatype requested since the last reset, from any thread
+(appended atomically): a parallel round of member solves collects all its
+requests, so they are translated together before one retry. -/
+initialize needUnitsAllRef : IO.Ref (Array Expr) ← IO.mkRef #[]
+initialize needDatatypesAllRef : IO.Ref (Array Expr) ← IO.mkRef #[]
+
+/-- Further units the failed parallel round needed (besides `needUnitRef`'s). -/
+initialize pendingUnitsRef : IO.Ref (Array Expr) ← IO.mkRef #[]
 
 /-- Registers a datatype in place (set by the datatype module), so that a unit
 needing one does not abort the whole translation. -/

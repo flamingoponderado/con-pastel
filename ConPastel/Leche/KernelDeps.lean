@@ -15,5 +15,10 @@ set_option linter.unusedSimpArgs false
 set_option linter.all false
 
 namespace ConPastel.Leche
+-- con-leche's `@[computed_field]`s are stored in the CakeML constructors (as in
+-- Lean's runtime): reading one is a projection, not a walk over the term
+cake_cached ConLeche.Name ConLeche.Name.hashData
+cake_cached ConLeche.Level ConLeche.Level.hashData
+cake_cached ConLeche.Expr ConLeche.Expr.data
 cake_prepass ConLeche.Cached.whnfCoreI
 end ConPastel.Leche

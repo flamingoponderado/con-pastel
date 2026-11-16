@@ -70,8 +70,11 @@ transcriptions are checked against the runtime by `scripts/HashCheck.lean`.
   is pinned in `lean-toolchain`.
 * Memory and time. The full Lean build (proof included) takes about 4 hours
   on 8+ cores, with peaks of about 13 GB per Lean process; four run in
-  parallel at one point. Compiling with `cake` takes a 40 GB heap (set
-  `CAKE_HEAP`, in MiB).
+  parallel at one point. Compiling with `cake` takes about 3 minutes and a
+  30 GB heap (set `CAKE_HEAP`, in MiB). The program is declared as about 55
+  recursive groups rather than one: CakeML's compiler gives every closure of
+  a group access to the whole group, and a single group of all 3,480
+  functions did not finish compiling in 2.5 hours.
 
 ### Build
 
@@ -122,6 +125,17 @@ output from a run that exits with code 0 is a verdict:
 
 CakeML's compiler correctness theorem allows the program to stop early when
 it runs out of resources. It does not allow any other deviation.
+
+> **Performance: not yet usable.** The executable is currently far too slow
+> for real inputs. Even an empty export makes con-leche check its built-in
+> prelude, and this took more than 15 minutes without finishing. The cause is
+> the translation of machine-word arithmetic. `UInt64` values are bignums;
+> each bitwise operation recurses once per bit, and each reduction modulo
+> `2^64` recomputes `2^64` with 64 multiplications (`Nat.pow` is translated
+> as a unary recursion). con-leche hashes constantly, so these operations
+> dominate. The fix is faster translator primitives: `Nat.pow` by squaring,
+> and shifts and bitwise operations on CakeML's native 64-bit words. Each
+> primitive needs its own proof against the CakeML semantics.
 
 ### Test
 
