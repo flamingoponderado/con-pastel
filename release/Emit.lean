@@ -23,6 +23,7 @@ those, and checks in the kernel that the copy *is* `conPastelProg`
 open Lean Meta Elab Command
 
 set_option maxRecDepth 1000000
+set_option maxHeartbeats 0
 
 namespace ConPastel.Release
 
