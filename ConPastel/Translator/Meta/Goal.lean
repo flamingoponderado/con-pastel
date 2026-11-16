@@ -547,6 +547,26 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
       return
   -- string literals: `s` is `String.ofByteArray ⟨⟨[bytes]⟩⟩ s.isValidUTF8` (structure eta)
   if let .lit (.strVal str) := t then
+    -- long literals: `s = String.ofByteArray ⟨⟨bytes⟩⟩ _` by `string_lit_eq` (the kernel's
+    -- defeq check of the structure-eta form below runs `List.toByteArray`'s quadratic push loop)
+    if str.utf8ByteSize > 256 then
+      let u8 := mkConst ``UInt8
+      let cs := str.toList.map fun c => mkApp (mkConst ``Char.ofNat) (mkRawNatLit c.toNat)
+      let csE := cs.foldr (fun c acc => mkApp3 (mkConst ``List.cons [0]) (mkConst ``Char) c acc)
+        (mkApp (mkConst ``List.nil [0]) (mkConst ``Char))
+      let bsE ← mkListLit u8 (← str.toUTF8.toList.mapM fun b => mkNumeral u8 b.toNat)
+      let hb ← mkEqRefl bsE
+      let heq := mkApp3 (mkConst ``string_lit_eq) csE bsE hb
+      let t' := mkApp2 (mkConst ``String.ofByteArray)
+        (mkApp (mkConst ``ByteArray.mk) (mkApp2 (mkConst ``Array.mk [0]) u8 bsE))
+        (mkApp3 (mkConst ``utf8_lit_valid) csE bsE hb)
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+      solve gb.mvarId!
+      let motive ← withLocalDeclD `x (mkConst ``String) fun x => do
+        mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+      g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+      return
     let u8 := mkConst ``UInt8
     let bytes ← str.toUTF8.toList.mapM fun b => mkNumeral u8 b.toNat
     let arr ← mkAppOptM ``Array.mk #[u8, ← mkListLit u8 bytes]

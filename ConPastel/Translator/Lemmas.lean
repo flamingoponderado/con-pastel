@@ -337,6 +337,27 @@ theorem bool_rec_reflects_eq_dite {P : Prop} {R : Sort u} (F : ¬P → R) (T : P
     Bool.rec (motive := fun x => x.Reflects P → R) F T b r = @dite R P (Decidable.intro b r) T F := by
   cases b <;> rfl
 
+/-! Long string literals: their bytes via `flatMap` (linear in the kernel) rather than
+`List.toByteArray`'s push loop (quadratic). -/
+
+theorem toByteArray_eq_mk (l : List UInt8) : l.toByteArray = ⟨⟨l⟩⟩ := by
+  have h := List.toList_data_toByteArray (l := l)
+  revert h
+  cases l.toByteArray with
+  | mk d => cases d with
+    | mk xs => intro h; simp at h; subst h; rfl
+
+theorem utf8_lit_valid (l : List Char) (bs : List UInt8)
+    (h : l.flatMap String.utf8EncodeChar = bs) : ByteArray.IsValidUTF8 ⟨⟨bs⟩⟩ :=
+  .intro l (by rw [List.utf8Encode, h, toByteArray_eq_mk])
+
+theorem string_lit_eq (l : List Char) (bs : List UInt8)
+    (h : l.flatMap String.utf8EncodeChar = bs) :
+    String.ofList l = String.ofByteArray ⟨⟨bs⟩⟩ (utf8_lit_valid l bs h) := by
+  unfold String.ofList
+  congr 1
+  rw [List.utf8Encode, h, toByteArray_eq_mk]
+
 end ConPastel.Translator
 
 namespace ConPastel.Impl
