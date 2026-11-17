@@ -199,4 +199,30 @@ def cakeLog (msg : String) : IO Unit := do
     h.flush
   | none => IO.eprintln msg
 
+/-- How a mutual block is translated when it is split over several modules
+(`cake_mutual_prepare` / `cake_mutual_part` / `cake_mutual_finish`), so that
+Lake solves its members in separate processes:
+* `prepare`: the shared declarations (tupled forms), no solving;
+* `part j n`: solve the members `i` with `i % n = j`, each as a closed theorem
+  `u.step` over the block's hypotheses, with its body `u.mbody`;
+* `finish`: assemble the joint theorem from every part's `u.step`. -/
+inductive SplitMode where
+  | prepare
+  | part (j n : Nat)
+  | finish
+  deriving Inhabited, Repr
+
+/-- The block being split (named by one of its members) and the mode. -/
+initialize mutualSplitRef : IO.Ref (Option (Name × SplitMode)) ← IO.mkRef none
+
+/-- Extra dependencies of a split block (by the member named in
+`cake_mutual_prepare`): units its members need that the dependency pre-pass
+does not find. Every module of the block uses the same list, so the block's
+hypotheses are the same in all of them. -/
+initialize splitExtraExt : SimplePersistentEnvExtension (Name × Array Expr) (NameMap (Array Expr)) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, v) => m.insert k v
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, v) => m.insert k v) m) {}
+  }
+
 end ConPastel.Translator.Meta
