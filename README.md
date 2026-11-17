@@ -87,6 +87,11 @@ git submodule update --init deps/con-leche deps/flapjack   # not --recursive:
 make -C release            # produces release/build/con-pastel
 ```
 
+To check the proof without building the executable, run `lake build`
+(with `ulimit -s 8388608` first, as the Makefile does: the translator
+recurses deeply). The default target imports `ConPastel.Leche.Program`, so
+it checks `conPastel_correct` and prints its axioms.
+
 `release/Makefile` performs four steps:
 
 1. **Check the proof and print the program.** `lake build
