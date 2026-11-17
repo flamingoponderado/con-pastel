@@ -27,7 +27,9 @@ theorem ConPastel.conPastel_correct (h : RuntimeAssumptions) :
     Implements conPastelProg
 ```
 
-(`ConPastel/Leche/Program.lean`; the statement is in `ConPastel/Spec.lean`.)
+The statement is in `ConPastel/Leche/Program.lean`. The predicates it uses
+(`Implements`, `RuntimeAssumptions`, and what they unfold to, such as
+`conLecheAccepts` and `stdioOracle`) are defined in `ConPastel/Spec.lean`.
 
 `conPastelProg : List Flapjack.AstHOL.Dec` is the CakeML program.
 `Implements` says that for every input file:
@@ -68,7 +70,7 @@ transcriptions are checked against the runtime by `scripts/HashCheck.lean`.
 * x86-64 Linux, a C compiler, `make`, `curl`, `sha256sum`.
 * [elan](https://github.com/leanprover/elan). The toolchain (Lean v4.35.0)
   is pinned in `lean-toolchain`.
-* Memory and time. The full Lean build (proof included) takes about 4 hours
+* Memory and time. The full Lean build (proof included) takes 3 to 4 hours
   on 8+ cores, with peaks of about 13 GB per Lean process; four run in
   parallel at one point. Compiling with `cake` takes about 3 minutes and a
   30 GB heap (set `CAKE_HEAP`, in MiB). The program is declared as about 55
@@ -79,7 +81,7 @@ transcriptions are checked against the runtime by `scripts/HashCheck.lean`.
 ### Build
 
 ```sh
-git clone <this repository> con-pastel && cd con-pastel
+git clone https://github.com/flamingoponderado/con-pastel.git con-pastel && cd con-pastel
 git submodule update --init deps/con-leche deps/flapjack   # not --recursive:
                            # flapjack's own cakeml/HOL submodules are not needed
 make -C release            # produces release/build/con-pastel
@@ -126,16 +128,27 @@ output from a run that exits with code 0 is a verdict:
 CakeML's compiler correctness theorem allows the program to stop early when
 it runs out of resources. It does not allow any other deviation.
 
-> **Performance: not yet usable.** The executable is currently far too slow
-> for real inputs. Even an empty export makes con-leche check its built-in
-> prelude, and this took more than 15 minutes without finishing. The cause is
-> the translation of machine-word arithmetic. `UInt64` values are bignums;
-> each bitwise operation recurses once per bit, and each reduction modulo
-> `2^64` recomputes `2^64` with 64 multiplications (`Nat.pow` is translated
-> as a unary recursion). con-leche hashes constantly, so these operations
-> dominate. The fix is faster translator primitives: `Nat.pow` by squaring,
-> and shifts and bitwise operations on CakeML's native 64-bit words. Each
-> primitive needs its own proof against the CakeML semantics.
+> **Performance: slow, and exponential on heavily shared terms.** An empty
+> export (con-leche checks only its built-in prelude) takes about 30 s with
+> a 4 GiB heap (`CML_HEAP_SIZE=4096`). On con-leche's 561 end-to-end
+> fixtures, with a 4 GiB heap and a one-hour limit, 521 give con-leche's
+> verdict (median 104 s) and none gives a different one. Of the other 40:
+>
+> * 5 (`nat_size_limit_*`) expect `--max-nat-size=16`. con-pastel always
+>   uses con-leche's default limit (128 MiB), at which con-leche accepts
+>   them too.
+> * 11 (`tower_*`) hold a deeply shared term (a depth-60 DAG, about 2^60
+>   nodes unshared) and run out of heap or time. con-leche stays fast on
+>   them by comparing and memoizing terms by pointer (`withPtrEq`,
+>   `withPtrAddr`). The translator uses the logical definitions of these
+>   functions, which ignore sharing. CakeML has no pointer-equality
+>   primitive, so the port walks the unshared tree.
+> * 21 are large exports (265–805 KB, 15–45 times the median fixture)
+>   that did not finish within the hour. Passing fixtures of similar size
+>   took 20–50 minutes.
+> * 3 are small and not yet explained: `mutual_rec_elim_levels` runs out
+>   of a 4 GiB heap; `nat_size_ok` and `eager_open_nat_control` do not
+>   finish within the hour.
 
 ### Test
 
@@ -167,8 +180,9 @@ has five links. Each one is either proved or trusted:
 
 In more detail:
 
-1. **Lean.** The Lean kernel, the three standard axioms, and the statement
-   in `ConPastel/Spec.lean`. Read `Spec.lean`: it fixes what "the same
+1. **Lean.** The Lean kernel, the three standard axioms, the statement
+   in `ConPastel/Leche/Program.lean`, and the predicates it uses, defined in
+   `ConPastel/Spec.lean`. Read `Spec.lean`: it fixes what "the same
    verdict as con-leche" means (the pure pipeline, the FFI model, the output
    bytes).
 2. **The runtime assumptions** about Lean's compiled code (above). They
@@ -321,7 +335,8 @@ evaluated inside the logic (`cv_compute`) on its own source. The main work:
 
 | path | contents |
 |---|---|
-| `ConPastel/Spec.lean` | the correctness statement (read this first) |
+| `ConPastel/Spec.lean` | the predicates in the correctness statement (read this first) |
+| `ConPastel/Leche/Program.lean` | the statement and proof of `conPastel_correct` |
 | `docs/SOUNDNESS.md` | gaps, unverified components, trusted components and assumptions |
 | `ConPastel/Translator/` | the proof-producing Lean → CakeML translator |
 | `ConPastel/Semantics/` | lemmas about flapjack's CakeML semantics |
