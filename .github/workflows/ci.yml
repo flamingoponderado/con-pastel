@@ -12,53 +12,96 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # The workspace's .lake persists on the self-hosted runner and is the cache.
   # Lake's shared artifact cache would leave .lake/build holding only hashes,
   # which `lake env lean release/Emit.lean` cannot use.
   LAKE_ARTIFACT_CACHE: "false"
 
 jobs:
-  # The only job that writes Lake artifacts. Building the proof, emitting the
-  # program, compiling it with the original cake and the parse cross-check all
-  # touch `.lake/build` or `release/build`, so they run here sequentially in
-  # one worktree. The checker executable is uploaded for the `e2e` job.
+  # The only job that writes Lake artifacts: the proof, the emitted program,
+  # the checker compiled by the original cake and the parse cross-check. The
+  # checker executable is uploaded for the `e2e` job.
+  #
+  # A cold build needs more than the 6-hour limit of a GitHub-hosted job
+  # (it takes 3 to 4 hours on 8+ cores; ubuntu-latest has 4). The build step
+  # therefore stops itself after 300 minutes, and the Lake cache is saved
+  # even then, so the next run (or a re-run) continues where this one
+  # stopped. The job fails until a run gets through the whole build.
   build:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: [self-hosted, linux, x64, con-pastel-ci]
-    # A cold build takes 3 to 4 hours; warm builds rebuild only what changed.
-    timeout-minutes: 600
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
 
     steps:
-      # The self-hosted runner reuses one workspace per repository, so the
-      # default `clean: true` (git clean -ffdx) would delete the warm .lake.
       # Submodules are not recursive: flapjack's cakeml/HOL are not needed.
       - uses: actions/checkout@v5
         with:
-          clean: false
           submodules: true
 
-      # Remove stale untracked files (including release/build, so the program
-      # is always re-emitted) while keeping the persistent Lake builds of the
-      # workspace and of the path dependencies.
-      - name: Clean the workspace except .lake
+      # Some translation units peak at about 13 GB, Lake builds up to four
+      # modules at once, and the cake step uses a 30 GB heap; the runner has
+      # 16 GB. Add swap on the disk with the most free space.
+      - name: Add swap
         run: |
-          git clean -ffdx -e .lake
-          git submodule foreach --quiet 'git clean -ffdx -e .lake'
+          avail() { df --output=avail -B1G "$1" 2>/dev/null | tail -1 | tr -d ' ' || echo 0; }
+          dir=/; [ -d /mnt ] && [ "$(avail /mnt)" -gt "$(avail /)" ] && dir=/mnt
+          size=$(( $(avail "$dir") - 15 )); [ "$size" -gt 40 ] && size=40
+          echo "swap: ${size}G on $dir"
+          sudo swapoff -a || true
+          sudo fallocate -l "${size}G" "$dir/swapfile"
+          sudo chmod 600 "$dir/swapfile"
+          sudo mkswap "$dir/swapfile"
+          sudo swapon "$dir/swapfile"
+          free -g; df -h / /mnt || true
 
-      # Installs elan and the toolchain from lean-toolchain; the build below
-      # needs a larger stack than lean-action's own build step provides.
+      # Installs elan and the toolchain from lean-toolchain and fetches
+      # Mathlib's prebuilt oleans (`lake exe cache get`). The build itself is
+      # below: it needs a larger stack and the cache handling above.
       - uses: leanprover/lean-action@v1
         with:
           auto-config: false
           use-github-cache: false
-          use-mathlib-cache: false
+          use-mathlib-cache: true
 
-      # The translator recurses deeply on large definitions.
+      # The build outputs of this package and of the path dependencies
+      # (deps/*). Mathlib comes from its own cache instead.
+      - name: Restore the Lake build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .lake/build
+            .lake/packages/*/.lake/build
+            !.lake/packages/mathlib/.lake/build
+            deps/con-leche/.lake/build
+            deps/flapjack/.lake/build
+          key: lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ github.sha }}-
+            lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-
+
+      # The translator recurses deeply on large definitions. The four Blobs
+      # modules are built one at a time to keep memory down.
       - name: Build the library and the proof
+        id: lake
+        timeout-minutes: 300
         run: |
           ulimit -s 8388608
+          set -o pipefail
+          lake build ConPastel.Leche.Blob ConPastel.Leche.Kernel
+          for i in 0 1 2 3; do lake build ConPastel.Leche.Blobs$i; done
           lake build ConPastel ConPastel.Leche.Program 2>&1 | tee "$RUNNER_TEMP/build.log"
-          exit "${PIPESTATUS[0]}"
+
+      # Saved even when the build failed or timed out, so progress is kept.
+      - name: Save the Lake build cache
+        if: always() && steps.lake.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .lake/build
+            .lake/packages/*/.lake/build
+            !.lake/packages/mathlib/.lake/build
+            deps/con-leche/.lake/build
+            deps/flapjack/.lake/build
+          key: lake-${{ runner.os }}-${{ hashFiles('lean-toolchain', 'lake-manifest.json') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       # `#print axioms` in ConPastel/Leche/Program.lean; Lake replays its
       # message even when the module is up to date.
@@ -85,18 +128,16 @@ jobs:
           compression-level: 1
 
   # Runs the checker on con-leche's end-to-end fixtures of at most 4000 bytes
-  # (43 fixtures, about 40 minutes); the full suite takes many hours. It needs
-  # only the executable and the con-leche submodule, not Lake.
+  # (43 fixtures, about 40 minutes on an 8-core machine); the full suite
+  # takes many hours. It needs only the executable and con-leche's fixtures.
   e2e:
     needs: build
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: [self-hosted, linux, x64, con-pastel-ci]
-    timeout-minutes: 180
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          clean: false
 
       - name: Check out the con-leche submodule
         run: git submodule update --init --depth 1 -- deps/con-leche
