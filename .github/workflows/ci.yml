@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The workspace's .lake persists on the self-hosted runner and is the cache.
+  # Lake's shared artifact cache would leave .lake/build holding only hashes,
+  # which `lake env lean release/Emit.lean` cannot use.
+  LAKE_ARTIFACT_CACHE: "false"
+
+jobs:
+  # The only job that writes Lake artifacts. Building the proof, emitting the
+  # program, compiling it with the original cake and the parse cross-check all
+  # touch `.lake/build` or `release/build`, so they run here sequentially in
+  # one worktree. The checker executable is uploaded for the `e2e` job.
+  build:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: [self-hosted, linux, x64, con-pastel-ci]
+    # A cold build takes 3 to 4 hours; warm builds rebuild only what changed.
+    timeout-minutes: 600
+
+    steps:
+      # The self-hosted runner reuses one workspace per repository, so the
+      # default `clean: true` (git clean -ffdx) would delete the warm .lake.
+      # Submodules are not recursive: flapjack's cakeml/HOL are not needed.
+      - uses: actions/checkout@v5
+        with:
+          clean: false
+          submodules: true
+
+      # Remove stale untracked files (including release/build, so the program
+      # is always re-emitted) while keeping the persistent Lake builds of the
+      # workspace and of the path dependencies.
+      - name: Clean the workspace except .lake
+        run: |
+          git clean -ffdx -e .lake
+          git submodule foreach --quiet 'git clean -ffdx -e .lake'
+
+      # Installs elan and the toolchain from lean-toolchain; the build below
+      # needs a larger stack than lean-action's own build step provides.
+      - uses: leanprover/lean-action@v1
+        with:
+          auto-config: false
+          use-github-cache: false
+          use-mathlib-cache: false
+
+      # The translator recurses deeply on large definitions.
+      - name: Build the library and the proof
+        run: |
+          ulimit -s 8388608
+          lake build ConPastel ConPastel.Leche.Program 2>&1 | tee "$RUNNER_TEMP/build.log"
+          exit "${PIPESTATUS[0]}"
+
+      # `#print axioms` in ConPastel/Leche/Program.lean; Lake replays its
+      # message even when the module is up to date.
+      - name: Check conPastel_correct uses only the standard axioms
+        run: |
+          grep -F "'ConPastel.conPastel_correct' depends on axioms: [propext, Classical.choice, Quot.sound]" \
+            "$RUNNER_TEMP/build.log"
+
+      # Emit the proved program, download and verify cake (SHA-256), compile
+      # with cake (30 GB heap) and link.
+      - name: Build the checker with the original CakeML compiler
+        run: make -C release
+
+      - name: Check cake parses exactly the emitted program
+        run: make -C release check-sexp
+
+      - name: Upload con-pastel
+        uses: actions/upload-artifact@v7
+        with:
+          name: con-pastel
+          path: release/build/con-pastel
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+
+  # Runs the checker on con-leche's end-to-end fixtures of at most 4000 bytes
+  # (43 fixtures, about 40 minutes); the full suite takes many hours. It needs
+  # only the executable and the con-leche submodule, not Lake.
+  e2e:
+    needs: build
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: [self-hosted, linux, x64, con-pastel-ci]
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          clean: false
+
+      - name: Check out the con-leche submodule
+        run: git submodule update --init --depth 1 -- deps/con-leche
+
+      - name: Download con-pastel
+        uses: actions/download-artifact@v8
+        with:
+          name: con-pastel
+          path: release/build
+
+      - name: Make con-pastel executable
+        run: chmod +x release/build/con-pastel
+
+      - name: Check verdicts match con-leche on small fixtures
+        env:
+          CML_HEAP_SIZE: "4096"
+        run: release/test.sh release/build/con-pastel 4000 600
