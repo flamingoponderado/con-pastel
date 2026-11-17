@@ -1,3 +1,4 @@
+import ConPastel.Leche.Checker
 import ConPastel.Leche.Frontend
 import ConPastel.Program.Command
 
