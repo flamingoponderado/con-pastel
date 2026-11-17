@@ -614,10 +614,16 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
     invBs := invBs.push (← invOf resTy)
     if n > 1 then
       let tupName := uname ++ `tupled
-      let tupVal ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (mkAppN keys[i]! (← tupleProjs p n).toArray)
-      addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
+      -- a split block's parts and its finish import the one from `prepare`
+      unless (← getEnv).contains tupName do
+        let tupVal ← withLocalDeclD `p τ fun p => do mkLambdaFVars #[p] (mkAppN keys[i]! (← tupleProjs p n).toArray)
+        addDecl (Declaration.defnDecl (mkDefinitionValEx tupName [] (← mkArrow τ resTy) tupVal .abbrev .safe []))
       fts := fts.push (mkConst tupName)
     else fts := fts.push keys[i]!
+  let split : Option SplitMode := (← mutualSplitRef.get).bind fun (t, m) => if members.contains t then some m else none
+  if let some .prepare := split then
+    cakeLog s!"[split] prepared {members.size} members, {deps.size} dependencies"
+    return
   -- the joint termination relation: Lean's own (`_mutual`), through each summand's packing
   let partsAt (i : Nat) (t : Expr) : MetaM (Expr × Expr × WfSpec) := do
     let (n, _, _, _, _) := infos[i]!
@@ -684,13 +690,76 @@ def translateMutual (members : Array Name) (extra : Array Expr) : MetaM Unit := 
     let sequentialStep : MetaM Expr := withLocalDeclD `s S fun s => do
       let pf ← sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do pure (← solveMember i p ih).2) s
       mkLambdaFVars #[s] pf
+    -- split translation: a member's case as a closed theorem `u.step` over the
+    -- block's hypotheses (without the other members' entries, whose bodies a
+    -- part does not know) and its case variables `p`, `ih`
+    let memberTy (i : Nat) (p : Expr) : MetaM Expr := withLocalDeclD `pv (mkConst ``Value) fun pv => do
+      mkForallFVars #[pv] (← mkArrow (mkApp2 invTs[i]! p pv)
+        (← mkAppM ``AppReturns #[cls[i]!, pv, mkApp invBs[i]! (mkApp fts[i]! p)]))
+    let ctxOf (i : Nat) : Array Expr :=
+      #[envC, funs, hnodup, hfinds[i]!] ++ common ++ hselfs ++ has ++ depHyps
+    let unameOf (i : Nat) : Name := infos[i]!.2.2.2.1
+    if let some (.part j n) := split then
+      let mine := (List.range members.size).filter (· % n == j)
+      cakeLog s!"[split] part {j}/{n}: members {mine}"
+      -- distinct auxiliary-declaration names in every part (they are imported together)
+      let dg ← getDeclNGen
+      setDeclNGen { dg with idx := dg.idx + (j + 1) * 1000000 }
+      let clearNeeds : MetaM Unit := do
+        needUnitsAllRef.set #[]; needDatatypesAllRef.set #[]
+        needUnitRef.set none; pendingUnitsRef.set #[]; needDatatypeRef.set none
+      clearNeeds
+      let out ← IO.mkRef (#[] : Array (Nat × Expr × Expr × Expr))
+      try
+        let _ ← withLocalDeclD `s S fun s => do
+          sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do
+            let ty ← memberTy i p
+            if mine.contains i then
+              let (b, pf) ← solveMember i p ih (collect := true)
+              let fvs := ctxOf i ++ #[p, ih]
+              out.modify (·.push (i, b, ← instantiateMVars (← mkForallFVars fvs ty),
+                ← instantiateMVars (← mkLambdaFVars fvs pf)))
+            mkSorry ty false) s
+      catch e =>
+        -- no retry here: units or datatypes added by one part would not be in the others
+        clearNeeds
+        throwError "cake_mutual_part {j}/{n}: {e.toMessageData}"
+      let dedup (xs : Array Expr) : Array Expr := xs.foldl (fun acc x => if acc.contains x then acc else acc.push x) #[]
+      let dts := dedup (← needDatatypesAllRef.get)
+      let units := dedup (← needUnitsAllRef.get)
+      clearNeeds
+      if dts.size + units.size > 0 then
+        throwError "cake_mutual_part {j}/{n}: the block needs units {units.map toString} and datatypes {dts.map toString}; translate them in `cake_mutual_prepare` (list the units after the block's name)"
+      for (i, b, stTy, stPf) in (← out.get) do
+        if b.hasMVar || b.hasFVar || stTy.hasMVar || stTy.hasFVar || stPf.hasMVar || stPf.hasFVar || stPf.hasSorry then
+          throwError "cake_mutual_part {j}/{n}: member {i} ({members[i]!}): its step has metavariables, free variables or sorry"
+        addDecl (Declaration.defnDecl (mkDefinitionValEx (unameOf i ++ `mbody) [] (mkConst ``Exp) b .abbrev .safe []))
+        addDecl (Declaration.thmDecl (mkTheoremValEx (unameOf i ++ `step) [] stTy stPf []))
+      cakeLog s!"[split] part {j}/{n}: {mine.length} members done"
+      return
     -- the members' cases are independent: solve them in parallel threads
     -- (`CAKE_PAR` workers, default 8; `CAKE_PAR=1` is the sequential translation).
     -- Each case is first a placeholder in the case split, then filled with the
     -- thread's closed result. Any failure reruns sequentially, so errors and
     -- need-unit/need-datatype requests are reported exactly as before.
     let par := ((← IO.getEnv "CAKE_PAR").bind String.toNat?).getD 8
-    let step ← if par ≤ 1 then sequentialStep else do
+    -- split translation, finish: every member's case from its part
+    let finishStep : MetaM Expr := do
+      for i in [0:members.size] do
+        let some (.defnInfo v) := (← getEnv).find? (unameOf i ++ `mbody)
+          | throwError "cake_mutual_finish: no part result for member {i} ({members[i]!}); is its `cake_mutual_part` module imported?"
+        bodies[i]!.mvarId!.assign v.value
+      let skel ← withLocalDeclD `s S fun s => do
+        let pf ← sumCasesStep taus PredAt ihTyAt pure (fun i p ih => do
+          let app := mkAppN (mkConst (unameOf i ++ `step)) (ctxOf i ++ #[p, ih])
+          let want ← instantiateMVars (← memberTy i p)
+          let got ← instantiateMVars (← inferType app)
+          unless got == want do
+            throwError "cake_mutual_finish: the part result for member {i} ({members[i]!}) does not match the block (rebuild its part)"
+          pure app) s
+        mkLambdaFVars #[s] pf
+      instantiateMVars skel
+    let step ← if let some .finish := split then finishStep else if par ≤ 1 then sequentialStep else do
       let saved ← saveState
       -- the context, for moving proofs between rounds
       let fixed := #[envC, funs, hnodup] ++ hfinds ++ common ++ hselfs ++ has
@@ -1038,6 +1107,11 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
         -- reached after unfolding, which the block's equations do not mention)
         let envNow ← getEnv
         extra := cands.filter fun k => (getUnit? envNow k).isSome
+  -- a split block: the extra dependencies recorded by `cake_mutual_prepare`
+  if let (some (t, _), .const c _) := (← mutualSplitRef.get, key.getAppFn) then
+    if c == t then
+      for d in ((splitExtraExt.getState (← getEnv)).find? t).getD #[] do
+        unless extra.contains d do extra := extra.push d
 
   let saved ← saveState
   needUnitRef.set none

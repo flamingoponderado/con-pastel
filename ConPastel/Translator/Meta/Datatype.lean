@@ -289,6 +289,52 @@ elab "cake_prepass " t:term:max : command => do
       | some τ => registerDatatype τ
       | none => throw e
 
+/-- Run `k` with the split mode of the mutual block of `c` set. -/
+def withSplitMode (c : Name) (m : SplitMode) (k : CommandElabM Unit) : CommandElabM Unit := do
+  mutualSplitRef.set (some (c, m))
+  try k finally mutualSplitRef.set none
+
+def elabUnitKey (t : Term) : CommandElabM Expr := liftTermElabM do
+  let key ← instantiateMVars (← Term.elabTerm t none)
+  Term.synthesizeSyntheticMVarsNoPostponing
+  instantiateMVars key
+
+/-- `cake_mutual_prepare f d₁ … dₖ`: the first stage of translating the mutual
+block of `f` in several modules, so that Lake solves its members in separate
+processes:
+
+```
+cake_mutual_prepare f d₁ … dₖ   -- module B: dependencies, shared declarations
+cake_mutual_part f j n          -- modules P₀ … Pₙ₋₁ (each imports B): members i % n = j
+cake_mutual_finish f            -- module F (imports every Pⱼ): the joint theorem
+```
+
+It translates the block's dependencies (the pre-pass) and the units `dᵢ`, which
+become extra dependencies of the block: those its members need that the
+pre-pass does not find (a part reports them). -/
+elab "cake_mutual_prepare " t:term:max ds:(colGt term:max)* : command => do
+  let key ← elabUnitKey t
+  let .const c _ := key.getAppFn | throwError "cake_mutual_prepare: {key} is not a constant"
+  let extras ← ds.mapM elabUnitKey
+  for d in extras do cakeUnitCmd d
+  modifyEnv fun env => splitExtraExt.addEntry env (c, extras)
+  withSplitMode c .prepare (cakeUnitCmd key)
+
+/-- `cake_mutual_part f j n`: solve the members `i` of `f`'s block with
+`i % n = j` (see `cake_mutual_prepare`). -/
+elab "cake_mutual_part " t:term:max j:num n:num : command => do
+  let key ← elabUnitKey t
+  let .const c _ := key.getAppFn | throwError "cake_mutual_part: {key} is not a constant"
+  unless j.getNat < n.getNat do throwError "cake_mutual_part: need j < n"
+  withSplitMode c (.part j.getNat n.getNat) (cakeUnitCmd key)
+
+/-- `cake_mutual_finish f`: the joint theorem of `f`'s block and its members'
+units, from the parts (see `cake_mutual_prepare`). -/
+elab "cake_mutual_finish " t:term:max : command => do
+  let key ← elabUnitKey t
+  let .const c _ := key.getAppFn | throwError "cake_mutual_finish: {key} is not a constant"
+  withSplitMode c .finish (cakeUnitCmd key)
+
 /-- `cake_datatype T`: register the (closed) inductive type `T`. -/
 elab "cake_datatype " t:term:max : command => do
   let τ ← liftTermElabM do
