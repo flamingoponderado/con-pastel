@@ -1042,13 +1042,40 @@ partial def translateUnit (key : Expr) (stack : List Expr := []) (extra : Array 
   let saved ← saveState
   needUnitRef.set none
   pendingUnitsRef.set #[]
+  -- collect every missing unit of this attempt (their goals are closed by `sorry`,
+  -- and the attempt is discarded): one retry instead of one per missing unit.
+  -- An enclosing attempt's state is kept aside and restored on every exit.
+  let outerCollect ← collectAllRef.get
+  let outerNeeds ← needUnitsAllRef.get
+  collectAllRef.set (← IO.getEnv "CAKE_NOCOLLECT").isNone
+  needUnitsAllRef.set #[]
+  let dedup (xs : Array Expr) : Array Expr := xs.foldl (fun acc x => if acc.contains x then acc else acc.push x) #[]
+  let restoreOuter : MetaM Unit := do
+    collectAllRef.set outerCollect
+    needUnitsAllRef.set outerNeeds
   try
     let t0 ← IO.monoMsNow
     let nm := (← ppExpr key).pretty.take 120
     cakeLog s!"[cake] start unit {nm}"
     withCurrHeartbeats (translateUnitOnce key extra)
+    let ns := dedup (← needUnitsAllRef.get)
+    if h : 0 < ns.size then
+      cakeLog s!"[cake] unit {nm} needs {ns.size} units"
+      needUnitRef.set (some ns[0])
+      pendingUnitsRef.set (ns.extract 1 ns.size)
+      throwError "{needUnitTag}{ns[0]}"
+    restoreOuter
     cakeLog s!"[cake] {(← IO.monoMsNow) - t0}ms unit {nm}"
   catch e =>
+    -- all the units this attempt asked for (also when it failed otherwise, e.g.
+    -- on a goal shaped by a `sorry`)
+    let collected := dedup ((← needUnitRef.get).toArray ++ (← pendingUnitsRef.get) ++ (← needUnitsAllRef.get))
+    restoreOuter
+    if (← IO.getEnv "CAKE_DEBUG_COLLECT").isSome then
+      cakeLog s!"[collect-debug] attempt ended with {collected.size} collected: {((← e.toMessageData.toString).replace "\n" " ").take 300}"
+    if h : 0 < collected.size then
+      needUnitRef.set (some collected[0])
+      pendingUnitsRef.set (collected.extract 1 collected.size)
     -- a missing datatype: register it in place and retry this unit only
     if let some τ ← needDatatypeRef.get then
      if (← IO.getEnv "CAKE_NOHOOK").isNone then

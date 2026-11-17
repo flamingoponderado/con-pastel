@@ -100,6 +100,10 @@ initialize needDatatypesAllRef : IO.Ref (Array Expr) ← IO.mkRef #[]
 /-- Further units the failed parallel round needed (besides `needUnitRef`'s). -/
 initialize pendingUnitsRef : IO.Ref (Array Expr) ← IO.mkRef #[]
 
+/-- The current unit attempt collects missing units instead of aborting at the
+first (`translateUnit`; the attempt is then discarded and retried once). -/
+initialize collectAllRef : IO.Ref Bool ← IO.mkRef false
+
 /-- Registers a datatype in place (set by the datatype module), so that a unit
 needing one does not abort the whole translation. -/
 initialize datatypeHookRef : IO.Ref (Expr → MetaM Unit) ←

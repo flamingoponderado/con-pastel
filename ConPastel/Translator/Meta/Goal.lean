@@ -118,6 +118,10 @@ partial def psigmaComps (e : Expr) (n : Nat) : Array Expr :=
 def recordNeedUnit (g : MVarId) (key : Expr) (t : Expr) : MetaM Unit := do
   needUnitsAllRef.modify (·.push key)
   cakeLog s!"[need-unit] {((← ppExpr key).pretty.replace "\n" " ").take 200} for term {((← ppExpr t).pretty.replace "\n" " ").take 200} (collected)"
+  -- the goal's CakeML expression gets a placeholder too, so later steps see a term
+  let ty := (← instantiateMVars (← g.getType)).headBeta
+  if let (``Eval, #[_, Expr.mvar m, _]) := ty.getAppFnArgs then
+    unless ← m.isAssigned do m.assign (mkApp (mkConst ``Exp.var) (shortIdent "%need"))
   g.assign (← mkSorry (← g.getType) false)
 
 def throwNeedUnit {α : Type} (key : Expr) (t : Expr := default) : MetaM α := do
@@ -125,6 +129,10 @@ def throwNeedUnit {α : Type} (key : Expr) (t : Expr := default) : MetaM α := d
   needUnitsAllRef.modify (·.push key)
   cakeLog s!"[need-unit] {((← ppExpr key).pretty.replace "\n" " ").take 200} for term {((← ppExpr t).pretty.replace "\n" " ").take 500}"
   throwError "{needUnitTag}{key}"
+
+/-- A missing global unit: recorded (in a collecting attempt) or an abort. -/
+def collectOrThrowNeed (collect : Bool) (g : MVarId) (key t : Expr) : MetaM Unit := do
+  if collect || (← collectAllRef.get) then recordNeedUnit g key t else throwNeedUnit key t
 
 def getLevels (_args : Array Expr) : MetaM (List Level) := pure []
 
@@ -1779,7 +1787,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         if let some u := getUnit? (← getEnv) key then
           if let .thunk _ _ := u.kind then
             let some gv := ctx.globals.get? key |
-              if ctx.collectNeeds then recordNeedUnit g key t else throwNeedUnit key t
+              collectOrThrowNeed ctx.collectNeeds g key t
+              return
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let tgt ← withLocalDeclD `u (mkConst ``Unit) fun x => mkLambdaFVars #[x] key
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tgt, hl, gv.cert]
@@ -1807,7 +1816,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           if dargs.size == arity then
             let tup ← dargs.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) dargs.back!
             let some gv := ctx.globals.get? key |
-              if ctx.collectNeeds then recordNeedUnit g key t else throwNeedUnit key t
+              collectOrThrowNeed ctx.collectNeeds g key t
+              return
             let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
             let hf ← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv tupFn, hl, gv.cert]
             if let (``DARROW, #[_, _, invT, _]) := gv.inv.getAppFnArgs then
@@ -1825,7 +1835,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     if let some (key, dargs) ← splitKey t then
       if dargs.isEmpty then
         let some gv := ctx.globals.get? key |
-          if ctx.collectNeeds then recordNeedUnit g key t else throwNeedUnit key t
+          collectOrThrowNeed ctx.collectNeeds g key t
+          return
         let hl ← proveLookupG env gv.cname gv.value ctx.unfoldRec
         assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent gv.cname, gv.value, mkApp gv.inv key, hl, gv.cert])
         return
