@@ -34,7 +34,7 @@ $(B):
 
 # 1. The proved program as an S-expression.
 $(B)/con-pastel.sexp: Emit.lean | $(B)
-	cd $(ROOT) && ulimit -s 8388608 && lake build ConPastel.Leche.Program
+	cd $(ROOT) && ulimit -s 8388608 && lake build ConPastel.Leche.Program Flapjack.CakeParser.ToSexp
 	cd $(ROOT) && ulimit -s 8388608 && \
 	  CON_PASTEL_SEXP=release/$@.tmp lake env lean --tstack=8388608 release/Emit.lean
 	mv $@.tmp $@
