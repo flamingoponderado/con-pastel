@@ -17,10 +17,12 @@ set_option linter.all false
 
 namespace ConPastel.Leche
 -- con-leche's `@[computed_field]`s are stored in the CakeML constructors (as in
--- Lean's runtime): reading one is a projection, not a walk over the term
+-- Lean's runtime): reading one is a projection, not a walk over the term. So is
+-- `depthP` (con-leche runs it as a memoized walk, which the translation replaces
+-- by the plain descent: exponential on a shared DAG)
 cake_cached ConLeche.Name ConLeche.Name.hashData
 cake_cached ConLeche.Level ConLeche.Level.hashData
-cake_cached ConLeche.Expr ConLeche.Expr.data
+cake_cached ConLeche.Expr ConLeche.Expr.data ConLeche.Expr.depthP
 
 cake_datatype (ConLeche.Name)
 cake_datatype (ConLeche.Level)

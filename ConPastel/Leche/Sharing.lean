@@ -89,6 +89,15 @@ theorem expr_decEq_eq (a b : Expr) : Expr.decEq a b = Expr.decEqPtr a b := Subsi
 theorem expr_beq_eq (a b : Expr) : Expr.beq a b = Expr.beqMemo a b := by
   rw [Expr.beq_eq_beqMemo]
 
+/-- con-leche's field-read fast paths (`@[csimp]`): `looseBVarsBounded k e`
+and `hasFvar e` walk the whole term, exponential on a shared DAG; the fast
+versions read the cached ranges (`bvarB`, `fvarB`). -/
+theorem looseBVarsBounded_eq_fast (k : Nat) (e : Expr) :
+    Expr.looseBVarsBounded k e = Expr.looseBVarsBoundedFast k e := by
+  rw [Expr.looseBVarsBounded_eq_looseBVarsBoundedFast]
+theorem hasFvar_eq_fast (e : Expr) : Expr.hasFvar e = Expr.hasFvarFast e := by
+  rw [Expr.hasFvar_eq_hasFvarFast]
+
 end ConPastel.Impl
 
 /-! ## The equality primitives -/
@@ -143,6 +152,9 @@ cake_rewrite ConPastel.Impl.withAddr_expr
 
 cake_replace ConLeche.Expr.decEq ConLeche.Expr.decEqPtr ConPastel.Impl.expr_decEq_eq
 cake_replace ConLeche.Expr.beq ConLeche.Expr.beqMemo ConPastel.Impl.expr_beq_eq
+cake_replace ConLeche.Expr.looseBVarsBounded ConLeche.Expr.looseBVarsBoundedFast
+  ConPastel.Impl.looseBVarsBounded_eq_fast
+cake_replace ConLeche.Expr.hasFvar ConLeche.Expr.hasFvarFast ConPastel.Impl.hasFvar_eq_fast
 
 -- the equality memo of `Expr.beqMemo` (`beqGoX`)
 namespace ConPastel.Leche
