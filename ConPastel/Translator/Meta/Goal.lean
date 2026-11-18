@@ -710,8 +710,13 @@ partial def solveLet (g : MVarId) (env inv : Expr) (n : Name) (ty v b : Expr) : 
   -- a body that only typechecks with the definition unfolded (proofs about the
   -- bound value, e.g. Lean's own decreasing proofs): substitute
   -- (the solver's own discriminant lets `z` are built to typecheck opaquely)
+  -- (an occurrence in a proposition, e.g. an `if`'s condition `x.1 = true`, is
+  -- fine as long as the body typechecks with `x` opaque: substituting would
+  -- evaluate the bound value at every use)
   let opaqueOk ← if n == `z then pure true else withLocalDeclD n ty fun x => do
-    return !(← occursInProofOrType (b.instantiate1 x) x.fvarId!)
+    let b' := b.instantiate1 x
+    if !(← occursInProofOrType b' x.fvarId!) then return true
+    try Meta.check b'; return true catch _ => return false
   unless opaqueOk do
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
     return ← solve g'
