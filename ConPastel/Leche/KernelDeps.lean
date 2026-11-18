@@ -1,4 +1,4 @@
-import ConPastel.Leche.KernelTypes
+import ConPastel.Leche.Sharing
 import ConPastel.Leche.KernelDeps.Level
 import ConPastel.Leche.KernelDeps.Shapes
 import ConPastel.Leche.KernelDeps.Guards

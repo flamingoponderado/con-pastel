@@ -1,4 +1,4 @@
-import ConPastel.Leche.KernelTypes
+import ConPastel.Leche.Sharing
 
 /-!
 # Kernel dependencies, part: unit-like shapes and projection guards

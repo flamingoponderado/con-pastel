@@ -14,8 +14,9 @@ ones (no dependencies):
   INV key (recclosure envC funs n)
 ```
 
-Primitives are registered before any datatype, so they take no
-`cakeHasCons` hypotheses.
+A primitive's body builds no constructor values of registered datatypes, so
+its certificate takes no `cakeHasCons` hypotheses; it may be registered after
+datatypes (e.g. CakeML's `=` on one, `ConPastel.Leche.Sharing`).
 -/
 
 namespace ConPastel.Translator.Meta
@@ -57,8 +58,6 @@ syntax (name := cakePrimitive) "cake_primitive " term:max term:max (" assuming "
     synthesizeSyntheticMVarsNoPostponing
     let key ← instantiateMVars key
     if (getUnit? (← getEnv) key).isSome then throwError "{key} already has a unit"
-    unless (datatypeExt.getState (← getEnv)).isEmpty do
-      throwError "primitives must be registered before any datatype"
     let body ← instantiateMVars (← elabTerm b (mkConst ``Exp))
     synthesizeSyntheticMVarsNoPostponing
     let assumes ← if assm.getNumArgs > 0 then do
