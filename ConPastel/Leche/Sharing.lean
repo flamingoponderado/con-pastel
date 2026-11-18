@@ -98,6 +98,24 @@ theorem looseBVarsBounded_eq_fast (k : Nat) (e : Expr) :
 theorem hasFvar_eq_fast (e : Expr) : Expr.hasFvar e = Expr.hasFvarFast e := by
   rw [Expr.hasFvar_eq_hasFvarFast]
 
+/-- con-leche's declaration comparison against the pinned basis (`andPinOk`):
+the fast versions compare the declarations in place rather than building and
+comparing their canonical forms (`canon`), which walks every expression. -/
+theorem constantVal_canonEq_eq (a b : ConstantVal) :
+    ConstantVal.canonEq a b = ConstantVal.canonEqFast a b := by
+  rw [ConstantVal.canonEq_eq_canonEqFast]
+theorem constantInfo_canonEq_eq (a b : ConstantInfo) :
+    ConstantInfo.canonEq a b = ConstantInfo.canonEqFast a b := by
+  rw [ConstantInfo.canonEq_eq_canonEqFast]
+theorem canonEqList_eq (a b : List ConstantInfo) : canonEqList a b = canonEqListFast a b := by
+  rw [canonEqList_eq_canonEqListFast]
+
+/-- `mkBvar i` hands out `bvarPool[i]`, a static table in Lean's runtime. In the
+translation a top-level constant is a thunk, evaluated at every use, so each
+`mkBvar` would rebuild (and hash) all 4096 pooled nodes: build the node. -/
+def mkBvarD (i : Nat) : Expr := .bvar i
+theorem mkBvar_eq_D (i : Nat) : Expr.mkBvar i = mkBvarD i := Expr.mkBvar_eq i
+
 end ConPastel.Impl
 
 /-! ## The equality primitives -/
@@ -155,6 +173,10 @@ cake_replace ConLeche.Expr.beq ConLeche.Expr.beqMemo ConPastel.Impl.expr_beq_eq
 cake_replace ConLeche.Expr.looseBVarsBounded ConLeche.Expr.looseBVarsBoundedFast
   ConPastel.Impl.looseBVarsBounded_eq_fast
 cake_replace ConLeche.Expr.hasFvar ConLeche.Expr.hasFvarFast ConPastel.Impl.hasFvar_eq_fast
+cake_replace ConLeche.Expr.mkBvar ConPastel.Impl.mkBvarD ConPastel.Impl.mkBvar_eq_D
+cake_replace ConLeche.ConstantVal.canonEq ConLeche.ConstantVal.canonEqFast ConPastel.Impl.constantVal_canonEq_eq
+cake_replace ConLeche.ConstantInfo.canonEq ConLeche.ConstantInfo.canonEqFast ConPastel.Impl.constantInfo_canonEq_eq
+cake_replace ConLeche.canonEqList ConLeche.canonEqListFast ConPastel.Impl.canonEqList_eq
 
 -- the equality memo of `Expr.beqMemo` (`beqGoX`)
 namespace ConPastel.Leche
@@ -164,3 +186,391 @@ cake_datatype (Std.DHashMap.Raw Nat fun (x : Nat) => ConLeche.Expr.EqPair)
 cake_datatype (ConLeche.Expr.BeqSt)
 cake_datatype (Option (Std.DHashMap.Internal.AssocList Nat fun (x : Nat) => ConLeche.Expr.EqPair))
 end ConPastel.Leche
+
+/-! ## Memoised walks
+
+con-leche runs its walks over expressions as memoised walks (`*XP`), whose
+memo types are indexed by terms; the translation runs their plain
+specifications (`*P`, `resTerm_eq` & co. in `ConPastel.Translator.Replace`),
+which are exponential on a shared DAG. The walks the tower fixtures exercise
+are memoised here instead, with a closed memo type (`ExprMemo`) whose entries
+are checked by CakeML's `=` and proved correct against the specifications. -/
+
+namespace ConPastel.Impl
+open ConLeche
+
+/-! ## Memo tables for walks over shared expressions -/
+
+/-- A memo table: a binary trie on the low bits of an expression's hash, with
+association lists of `(node, value)` at the leaves. Correctness never depends
+on where an entry is (`ExprMemo.All`); the key only makes lookups short. -/
+inductive ExprMemo (α : Type) where
+  | leaf (l : List (Expr × α))
+  | node (l r : ExprMemo α)
+
+namespace ExprMemo
+variable {α : Type}
+
+/-- The trie's key bits for `e`. -/
+def key (e : Expr) : Nat := e.data.toNat % 65536
+
+def findL (e : Expr) : List (Expr × α) → Option α
+  | [] => none
+  | (x, v) :: t => if exprEqB x e then some v else findL e t
+
+/-- The value stored for (a node equal to) `e`, found by CakeML's `=`
+(at once on the same pointer). -/
+def find? (e : Expr) : ExprMemo α → Nat → Option α
+  | .leaf l, _ => findL e l
+  | .node a b, k => if k % 2 = 0 then find? e a (k / 2) else find? e b (k / 2)
+
+/-- Store `v` for `e` (at depth `d`, the key's next bit choosing the branch). -/
+def insert (e : Expr) (v : α) : Nat → ExprMemo α → Nat → ExprMemo α
+  | 0, .leaf l, _ => .leaf ((e, v) :: l)
+  | 0, t@(.node ..), _ => t
+  | d + 1, .leaf l, k =>
+    if k % 2 = 0 then .node (insert e v d (.leaf l) (k / 2)) (.leaf [])
+    else .node (.leaf l) (insert e v d (.leaf []) (k / 2))
+  | d + 1, .node a b, k =>
+    if k % 2 = 0 then .node (insert e v d a (k / 2)) b
+    else .node a (insert e v d b (k / 2))
+
+/-- Every entry satisfies `P`. -/
+def All (P : Expr → α → Prop) : ExprMemo α → Prop
+  | .leaf l => ∀ p ∈ l, P p.1 p.2
+  | .node a b => All P a ∧ All P b
+
+theorem findL_sound {P : Expr → α → Prop} {e : Expr} :
+    ∀ {l : List (Expr × α)} {v : α}, (∀ p ∈ l, P p.1 p.2) → findL e l = some v → P e v
+  | [], _, _, h => by simp [findL] at h
+  | (x, w) :: t, v, hl, h => by
+    simp only [findL] at h
+    split at h
+    · rename_i hx; cases h; have := exprEqB_sound hx; subst this; exact hl (x, _) (by simp)
+    · exact findL_sound (fun p hp => hl p (by simp [hp])) h
+
+theorem find?_sound {P : Expr → α → Prop} {e : Expr} :
+    ∀ {t : ExprMemo α} {k : Nat} {v : α}, All P t → find? e t k = some v → P e v
+  | .leaf l, _, _, ht, h => findL_sound ht h
+  | .node a b, k, v, ht, h => by
+    simp only [find?] at h
+    split at h
+    · exact find?_sound ht.1 h
+    · exact find?_sound ht.2 h
+
+theorem insert_all {P : Expr → α → Prop} {e : Expr} {v : α} (hv : P e v) :
+    ∀ {d : Nat} {t : ExprMemo α} {k : Nat}, All P t → All P (insert e v d t k)
+  | 0, .leaf l, _, ht => by
+    intro p hp; simp at hp
+    rcases hp with rfl | hp
+    · exact hv
+    · exact ht _ hp
+  | 0, .node _ _, _, ht => ht
+  | d + 1, .leaf l, k, ht => by
+    unfold insert
+    split
+    · exact ⟨insert_all hv ht, by simp [All]⟩
+    · exact ⟨ht, insert_all hv (by simp [All])⟩
+  | d + 1, .node a b, k, ht => by
+    unfold insert
+    split
+    · exact ⟨insert_all hv ht.1, ht.2⟩
+    · exact ⟨ht.1, insert_all hv ht.2⟩
+
+end ExprMemo
+
+/-! ## `mentionsAnyConstP`, memoised -/
+
+/-- `mentionsAnyConstP names`, with a memo of the compound nodes' answers. -/
+def macM (names : List Name) (t : ExprMemo Bool) (e : Expr) : Bool × ExprMemo Bool :=
+  match e with
+  | .bvar .. | .sort .. | .lit .. => (false, t)
+  | .const n .. => (names.contains n, t)
+  | .fvar _ ty .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r := macM names t ty
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .app f a .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r1 := macM names t f
+      let r := if r1.1 then (true, r1.2) else macM names r1.2 a
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .lam ty body .. | .forallE ty body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r1 := macM names t ty
+      let r := if r1.1 then (true, r1.2) else macM names r1.2 body
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .letE ty val body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r1 := macM names t ty
+      let r2 := if r1.1 then (true, r1.2) else macM names r1.2 val
+      let r := if r2.1 then (true, r2.2) else macM names r2.2 body
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .proj s _ sub .. =>
+    if names.contains s then (true, t) else
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r := macM names t sub
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+
+theorem macM_spec (names : List Name) :
+    ∀ (e : Expr) (t : ExprMemo Bool), t.All (fun x b => b = Expr.mentionsAnyConstP names x) →
+      (macM names t e).1 = Expr.mentionsAnyConstP names e ∧
+      (macM names t e).2.All (fun x b => b = Expr.mentionsAnyConstP names x) := by
+  intro e
+  induction e with
+  | bvar | sort | lit => intro t ht; exact ⟨by simp [macM, Expr.mentionsAnyConstP], ht⟩
+  | const n us => intro t ht; exact ⟨by simp [macM, Expr.mentionsAnyConstP], ht⟩
+  | fvar i ty ih =>
+    intro t ht
+    simp only [macM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := ih t ht
+      have hv : (macM names t ty).1 = Expr.mentionsAnyConstP names (.fvar i ty) := by
+        rw [h1]; simp [Expr.mentionsAnyConstP]
+      exact ⟨hv, ExprMemo.insert_all hv h2⟩
+  | app f a ihf iha =>
+    intro t ht
+    simp only [macM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := ihf t ht
+      have key : (if (macM names t f).1 then (true, (macM names t f).2)
+          else macM names (macM names t f).2 a).1 = Expr.mentionsAnyConstP names (.app f a) ∧
+          (if (macM names t f).1 then (true, (macM names t f).2)
+          else macM names (macM names t f).2 a).2.All (fun x b => b = Expr.mentionsAnyConstP names x) := by
+        split
+        · rename_i hb; refine ⟨?_, h2⟩; simp [Expr.mentionsAnyConstP, ← h1, hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := iha _ h2
+          refine ⟨?_, h4⟩; simp [Expr.mentionsAnyConstP, ← h1, hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | lam ty body iht ihb =>
+    intro t ht
+    simp only [macM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      have key : (if (macM names t ty).1 then (true, (macM names t ty).2)
+          else macM names (macM names t ty).2 body).1 = Expr.mentionsAnyConstP names (.lam ty body) ∧
+          (if (macM names t ty).1 then (true, (macM names t ty).2)
+          else macM names (macM names t ty).2 body).2.All (fun x b => b = Expr.mentionsAnyConstP names x) := by
+        split
+        · rename_i hb; refine ⟨?_, h2⟩; simp [Expr.mentionsAnyConstP, ← h1, hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ h2
+          refine ⟨?_, h4⟩; simp [Expr.mentionsAnyConstP, ← h1, hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | forallE ty body iht ihb =>
+    intro t ht
+    simp only [macM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      have key : (if (macM names t ty).1 then (true, (macM names t ty).2)
+          else macM names (macM names t ty).2 body).1 = Expr.mentionsAnyConstP names (.forallE ty body) ∧
+          (if (macM names t ty).1 then (true, (macM names t ty).2)
+          else macM names (macM names t ty).2 body).2.All (fun x b => b = Expr.mentionsAnyConstP names x) := by
+        split
+        · rename_i hb; refine ⟨?_, h2⟩; simp [Expr.mentionsAnyConstP, ← h1, hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ h2
+          refine ⟨?_, h4⟩; simp [Expr.mentionsAnyConstP, ← h1, hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | letE ty val body iht ihv ihb =>
+    intro t ht
+    simp only [macM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      generalize hr1 : macM names t ty = r1 at *
+      have k2 : (if r1.1 then (true, r1.2) else macM names r1.2 val).1 =
+            (Expr.mentionsAnyConstP names ty || Expr.mentionsAnyConstP names val) ∧
+          (if r1.1 then (true, r1.2) else macM names r1.2 val).2.All
+            (fun x b => b = Expr.mentionsAnyConstP names x) := by
+        split
+        · rename_i hb; exact ⟨by simp [← h1, hb], h2⟩
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihv _ h2; exact ⟨by simp [← h1, hb, h3], h4⟩
+      generalize hr2 : (if r1.1 then (true, r1.2) else macM names r1.2 val) = r2 at *
+      have key : (if r2.1 then (true, r2.2) else macM names r2.2 body).1 =
+            Expr.mentionsAnyConstP names (.letE ty val body) ∧
+          (if r2.1 then (true, r2.2) else macM names r2.2 body).2.All
+            (fun x b => b = Expr.mentionsAnyConstP names x) := by
+        split
+        · rename_i hb; refine ⟨?_, k2.2⟩; simp [Expr.mentionsAnyConstP, ← k2.1] at hb ⊢; simp [hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ k2.2
+          refine ⟨?_, h4⟩; simp [Expr.mentionsAnyConstP, ← k2.1] at hb ⊢; simp [hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | proj s i sub ih =>
+    intro t ht
+    simp only [macM]
+    split
+    · rename_i hs; simp at hs; exact ⟨by simp [Expr.mentionsAnyConstP, hs], ht⟩
+    · rename_i hs
+      simp at hs
+      split
+      · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+      · obtain ⟨h1, h2⟩ := ih t ht
+        have hv : (macM names t sub).1 = Expr.mentionsAnyConstP names (.proj s i sub) := by
+          rw [h1]; simp [Expr.mentionsAnyConstP, hs]
+        exact ⟨hv, ExprMemo.insert_all hv h2⟩
+
+/-! ## `nestOccP`, memoised -/
+
+/-- `nestOccP names lo hi`, with a memo of the compound nodes' answers. -/
+def noM (names : List Name) (lo hi : Nat) (t : ExprMemo Bool) (e : Expr) : Bool × ExprMemo Bool :=
+  match e with
+  | .bvar .. | .sort .. | .lit .. => (false, t)
+  | .const n .. => (names.contains n, t)
+  | .fvar i .. => (decide (lo ≤ i ∧ i < hi), t)
+  | .app f a .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r1 := noM names lo hi t f
+      let r := if r1.1 then (true, r1.2) else noM names lo hi r1.2 a
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .lam ty body .. | .forallE ty body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r1 := noM names lo hi t ty
+      let r := if r1.1 then (true, r1.2) else noM names lo hi r1.2 body
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .letE ty val body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r1 := noM names lo hi t ty
+      let r2 := if r1.1 then (true, r1.2) else noM names lo hi r1.2 val
+      let r := if r2.1 then (true, r2.2) else noM names lo hi r2.2 body
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .proj _ _ sub .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some b => (b, t)
+    | none =>
+      let r := noM names lo hi t sub
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+
+theorem noM_spec (names : List Name) (lo hi : Nat) :
+    ∀ (e : Expr) (t : ExprMemo Bool), t.All (fun x b => b = Expr.nestOccP names lo hi x) →
+      (noM names lo hi t e).1 = Expr.nestOccP names lo hi e ∧
+      (noM names lo hi t e).2.All (fun x b => b = Expr.nestOccP names lo hi x) := by
+  intro e
+  induction e with
+  | bvar | sort | lit => intro t ht; exact ⟨by simp [noM, Expr.nestOccP], ht⟩
+  | const n us => intro t ht; exact ⟨by simp [noM, Expr.nestOccP], ht⟩
+  | fvar i ty ih => intro t ht; exact ⟨by simp [noM, Expr.nestOccP], ht⟩
+  | app f a ihf iha =>
+    intro t ht
+    simp only [noM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := ihf t ht
+      have key : (if (noM names lo hi t f).1 then (true, (noM names lo hi t f).2)
+          else noM names lo hi (noM names lo hi t f).2 a).1 = Expr.nestOccP names lo hi (.app f a) ∧
+          (if (noM names lo hi t f).1 then (true, (noM names lo hi t f).2)
+          else noM names lo hi (noM names lo hi t f).2 a).2.All (fun x b => b = Expr.nestOccP names lo hi x) := by
+        split
+        · rename_i hb; refine ⟨?_, h2⟩; simp [Expr.nestOccP, ← h1, hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := iha _ h2
+          refine ⟨?_, h4⟩; simp [Expr.nestOccP, ← h1, hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | lam ty body iht ihb =>
+    intro t ht
+    simp only [noM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      have key : (if (noM names lo hi t ty).1 then (true, (noM names lo hi t ty).2)
+          else noM names lo hi (noM names lo hi t ty).2 body).1 = Expr.nestOccP names lo hi (.lam ty body) ∧
+          (if (noM names lo hi t ty).1 then (true, (noM names lo hi t ty).2)
+          else noM names lo hi (noM names lo hi t ty).2 body).2.All (fun x b => b = Expr.nestOccP names lo hi x) := by
+        split
+        · rename_i hb; refine ⟨?_, h2⟩; simp [Expr.nestOccP, ← h1, hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ h2
+          refine ⟨?_, h4⟩; simp [Expr.nestOccP, ← h1, hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | forallE ty body iht ihb =>
+    intro t ht
+    simp only [noM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      have key : (if (noM names lo hi t ty).1 then (true, (noM names lo hi t ty).2)
+          else noM names lo hi (noM names lo hi t ty).2 body).1 = Expr.nestOccP names lo hi (.forallE ty body) ∧
+          (if (noM names lo hi t ty).1 then (true, (noM names lo hi t ty).2)
+          else noM names lo hi (noM names lo hi t ty).2 body).2.All (fun x b => b = Expr.nestOccP names lo hi x) := by
+        split
+        · rename_i hb; refine ⟨?_, h2⟩; simp [Expr.nestOccP, ← h1, hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ h2
+          refine ⟨?_, h4⟩; simp [Expr.nestOccP, ← h1, hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | letE ty val body iht ihv ihb =>
+    intro t ht
+    simp only [noM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      generalize hr1 : noM names lo hi t ty = r1 at *
+      have k2 : (if r1.1 then (true, r1.2) else noM names lo hi r1.2 val).1 =
+            (Expr.nestOccP names lo hi ty || Expr.nestOccP names lo hi val) ∧
+          (if r1.1 then (true, r1.2) else noM names lo hi r1.2 val).2.All
+            (fun x b => b = Expr.nestOccP names lo hi x) := by
+        split
+        · rename_i hb; exact ⟨by simp [← h1, hb], h2⟩
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihv _ h2; exact ⟨by simp [← h1, hb, h3], h4⟩
+      generalize hr2 : (if r1.1 then (true, r1.2) else noM names lo hi r1.2 val) = r2 at *
+      have key : (if r2.1 then (true, r2.2) else noM names lo hi r2.2 body).1 =
+            Expr.nestOccP names lo hi (.letE ty val body) ∧
+          (if r2.1 then (true, r2.2) else noM names lo hi r2.2 body).2.All
+            (fun x b => b = Expr.nestOccP names lo hi x) := by
+        split
+        · rename_i hb; refine ⟨?_, k2.2⟩; simp [Expr.nestOccP, ← k2.1] at hb ⊢; simp [hb]
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ k2.2
+          refine ⟨?_, h4⟩; simp [Expr.nestOccP, ← k2.1] at hb ⊢; simp [hb, h3]
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | proj s i sub ih =>
+    intro t ht
+    simp only [noM]
+    split
+    · rename_i b hb; exact ⟨(ExprMemo.find?_sound ht hb).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := ih t ht
+      have hv : (noM names lo hi t sub).1 = Expr.nestOccP names lo hi (.proj s i sub) := by
+        rw [h1]; simp [Expr.nestOccP]
+      exact ⟨hv, ExprMemo.insert_all hv h2⟩
+
+/-! ## The replacements -/
+
+theorem mentionsAnyConstP_eq_memo (names : List Name) (e : Expr) :
+    Expr.mentionsAnyConstP names e = (macM names (.leaf []) e).1 :=
+  ((macM_spec names e (.leaf []) (by simp [ExprMemo.All])).1).symm
+
+theorem nestOccP_eq_memo (names : List Name) (lo hi : Nat) (e : Expr) :
+    Expr.nestOccP names lo hi e = (noM names lo hi (.leaf []) e).1 :=
+  ((noM_spec names lo hi e (.leaf []) (by simp [ExprMemo.All])).1).symm
+
+/-- The memoised walks, as functions of the specifications' arguments. -/
+def mentionsAnyConstM (names : List Name) (e : Expr) : Bool := (macM names (.leaf []) e).1
+def nestOccM (names : List Name) (lo hi : Nat) (e : Expr) : Bool := (noM names lo hi (.leaf []) e).1
+
+theorem mentionsAnyConstP_eq_M (names : List Name) (e : Expr) :
+    Expr.mentionsAnyConstP names e = mentionsAnyConstM names e := mentionsAnyConstP_eq_memo names e
+theorem nestOccP_eq_M (names : List Name) (lo hi : Nat) (e : Expr) :
+    Expr.nestOccP names lo hi e = nestOccM names lo hi e := nestOccP_eq_memo names lo hi e
+
+end ConPastel.Impl
+
+namespace ConPastel.Leche
+cake_datatype (ConPastel.Impl.ExprMemo Bool)
+end ConPastel.Leche
+
+cake_replace ConLeche.Expr.mentionsAnyConstP ConPastel.Impl.mentionsAnyConstM ConPastel.Impl.mentionsAnyConstP_eq_M
+cake_replace ConLeche.Expr.nestOccP ConPastel.Impl.nestOccM ConPastel.Impl.nestOccP_eq_M
