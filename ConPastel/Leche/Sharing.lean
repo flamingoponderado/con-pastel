@@ -574,3 +574,298 @@ end ConPastel.Leche
 
 cake_replace ConLeche.Expr.mentionsAnyConstP ConPastel.Impl.mentionsAnyConstM ConPastel.Impl.mentionsAnyConstP_eq_M
 cake_replace ConLeche.Expr.nestOccP ConPastel.Impl.nestOccM ConPastel.Impl.nestOccP_eq_M
+
+namespace ConPastel.Impl
+open ConLeche
+
+/-! ## `replaceAppsP`, memoised -/
+
+def raM (f : Name → List Level → Option Expr) (b n : Nat) (t : ExprMemo Expr) (e : Expr) :
+    Expr × ExprMemo Expr :=
+  match e with
+  | .bvar .. | .fvar .. | .sort .. | .lit .. => (e, t)
+  | .const c us .. => ((Expr.constHoleAt? f n c us).getD e, t)
+  | .app a x .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      match Expr.appHoleAt? f b n a x with
+      | some r => (r, ExprMemo.insert e r 16 t (ExprMemo.key e))
+      | none =>
+        let r1 := raM f b n t a
+        let r2 := raM f b n r1.2 x
+        let r := Expr.mkApp r1.1 r2.1
+        (r, ExprMemo.insert e r 16 r2.2 (ExprMemo.key e))
+  | .lam ty body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := raM f b n t ty
+      let r2 := raM f b n r1.2 body
+      let r := Expr.mkLam r1.1 r2.1
+      (r, ExprMemo.insert e r 16 r2.2 (ExprMemo.key e))
+  | .forallE ty body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := raM f b n t ty
+      let r2 := raM f b n r1.2 body
+      let r := Expr.mkForallE r1.1 r2.1
+      (r, ExprMemo.insert e r 16 r2.2 (ExprMemo.key e))
+  | .letE ty val body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := raM f b n t ty
+      let r2 := raM f b n r1.2 val
+      let r3 := raM f b n r2.2 body
+      let r := Expr.mkLetE r1.1 r2.1 r3.1
+      (r, ExprMemo.insert e r 16 r3.2 (ExprMemo.key e))
+  | .proj sn i sub .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := raM f b n t sub
+      let r := Expr.mkProj sn i r1.1
+      (r, ExprMemo.insert e r 16 r1.2 (ExprMemo.key e))
+
+theorem raM_spec (f : Name → List Level → Option Expr) (b n : Nat) :
+    ∀ (e : Expr) (t : ExprMemo Expr), t.All (fun x r => r = Expr.replaceAppsP f b n x) →
+      (raM f b n t e).1 = Expr.replaceAppsP f b n e ∧
+      (raM f b n t e).2.All (fun x r => r = Expr.replaceAppsP f b n x) := by
+  intro e
+  induction e with
+  | bvar | fvar | sort | lit => intro t ht; exact ⟨by simp [raM, Expr.replaceAppsP], ht⟩
+  | const c us => intro t ht; exact ⟨by simp [raM, Expr.replaceAppsP], ht⟩
+  | app a x iha ihx =>
+    intro t ht
+    simp only [raM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · split
+      · rename_i r hr
+        have hv : r = Expr.replaceAppsP f b n (.app a x) := by simp [Expr.replaceAppsP, hr]
+        exact ⟨hv, ExprMemo.insert_all (P := fun x r => r = Expr.replaceAppsP f b n x) hv ht⟩
+      · rename_i hr
+        obtain ⟨h1, h2⟩ := iha t ht
+        obtain ⟨h3, h4⟩ := ihx _ h2
+        have hv : Expr.mkApp (raM f b n t a).1 (raM f b n (raM f b n t a).2 x).1 =
+            Expr.replaceAppsP f b n (.app a x) := by simp [Expr.replaceAppsP, hr, h1, h3]
+        exact ⟨hv, ExprMemo.insert_all (P := fun x r => r = Expr.replaceAppsP f b n x) hv h4⟩
+  | lam ty body iht ihb =>
+    intro t ht
+    simp only [raM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      obtain ⟨h3, h4⟩ := ihb _ h2
+      have hv : Expr.mkLam (raM f b n t ty).1 (raM f b n (raM f b n t ty).2 body).1 =
+          Expr.replaceAppsP f b n (.lam ty body) := by simp [Expr.replaceAppsP, h1, h3]
+      exact ⟨hv, ExprMemo.insert_all (P := fun x r => r = Expr.replaceAppsP f b n x) hv h4⟩
+  | forallE ty body iht ihb =>
+    intro t ht
+    simp only [raM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      obtain ⟨h3, h4⟩ := ihb _ h2
+      have hv : Expr.mkForallE (raM f b n t ty).1 (raM f b n (raM f b n t ty).2 body).1 =
+          Expr.replaceAppsP f b n (.forallE ty body) := by simp [Expr.replaceAppsP, h1, h3]
+      exact ⟨hv, ExprMemo.insert_all (P := fun x r => r = Expr.replaceAppsP f b n x) hv h4⟩
+  | letE ty val body iht ihv ihb =>
+    intro t ht
+    simp only [raM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      obtain ⟨h3, h4⟩ := ihv _ h2
+      obtain ⟨h5, h6⟩ := ihb _ h4
+      refine ⟨by simp [Expr.replaceAppsP, h1, h3, h5], ExprMemo.insert_all (P := fun x r => r = Expr.replaceAppsP f b n x) ?_ h6⟩
+      simp [Expr.replaceAppsP, h1, h3, h5]
+  | proj sn i sub ih =>
+    intro t ht
+    simp only [raM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := ih t ht
+      refine ⟨by simp [Expr.replaceAppsP, h1], ExprMemo.insert_all (P := fun x r => r = Expr.replaceAppsP f b n x) ?_ h2⟩
+      simp [Expr.replaceAppsP, h1]
+
+/-! ## `constsResolveFP`, memoised -/
+
+/-- The literal case of `constsResolveFP` (spelled out: `constsResolveFP` itself
+is replaced by `constsResolveM`). -/
+def crLit (fe : FEnv) : Literal → Bool
+  | .natVal _ =>
+    (fe.find? natName).isSome && (fe.find? natZeroName).isSome &&
+      (fe.find? natSuccName).isSome
+  | .strVal _ =>
+    (fe.find? natName).isSome && (fe.find? natZeroName).isSome &&
+      (fe.find? natSuccName).isSome && (fe.find? stringName).isSome &&
+      (fe.find? stringOfListName).isSome &&
+      (fe.find? listName).isSome && (fe.find? listNilName).isSome &&
+      (fe.find? listConsName).isSome && (fe.find? charName).isSome &&
+      (fe.find? charOfNatName).isSome
+
+def crM (fe : FEnv) (t : ExprMemo Bool) (e : Expr) : Bool × ExprMemo Bool :=
+  match e with
+  | .bvar .. | .sort .. => (true, t)
+  | .lit l .. => (crLit fe l, t)
+  | .const nm .. => ((fe.find? nm).isSome, t)
+  | .fvar _ ty .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r := crM fe t ty
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .app a x .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := crM fe t a
+      let r := if r1.1 then crM fe r1.2 x else (false, r1.2)
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .lam ty body .. | .forallE ty body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := crM fe t ty
+      let r := if r1.1 then crM fe r1.2 body else (false, r1.2)
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .letE ty val body .. =>
+    match t.find? e (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := crM fe t ty
+      let r2 := if r1.1 then crM fe r1.2 val else (false, r1.2)
+      let r := if r2.1 then crM fe r2.2 body else (false, r2.2)
+      (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+  | .proj sn _ sub .. =>
+    if (fe.find? sn).isSome then
+      match t.find? e (ExprMemo.key e) with
+      | some r => (r, t)
+      | none =>
+        let r := crM fe t sub
+        (r.1, ExprMemo.insert e r.1 16 r.2 (ExprMemo.key e))
+    else (false, t)
+
+theorem crM_spec (fe : FEnv) :
+    ∀ (e : Expr) (t : ExprMemo Bool), t.All (fun x r => r = Cached.constsResolveFP fe x) →
+      (crM fe t e).1 = Cached.constsResolveFP fe e ∧
+      (crM fe t e).2.All (fun x r => r = Cached.constsResolveFP fe x) := by
+  intro e
+  induction e with
+  | bvar | sort | const => intro t ht; exact ⟨by simp [crM, Cached.constsResolveFP], ht⟩
+  | lit l => intro t ht; exact ⟨by cases l <;> simp [crM, crLit, Cached.constsResolveFP], ht⟩
+  | fvar i ty ih =>
+    intro t ht
+    simp only [crM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := ih t ht
+      have hv : (crM fe t ty).1 = Cached.constsResolveFP fe (.fvar i ty) := by
+        rw [h1]; simp [Cached.constsResolveFP]
+      exact ⟨hv, ExprMemo.insert_all hv h2⟩
+  | app a x iha ihx =>
+    intro t ht
+    simp only [crM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iha t ht
+      have key : (if (crM fe t a).1 then crM fe (crM fe t a).2 x else (false, (crM fe t a).2)).1 =
+            Cached.constsResolveFP fe (.app a x) ∧
+          (if (crM fe t a).1 then crM fe (crM fe t a).2 x else (false, (crM fe t a).2)).2.All
+            (fun x r => r = Cached.constsResolveFP fe x) := by
+        split
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihx _ h2
+          exact ⟨by simp [Cached.constsResolveFP, ← h1, hb, h3], h4⟩
+        · rename_i hb; exact ⟨by simp [Cached.constsResolveFP, ← h1, hb], h2⟩
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | lam ty body iht ihb =>
+    intro t ht
+    simp only [crM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      have key : (if (crM fe t ty).1 then crM fe (crM fe t ty).2 body else (false, (crM fe t ty).2)).1 =
+            Cached.constsResolveFP fe (.lam ty body) ∧
+          (if (crM fe t ty).1 then crM fe (crM fe t ty).2 body else (false, (crM fe t ty).2)).2.All
+            (fun x r => r = Cached.constsResolveFP fe x) := by
+        split
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ h2
+          exact ⟨by simp [Cached.constsResolveFP, ← h1, hb, h3], h4⟩
+        · rename_i hb; exact ⟨by simp [Cached.constsResolveFP, ← h1, hb], h2⟩
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | forallE ty body iht ihb =>
+    intro t ht
+    simp only [crM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      have key : (if (crM fe t ty).1 then crM fe (crM fe t ty).2 body else (false, (crM fe t ty).2)).1 =
+            Cached.constsResolveFP fe (.forallE ty body) ∧
+          (if (crM fe t ty).1 then crM fe (crM fe t ty).2 body else (false, (crM fe t ty).2)).2.All
+            (fun x r => r = Cached.constsResolveFP fe x) := by
+        split
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ h2
+          exact ⟨by simp [Cached.constsResolveFP, ← h1, hb, h3], h4⟩
+        · rename_i hb; exact ⟨by simp [Cached.constsResolveFP, ← h1, hb], h2⟩
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | letE ty val body iht ihv ihb =>
+    intro t ht
+    simp only [crM]
+    split
+    · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+    · obtain ⟨h1, h2⟩ := iht t ht
+      generalize hr1 : crM fe t ty = r1 at *
+      have k2 : (if r1.1 then crM fe r1.2 val else (false, r1.2)).1 =
+            (Cached.constsResolveFP fe ty && Cached.constsResolveFP fe val) ∧
+          (if r1.1 then crM fe r1.2 val else (false, r1.2)).2.All
+            (fun x r => r = Cached.constsResolveFP fe x) := by
+        split
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihv _ h2; exact ⟨by simp [← h1, hb, h3], h4⟩
+        · rename_i hb; exact ⟨by simp [← h1, hb], h2⟩
+      generalize hr2 : (if r1.1 then crM fe r1.2 val else (false, r1.2)) = r2 at *
+      have key : (if r2.1 then crM fe r2.2 body else (false, r2.2)).1 =
+            Cached.constsResolveFP fe (.letE ty val body) ∧
+          (if r2.1 then crM fe r2.2 body else (false, r2.2)).2.All
+            (fun x r => r = Cached.constsResolveFP fe x) := by
+        split
+        · rename_i hb; obtain ⟨h3, h4⟩ := ihb _ k2.2
+          refine ⟨?_, h4⟩; simp [Cached.constsResolveFP, ← k2.1] at hb ⊢; simp [hb, h3]
+        · rename_i hb; refine ⟨?_, k2.2⟩; simp [Cached.constsResolveFP, ← k2.1] at hb ⊢
+          intro h; simp [hb] at h
+      exact ⟨key.1, ExprMemo.insert_all key.1 key.2⟩
+  | proj sn i sub ih =>
+    intro t ht
+    simp only [crM]
+    split
+    · rename_i hs
+      split
+      · rename_i r hr; exact ⟨(ExprMemo.find?_sound ht hr).symm ▸ rfl, ht⟩
+      · obtain ⟨h1, h2⟩ := ih t ht
+        have hv : (crM fe t sub).1 = Cached.constsResolveFP fe (.proj sn i sub) := by
+          rw [h1]; simp [Cached.constsResolveFP, hs]
+        exact ⟨hv, ExprMemo.insert_all hv h2⟩
+    · rename_i hs; exact ⟨by simp [Cached.constsResolveFP, hs], ht⟩
+
+def replaceAppsM (f : Name → List Level → Option Expr) (b n : Nat) (e : Expr) : Expr :=
+  (raM f b n (.leaf []) e).1
+def constsResolveM (fe : FEnv) (e : Expr) : Bool := (crM fe (.leaf []) e).1
+
+theorem replaceAppsP_eq_M (f : Name → List Level → Option Expr) (b n : Nat) (e : Expr) :
+    Expr.replaceAppsP f b n e = replaceAppsM f b n e :=
+  ((raM_spec f b n e (.leaf []) (by simp [ExprMemo.All])).1).symm
+theorem constsResolveFP_eq_M (fe : FEnv) (e : Expr) :
+    Cached.constsResolveFP fe e = constsResolveM fe e :=
+  ((crM_spec fe e (.leaf []) (by simp [ExprMemo.All])).1).symm
+
+end ConPastel.Impl
+
+namespace ConPastel.Leche
+cake_datatype (Option (ConLeche.Name × List ConLeche.Level))
+cake_datatype (ConPastel.Impl.ExprMemo ConLeche.Expr)
+end ConPastel.Leche
+
+cake_replace ConLeche.Expr.replaceAppsP ConPastel.Impl.replaceAppsM ConPastel.Impl.replaceAppsP_eq_M
+cake_replace ConLeche.Cached.constsResolveFP ConPastel.Impl.constsResolveM ConPastel.Impl.constsResolveFP_eq_M
