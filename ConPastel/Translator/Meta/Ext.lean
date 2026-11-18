@@ -17,6 +17,10 @@ structure DatatypeInfo where
   ctors : Array (Name × String × Array Bool)
   /-- Cached computed fields (`cake_cached`): stored first in every constructor. -/
   cached : Array Name := #[]
+  /-- A family over term parameters (e.g. `PEnt s` for a function `s`, which
+  occurs only in proof fields): `ty` is then `fun x₁ … xₙ => T`, and every
+  generated declaration but `stamp`/`cakeHasCons` takes `x₁ … xₙ` first. -/
+  nparams : Nat := 0
   deriving Inhabited
 
 initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap DatatypeInfo) ←

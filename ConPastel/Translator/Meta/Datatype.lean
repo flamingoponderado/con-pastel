@@ -69,19 +69,40 @@ def escName (n : Name) : String :=
     | .num _ k => toString k
     | .anonymous => "")
 
+/-- The number of term parameters of a datatype key (`abstractType`). -/
+def keyParams : Expr → Nat
+  | .lam _ _ b _ => keyParams b + 1
+  | _ => 0
+
+/-- The type of a datatype key, under its parameters (loose bound variables). -/
+def keyBody : Expr → Expr
+  | .lam _ _ b _ => keyBody b
+  | e => e
+
+/-- The fields of each constructor of the datatype with key `τ`, the field
+types abstracted over the key's parameters. -/
+def ctorFieldsKey (τ : Expr) : MetaM (Array (Name × Array (Expr × Bool))) :=
+  lambdaTelescope τ fun xs b => do
+    let cs ← ctorFields b
+    cs.mapM fun (c, fs) => return (c, ← fs.mapM fun (fty, d) => return (← mkLambdaFVars xs fty, d))
+
 partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElabM Unit := do
-  let τ ← liftTermElabM (normType τ)
+  let τ ← liftTermElabM (lambdaTelescope τ fun xs b => do mkLambdaFVars xs (← normType b))
   if (getDatatypeByType? (← getEnv) τ).isSome then return
   if stack.contains τ then throwError "cyclic datatype dependency at {τ} (mutual types are not supported yet)"
+  let nparams := keyParams τ
+  -- the invariant of a field type (abstracted over the parameters), under them
+  let fieldInvL (ftyL : Expr) : MetaM Expr := lambdaTelescope τ fun xs _ => do
+    mkLambdaFVars xs (← invOf (ftyL.beta xs))
   -- first the datatypes the field invariants need
-  let ctors₀ ← liftTermElabM (ctorFields τ)
+  let ctors₀ ← liftTermElabM (ctorFieldsKey τ)
   for (_, fs) in ctors₀ do
     for (fty, data) in fs do
       if data && fty != τ then
         repeat
           needDatatypeRef.set none
           try
-            let _ ← liftTermElabM (invOf fty)
+            let _ ← liftTermElabM (fieldInvL fty)
             break
           catch e =>
             match ← needDatatypeRef.get with
@@ -91,14 +112,14 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
   if let some t := cakeTagExt.getState env then
     throwError "datatype {τ} is needed by module '{t}': register it in the base chain (cake_datatype)"
   let stamp := nextStamp env
-  logInfo m!"cake datatype t{stamp}: {τ} ({(← liftTermElabM (ctorFields τ)).size} constructors)"
+  logInfo m!"cake datatype t{stamp}: {τ} ({(← liftTermElabM (ctorFieldsKey τ)).size} constructors)"
   cakeLog s!"[cake] datatype t{stamp}: {← liftTermElabM (do return (← ppExpr τ).pretty.take 120)}"
   let N := Name.mkStr `ConPastel.CakeT s!"t{stamp}"
-  let .const I _ := τ.getAppFn | throwError "{τ} is not an inductive type"
+  let .const I _ := (keyBody τ).getAppFn | throwError "{τ} is not an inductive type"
   let some (.inductInfo ii) := env.find? I | throwError "{τ} is not an inductive type"
   let np := ii.numParams
-  let ctors ← liftTermElabM (ctorFields τ)
-  -- the type and the field invariants
+  let ctors ← liftTermElabM (ctorFieldsKey τ)
+  -- the type and the field invariants (over the parameters, for a family)
   liftTermElabM do
     addAbbrev (N ++ `ty) (← inferType τ) τ
     for i in [0:ctors.size] do
@@ -106,7 +127,9 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
       for j in [0:fs.size] do
         let (fty, data) := fs[j]!
         if data && fty != τ then
-          addAbbrev (N ++ Name.mkSimple s!"f{i}_{j}") (← mkAppM ``ConPastel.Translator.RefInv #[fty]) (← invOf fty)
+          let ity ← lambdaTelescope τ fun xs _ => do
+            mkForallFVars xs (← mkAppM ``ConPastel.Translator.RefInv #[fty.beta xs])
+          addAbbrev (N ++ Name.mkSimple s!"f{i}_{j}") ity (← fieldInvL fty)
   -- cached computed fields (`cake_cached`): stored first in every constructor
   let cfs := getCached env I
   if !cfs.isEmpty && np != 0 then throwError "cached fields of the parameterized type {τ} are not supported"
@@ -119,8 +142,13 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
       addAbbrev (N ++ Name.mkSimple s!"c{k}") (← mkAppM ``ConPastel.Translator.RefInv #[rty]) (← invOf rty)
   let cname (c : Name) : String := s!"t{stamp}.{c.componentsRev.head!}"
   let ms (s : String) : String := s!"(Flapjack.Basis.Pure.MlString.ofString {strLit s})"
+  -- a family's parameters: explicit in the definitions, implicit in the theorems
+  let ps := (List.range nparams).map (s!"x{·}")
+  let ap := String.join (ps.map (" " ++ ·))
+  let bsE := String.join (ps.map (s!" ({·} : _)"))
+  let bsI := String.join (ps.map fun x => " {" ++ x ++ " : _}")
   let fieldInv (i j : Nat) : String :=
-    if (ctors[i]!.2)[j]!.1 == τ then s!"{N}.cakeInv" else s!"{N}.f{i}_{j}"
+    if (ctors[i]!.2)[j]!.1 == τ then s!"{N}.cakeInv{ap}" else s!"{N}.f{i}_{j}{ap}"
   let dataIdx (i : Nat) : List Nat := (List.range (ctors[i]!.2).size).filter fun j => (ctors[i]!.2)[j]!.2
   let under := String.join (List.replicate np "_ ")
   let pat (i : Nat) : String :=
@@ -141,7 +169,7 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
     let ex := if its.isEmpty then body else s!"∃ {" ".intercalate (its.map (s!"w{·.1}"))}, {body}"
     s!"  | {pat i}, v => {ex}"
   runCmd s!"def _root_.{N}.stamp : Nat := {stamp}"
-  runCmd s!"open ConPastel.Translator Flapjack.SemanticPrimitivesHOL in\ndef _root_.{N}.cakeInv : RefInv {N}.ty\n{"\n".intercalate arms}"
+  runCmd s!"open ConPastel.Translator Flapjack.SemanticPrimitivesHOL in\ndef _root_.{N}.cakeInv{bsE} : RefInv ({N}.ty{ap})\n{"\n".intercalate arms}"
   -- the constructor environment
   let lookups := (List.range ctors.size).map fun i =>
     s!"Flapjack.NamespaceHOL.nsLookup envC (.short {ms (cname ctors[i]!.1)}) = some ({(items i).length}, .typeStamp {ms (cname ctors[i]!.1)} {stamp})"
@@ -173,10 +201,10 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
     let es := if n == 0 then "" else "{" ++ " ".intercalate (xs.map (s!"e{·}")) ++ " : Exp}"
     runCmd s!"set_option maxHeartbeats 0 in
 open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
-theorem _root_.{N}.con{i} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c) {es} {allA}
+theorem _root_.{N}.con{i}{bsI} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c) {es} {allA}
     {" ".intercalate hyps} :
     Eval env (.con (some (.short {ms (cname ctors[i]!.1)})) [{", ".intercalate (xs.map (s!"e{·}"))}])
-      ({N}.cakeInv (show {N}.ty from {pat i})) := by
+      ({N}.cakeInv{ap} (show {N}.ty{ap} from {pat i})) := by
   have hl := {proj i}
   refine Eval_weaken (Eval_con (Ps := {ps}) hl {evalAll}) ?_
   rintro v ⟨vs, hvs, hv⟩
@@ -209,8 +237,8 @@ theorem _root_.{N}.con{i} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env
   let rcasesPat := " | ".intercalate ((List.range nC).map fun _ => "⟨rfl, rfl, rfl⟩")
   runCmd s!"set_option maxHeartbeats 0 in
 open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
-theorem _root_.{N}.cake_mat {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c)
-    {"{"}e : Exp{"}"} {"{"}x : {N}.ty{"}"} (he : Eval env e ({N}.cakeInv x)) {"{"}Q : {N}.ty → Value → Prop{"}"}
+theorem _root_.{N}.cake_mat{bsI} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c)
+    {"{"}e : Exp{"}"} {"{"}x : {N}.ty{ap}{"}"} (he : Eval env e ({N}.cakeInv{ap} x)) {"{"}Q : {N}.ty{ap} → Value → Prop{"}"}
     {" ".intercalate params.toList} :
     Eval env (.mat e (conClauses [{", ".intercalate casesL.toList}])) (Q x) := by
   have hf : FlatCases env.c {stamp} [{", ".intercalate casesL.toList}] := by
@@ -243,12 +271,13 @@ theorem _root_.{N}.cake_mat {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons e
       casesC := casesC.push s!"({ms (cname cn)}, ([{", ".intercalate (xs.map vn)}] : List VarN), Exp.var (.short {vn s!"z{c}"}))"
     runCmd s!"set_option maxHeartbeats 0 in
 open ConPastel.Translator Flapjack.SemanticPrimitivesHOL Flapjack.AstHOL Flapjack.NamespaceHOL in
-theorem _root_.{N}.cake_cf{c} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c)
-    {"{"}e : Exp{"}"} {"{"}x : {N}.ty{"}"} (he : Eval env e ({N}.cakeInv x)) :
+theorem _root_.{N}.cake_cf{c}{bsI} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons env.c)
+    {"{"}e : Exp{"}"} {"{"}x : {N}.ty{ap}{"}"} (he : Eval env e ({N}.cakeInv{ap} x)) :
     Eval env (.mat e (conClauses [{", ".intercalate casesC.toList}])) ({N}.c{c} ({escName cfs[c]!} x)) :=
   {N}.cake_mat (Q := fun x => {N}.c{c} ({escName cfs[c]!} x)) hc he {" ".intercalate args.toList}"
   modifyEnv fun env => datatypeExt.addEntry env
-    { ty := τ, name := N, stamp, ctors := ctors.map fun (c, fs) => (c, cname c, fs.map (·.2)), cached := cfs }
+    { ty := τ, name := N, stamp, ctors := ctors.map fun (c, fs) => (c, cname c, fs.map (·.2)), cached := cfs,
+      nparams }
 
 /-- Translate `key` (and what it needs), registering the datatypes it needs. -/
 partial def cakeUnitCmd (key : Expr) : CommandElabM Unit := do

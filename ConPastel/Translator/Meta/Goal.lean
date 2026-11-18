@@ -899,7 +899,12 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let motive := args[np]!
   let major := args[np + 1]!
   let alts := args[np + 2:].toArray
-  let τ := d.ty
+  -- a family's arguments (`abstractType`), and the instance type
+  let dargs ← if d.nparams == 0 then pure #[] else do
+    let some (_, as) ← findDatatypeArgs? (← whnfD (← inferType major))
+      | throwError "no datatype arguments for {major}"
+    pure as
+  let τ := d.ty.beta dargs
   let dep ← withLocalDeclD `x τ fun x => do
     return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
   if dep && inv.isAppOf ``NEWTYPE then return ← solveDepCasesNewtype g env inv fn np args τ
@@ -916,12 +921,13 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let st ← get
   let some lv := st.locals.find? (·.fvar == major) | throwError "unknown scrutinee {major}"
   let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {τ}"
-  let invT := mkConst (d.name ++ `cakeInv)
+  let invT := mkAppN (mkConst (d.name ++ `cakeInv)) dargs
   let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
   let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invT major, hl, lv.rel]
   let qfun ← withLocalDeclD `x τ fun x => do
     mkLambdaFVars #[x] (mkApp (← invAt x) (mkAppN fn (args[:np].toArray ++ #[motive, x] ++ alts)))
-  let mut lemArgs : Array (Option Expr) := #[some env, some hc, none, some major, some he, some qfun]
+  let mut lemArgs : Array (Option Expr) := Array.replicate d.nparams none ++
+    #[some env, some hc, none, some major, some he, some qfun]
   let params := τ.getAppArgs
   let .const _ lvls := τ.getAppFn | unreachable!
   for k in [0:d.ctors.size] do
@@ -1509,7 +1515,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let major := args[ii.numParams + 1]!
           let mty ← whnfD (← inferType major)
           -- registered datatypes have their own `casesOn` (and projections become `casesOn`)
-          if !(← isProp (← inferType major)) && (mty.hasFVar || (← findDatatype? mty).isNone) then
+          if !(← isProp (← inferType major)) && (← findDatatype? mty).isNone then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
             let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
             let t' := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
@@ -1549,8 +1555,8 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
   if let .const cn _ := fn then
     if let some (.ctorInfo ci) := (← getEnv).find? cn then
       let τ ← whnfR (← inferType t)
-      if !τ.hasFVar then
-        if let some d ← findDatatype? τ then
+      if !τ.hasMVar then
+        if let some (d, dargs) ← findDatatypeArgs? τ then
           let some k := d.ctors.findIdx? (·.1 == cn) | throwError "constructor {cn} not in {τ}"
           let (_, _, dataFlags) := d.ctors[k]!
           let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {τ}"
@@ -1581,13 +1587,14 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           for j in [0:fields.size] do
             if dataFlags[j]! then
               let fty ← normType (← inferType fields[j]!)
-              let fi := if fty == τn then mkConst (d.name ++ `cakeInv)
-                else mkConst (d.name ++ Name.mkSimple s!"f{k}_{j}")
+              let fi := mkAppN (if fty == τn then mkConst (d.name ++ `cakeInv)
+                else mkConst (d.name ++ Name.mkSimple s!"f{k}_{j}")) dargs
               let (_, gj) ← newEvalGoal env (mkApp fi fields[j]!)
               solve gj
               pfs := pfs.push (← instantiateMVars (mkMVar gj))
           let nd := cpfs.size + pfs.size
-          let lemArgs : Array (Option Expr) := #[some env, some hc] ++ Array.replicate nd none ++
+          let lemArgs : Array (Option Expr) := Array.replicate d.nparams none ++ #[some env, some hc] ++
+            Array.replicate nd none ++
             fields.map some ++ cpfs.map some ++ pfs.map some
           assignProof g (← mkAppOptM (d.name ++ Name.mkSimple s!"con{k}") lemArgs)
           return
@@ -1605,7 +1612,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let motive := args[ii.numParams]!
           let depMotive ← withLocalDeclD `x τ fun x => do
             return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
-          if !depMotive && !τ.hasFVar && !(← isProp τ) && (← newtypeInfo? τ).isNone then
+          if !depMotive && !(← abstractType τ).1.hasFVar && !(← isProp τ) && (← newtypeInfo? τ).isNone then
             let _ ← invOf τ
   -- `Nat.rec` whose step ignores the induction hypothesis is `Nat.casesOn`
   if fn.isConstOf ``Nat.rec && args.size == 4 then

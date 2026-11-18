@@ -86,9 +86,47 @@ def normType (ty : Expr) : MetaM Expr := do
     let e' ← whnfR e
     if e' != e then return .visit e' else return .done e)
 
+/-- Is `e` a type or a type former (its type ends in a sort)? -/
+def isTypeFormer (e : Expr) : MetaM Bool := do
+  forallTelescopeReducing (← inferType e) fun _ r => return (← whnfR r).isSort
+
+/-- A datatype key for a type that may mention local terms: the maximal
+subterms that are terms (not types or type formers) and mention locals become
+parameters, `fun x₁ … xₙ => T[xᵢ]`. For `Option (HTab (instantiate1P v))` it is
+`fun x => Option (HTab x)` with argument `instantiate1P v`. Closed types are
+their own key. -/
+def abstractType (ty : Expr) : MetaM (Expr × Array Expr) := do
+  let ty ← normType ty
+  if !ty.hasFVar then return (ty, #[])
+  let args ← IO.mkRef (#[] : Array Expr)
+  let rec go (e : Expr) : MetaM Unit := do
+    if !e.hasFVar then return
+    if !e.hasLooseBVars && !(← isTypeFormer e) then
+      unless (← args.get).contains e do args.modify (·.push e)
+      return
+    match e with
+    | .app f a => go f; go a
+    | .lam _ t b _ | .forallE _ t b _ => go t; go b
+    | .mdata _ b => go b
+    | _ => return
+  go ty
+  let as ← args.get
+  let tys ← as.mapM inferType
+  if tys.any (·.hasFVar) then return (ty, #[])
+  let key ← withLocalDeclsDND (tys.map (`x, ·)) fun xs => do
+    let body := ty.replace fun s => (as.findIdx? (· == s)).map (xs[·]!)
+    mkLambdaFVars xs body
+  return (key, as)
+
+/-- The registered datatype for `ty` (up to `normType`), with the arguments of
+its parameters (`abstractType`). -/
+def findDatatypeArgs? (ty : Expr) : MetaM (Option (DatatypeInfo × Array Expr)) := do
+  let (key, as) ← abstractType ty
+  return (getDatatypeByType? (← getEnv) key).map (·, as)
+
 /-- The registered datatype for `ty` (up to `normType`). -/
 def findDatatype? (ty : Expr) : MetaM (Option DatatypeInfo) := do
-  return getDatatypeByType? (← getEnv) (← normType ty)
+  return (← findDatatypeArgs? ty).map (·.1)
 
 partial def invOf (ty : Expr) : MetaM Expr := do
   let ty ← whnfR (← instantiateMVars ty).headBeta
@@ -112,12 +150,14 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   -- datatypes (instances of closed inductive types)
   if let .const I _ := ty.getAppFn then
     if let some (.inductInfo _) := (← getEnv).find? I then
-      if !ty.hasFVar && !ty.hasMVar then
-        if let some d ← findDatatype? ty then return mkConst (d.name ++ `cakeInv)
-        let nty ← normType ty
-        needDatatypeRef.set (some nty)
-        needDatatypesAllRef.modify (·.push nty)
-        throwError "cake: need datatype {ty}"
+      if !ty.hasMVar then
+        let (key, as) ← abstractType ty
+        if !key.hasFVar then
+          if let some d := getDatatypeByType? (← getEnv) key then
+            return mkAppN (mkConst (d.name ++ `cakeInv)) as
+          needDatatypeRef.set (some key)
+          needDatatypesAllRef.modify (·.push key)
+          throwError "cake: need datatype {ty}"
   if let .forallE n a b bi := ty then
     -- a leading proof argument: the value exists regardless
     if ← isProp a then
