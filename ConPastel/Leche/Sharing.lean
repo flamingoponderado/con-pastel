@@ -211,15 +211,16 @@ inductive ExprMemo (α : Type) where
 namespace ExprMemo
 variable {α : Type}
 
-/-- The trie's key bits for `e`. -/
-def key (e : Expr) : Nat := e.data.toNat % 65536
+/-- The trie's key bits for `e`: low bits of its hash (the top half of the
+packed `data` word; the low half holds the variable ranges). -/
+def key (e : Expr) : Nat := (e.data.toNat / 4294967296) % 65536
 
 def findL (e : Expr) : List (Expr × α) → Option α
   | [] => none
-  | (x, v) :: t => if exprEqB x e then some v else findL e t
+  | (x, v) :: t => if x.data == e.data && exprEqB x e then some v else findL e t
 
-/-- The value stored for (a node equal to) `e`, found by CakeML's `=`
-(at once on the same pointer). -/
+/-- The value stored for (a node equal to) `e`: the data words first, then
+CakeML's `=` (at once on the same pointer). -/
 def find? (e : Expr) : ExprMemo α → Nat → Option α
   | .leaf l, _ => findL e l
   | .node a b, k => if k % 2 = 0 then find? e a (k / 2) else find? e b (k / 2)
@@ -246,7 +247,8 @@ theorem findL_sound {P : Expr → α → Prop} {e : Expr} :
   | (x, w) :: t, v, hl, h => by
     simp only [findL] at h
     split at h
-    · rename_i hx; cases h; have := exprEqB_sound hx; subst this; exact hl (x, _) (by simp)
+    · rename_i hx; cases h; have := exprEqB_sound (Bool.and_eq_true _ _ ▸ hx).2; subst this
+      exact hl (x, _) (by simp)
     · exact findL_sound (fun p hp => hl p (by simp [hp])) h
 
 theorem find?_sound {P : Expr → α → Prop} {e : Expr} :
