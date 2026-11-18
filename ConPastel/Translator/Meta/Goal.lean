@@ -268,6 +268,33 @@ def closeWith (goal : Expr) (tac : Syntax.Tactic) : MetaM Expr := do
     throwError "side goal not closed: {goal}"
   instantiateMVars mvar
 
+/-- `closeWith` for a termination goal (a Lean-side fact), run first with the
+CakeML-side hypotheses cleared: the values (`Value`, `Exp`, `SemEnv`) bound by
+the branches above, and every hypothesis mentioning them (invariants, `Eval`
+facts). They cannot matter for termination, but tactics such as `subst_vars`
+revert them and grow slow with their number. Falls back to the full context. -/
+def closeDec (goal : Expr) (tac : Syntax.Tactic) : MetaM Expr := do
+  let cakeTy (ty : Expr) : Bool := ty.find? (fun e => match e with
+      | .const n _ => n == ``Value || n == ``Exp || n == ``SemEnv || n == ``Eval || n == ``AppReturns
+      | _ => false) |>.isSome
+  let goal ← instantiateMVars goal
+  let mvar ← mkFreshExprMVar goal
+  let cleared? ← observing? do
+    let mut cake : FVarIdSet := {}
+    for d in ← getLCtx do
+      if d.isImplementationDetail then continue
+      let ty ← instantiateMVars d.type
+      if cakeTy ty || ty.hasAnyFVar cake.contains then cake := cake.insert d.fvarId
+    if cake.isEmpty || goal.hasAnyFVar cake.contains then throwError "closeDec: nothing to clear"
+    let mut g := mvar.mvarId!
+    for d in (← getLCtx).decls.toArray.reverse do
+      if let some d := d then
+        if cake.contains d.fvarId then g ← g.clear d.fvarId
+    let remaining ← Tactic.run g (Tactic.evalTactic tac) |>.run'
+    unless remaining.isEmpty do throwError "closeDec: side goal"
+  if cleared?.isSome then return ← instantiateMVars mvar
+  closeWith goal tac
+
 /-- Destructure a goal `Eval env ce P` into `(env, P)`. -/
 def evalGoalParts (g : MVarId) : MetaM (Expr × Expr) := do
   let ty ← instantiateMVars (← g.getType)
@@ -1664,7 +1691,7 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             args.pop.foldrM (fun a acc => mkAppM ``Prod.mk #[a, acc]) args.back!
           let q := (m.inj.beta #[y]).headBeta
           let relTy := mkApp2 mr.r q mr.s
-          let hdec ← try closeWith relTy (← `(tactic| (subst_vars; (try simp only [WellFoundedRelation.rel, measure, InvImage, invImage, Nat.lt_wfRel] at *); (try dsimp only at *); first | omega | decreasing_tactic | (simp_wf; omega))))
+          let hdec ← try closeDec relTy (← `(tactic| (subst_vars; (try simp only [WellFoundedRelation.rel, measure, InvImage, invImage, Nat.lt_wfRel] at *); (try dsimp only at *); first | omega | decreasing_tactic | (simp_wf; omega))))
             catch _ => throwError "cannot prove the mutual call decreases: {← whnfR relTy}"
           let ihq := mkApp2 mr.ih q hdec
           let (_, gx) ← newEvalGoal env (mkApp m.invT y)
@@ -1712,11 +1739,11 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let hty ← inferType h
           if ← isDefEq hty relTy then pure (some h) else
           try
-            let imp ← closeWith (← mkArrow hty relTy) (← `(tactic| (intro hh; subst_vars; exact hh)))
+            let imp ← closeDec (← mkArrow hty relTy) (← `(tactic| (intro hh; subst_vars; exact hh)))
             pure (some (mkApp imp h))
           catch _ => pure none
       let hdec ← if let some h := hinted then pure h else
-        try closeWith relTy (← `(tactic| first
+        try closeDec relTy (← `(tactic| first
           | decreasing_tactic
           | (simp_wf; omega)
           | (simp only [InvImage, Nat.lt_eq] at *; omega)
