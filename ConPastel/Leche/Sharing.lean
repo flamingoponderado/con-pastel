@@ -871,3 +871,338 @@ end ConPastel.Leche
 
 cake_replace ConLeche.Expr.replaceAppsP ConPastel.Impl.replaceAppsM ConPastel.Impl.replaceAppsP_eq_M
 cake_replace ConLeche.Cached.constsResolveFP ConPastel.Impl.constsResolveM ConPastel.Impl.constsResolveFP_eq_M
+
+namespace ConPastel.Impl
+open ConLeche
+
+/-! ## A generic sharing-preserving replace walk -/
+
+/-- The generic replace: below the cut-off `cut`, leaves by `leaf`, free
+variables by `lf` (`none`: descend into the type), the rest rebuilt, the
+cursor bumped by `bump` under binders. -/
+def rwP (cut : Expr → Nat → Bool) (leaf : Expr → Nat → Expr)
+    (lf : Expr → Nat → Expr → Nat → Option Expr) (bump : Nat → Nat) (e : Expr) (c : Nat) : Expr :=
+  if cut e c then e else
+  match e with
+  | .bvar .. | .sort .. | .const .. | .lit .. => leaf e c
+  | .fvar idx ty .. =>
+    match lf e idx ty c with
+    | some r => r
+    | none => Expr.mkFVar idx (rwP cut leaf lf bump ty c)
+  | .app f a .. => Expr.mkApp (rwP cut leaf lf bump f c) (rwP cut leaf lf bump a c)
+  | .lam ty b .. => Expr.mkLam (rwP cut leaf lf bump ty c) (rwP cut leaf lf bump b (bump c))
+  | .forallE ty b .. => Expr.mkForallE (rwP cut leaf lf bump ty c) (rwP cut leaf lf bump b (bump c))
+  | .letE ty v b .. =>
+    Expr.mkLetE (rwP cut leaf lf bump ty c) (rwP cut leaf lf bump v c) (rwP cut leaf lf bump b (bump c))
+  | .proj sn i x .. => Expr.mkProj sn i (rwP cut leaf lf bump x c)
+
+/-- Memo entries `(node, cursor, result)`. -/
+abbrev RMemo := ExprMemo (Nat × Expr)
+
+def findC (e : Expr) (c : Nat) : List (Expr × Nat × Expr) → Option Expr
+  | [] => none
+  | (x, c', r) :: t => if x.data == e.data && c' == c && exprEqB x e then some r else findC e c t
+
+def RMemo.find? (e : Expr) (c : Nat) : RMemo → Nat → Option Expr
+  | .leaf l, _ => findC e c l
+  | .node a b, k => if k % 2 = 0 then RMemo.find? e c a (k / 2) else RMemo.find? e c b (k / 2)
+
+theorem findC_sound {P : Expr → Nat × Expr → Prop} {e : Expr} {c : Nat} :
+    ∀ {l : List (Expr × Nat × Expr)} {r : Expr}, (∀ p ∈ l, P p.1 p.2) → findC e c l = some r → P e (c, r)
+  | [], _, _, h => by simp [findC] at h
+  | (x, c', w) :: t, r, hl, h => by
+    simp only [findC] at h
+    split at h
+    · rename_i hx; cases h
+      simp only [Bool.and_eq_true, beq_iff_eq] at hx
+      obtain ⟨⟨_, hc⟩, he⟩ := hx
+      have := exprEqB_sound he; subst this; subst hc
+      exact hl (x, c', _) (by simp)
+    · exact findC_sound (fun p hp => hl p (by simp [hp])) h
+
+theorem RMemo.find?_sound {P : Expr → Nat × Expr → Prop} {e : Expr} {c : Nat} :
+    ∀ {t : RMemo} {k : Nat} {r : Expr}, t.All P → RMemo.find? e c t k = some r → P e (c, r)
+  | .leaf l, _, _, ht, h => findC_sound ht h
+  | .node a b, k, r, ht, h => by
+    simp only [RMemo.find?] at h
+    split at h
+    · exact RMemo.find?_sound ht.1 h
+    · exact RMemo.find?_sound ht.2 h
+
+/-- `rwP`, memoised on (node, cursor) for the compound nodes. -/
+def rwM (cut : Expr → Nat → Bool) (leaf : Expr → Nat → Expr)
+    (lf : Expr → Nat → Expr → Nat → Option Expr) (bump : Nat → Nat)
+    (t : RMemo) (e : Expr) (c : Nat) : Expr × RMemo :=
+  if cut e c then (e, t) else
+  match e with
+  | .bvar .. | .sort .. | .const .. | .lit .. => (leaf e c, t)
+  | .fvar idx ty .. =>
+    match lf e idx ty c with
+    | some r => (r, t)
+    | none =>
+      match RMemo.find? e c t (ExprMemo.key e) with
+      | some r => (r, t)
+      | none =>
+        let r1 := rwM cut leaf lf bump t ty c
+        let r := Expr.mkFVar idx r1.1
+        (r, ExprMemo.insert e (c, r) 16 r1.2 (ExprMemo.key e))
+  | .app f a .. =>
+    match RMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := rwM cut leaf lf bump t f c
+      let r2 := rwM cut leaf lf bump r1.2 a c
+      let r := Expr.mkApp r1.1 r2.1
+      (r, ExprMemo.insert e (c, r) 16 r2.2 (ExprMemo.key e))
+  | .lam ty b .. =>
+    match RMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := rwM cut leaf lf bump t ty c
+      let r2 := rwM cut leaf lf bump r1.2 b (bump c)
+      let r := Expr.mkLam r1.1 r2.1
+      (r, ExprMemo.insert e (c, r) 16 r2.2 (ExprMemo.key e))
+  | .forallE ty b .. =>
+    match RMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := rwM cut leaf lf bump t ty c
+      let r2 := rwM cut leaf lf bump r1.2 b (bump c)
+      let r := Expr.mkForallE r1.1 r2.1
+      (r, ExprMemo.insert e (c, r) 16 r2.2 (ExprMemo.key e))
+  | .letE ty v b .. =>
+    match RMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := rwM cut leaf lf bump t ty c
+      let r2 := rwM cut leaf lf bump r1.2 v c
+      let r3 := rwM cut leaf lf bump r2.2 b (bump c)
+      let r := Expr.mkLetE r1.1 r2.1 r3.1
+      (r, ExprMemo.insert e (c, r) 16 r3.2 (ExprMemo.key e))
+  | .proj sn i x .. =>
+    match RMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := rwM cut leaf lf bump t x c
+      let r := Expr.mkProj sn i r1.1
+      (r, ExprMemo.insert e (c, r) 16 r1.2 (ExprMemo.key e))
+
+section
+variable (cut : Expr → Nat → Bool) (leaf : Expr → Nat → Expr)
+    (lf : Expr → Nat → Expr → Nat → Option Expr) (bump : Nat → Nat)
+
+/-- The memo invariant: every entry is the plain walk's result. -/
+abbrev RGood (t : RMemo) : Prop :=
+  t.All (fun x p => p.2 = rwP cut leaf lf bump x p.1)
+
+theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump t →
+    (rwM cut leaf lf bump t e c).1 = rwP cut leaf lf bump e c ∧
+    RGood cut leaf lf bump (rwM cut leaf lf bump t e c).2 := by
+  intro e
+  induction e with
+  | bvar | sort | const | lit =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+  | fvar idx ty ih =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hlf; exact ⟨by rw [rwP]; simp [hcut, hlf], ht⟩
+      · rename_i hlf
+        split
+        · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
+        · obtain ⟨h1, h2⟩ := ih c t ht
+          refine ⟨?_, ExprMemo.insert_all ?_ h2⟩ <;> (dsimp only; rw [rwP]; simp [hcut, hlf, h1])
+  | app f a ihf iha =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := ihf c t ht
+        obtain ⟨h3, h4⟩ := iha c _ h2
+        refine ⟨?_, ExprMemo.insert_all ?_ h4⟩ <;> (dsimp only; rw [rwP]; simp [hcut, h1, h3])
+  | lam ty b iht ihb =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := iht c t ht
+        obtain ⟨h3, h4⟩ := ihb (bump c) _ h2
+        refine ⟨?_, ExprMemo.insert_all ?_ h4⟩ <;> (dsimp only; rw [rwP]; simp [hcut, h1, h3])
+  | forallE ty b iht ihb =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := iht c t ht
+        obtain ⟨h3, h4⟩ := ihb (bump c) _ h2
+        refine ⟨?_, ExprMemo.insert_all ?_ h4⟩ <;> (dsimp only; rw [rwP]; simp [hcut, h1, h3])
+  | letE ty v b iht ihv ihb =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := iht c t ht
+        obtain ⟨h3, h4⟩ := ihv c _ h2
+        obtain ⟨h5, h6⟩ := ihb (bump c) _ h4
+        refine ⟨?_, ExprMemo.insert_all ?_ h6⟩ <;> (dsimp only; rw [rwP]; simp [hcut, h1, h3, h5])
+  | proj sn i x ih =>
+    intro c t ht; rw [rwM]
+    split
+    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := ih c t ht
+        refine ⟨?_, ExprMemo.insert_all ?_ h2⟩ <;> (dsimp only; rw [rwP]; simp [hcut, h1])
+
+theorem rwM_eq (e : Expr) (c : Nat) :
+    (rwM cut leaf lf bump (.leaf []) e c).1 = rwP cut leaf lf bump e c :=
+  (rwM_spec cut leaf lf bump e c (.leaf []) (by simp [ExprMemo.All])).1
+end
+
+/-! ## The substitution walks as instances -/
+
+def liftLeaf (amount : Nat) (e : Expr) (c : Nat) : Expr :=
+  match e with
+  | .bvar i .. => if i ≥ c then Expr.mkBvar (i + amount) else e
+  | _ => e
+def inst1Leaf (v : Expr) (e : Expr) (d : Nat) : Expr :=
+  match e with
+  | .bvar i .. => if i = d then v else if i > d then Expr.mkBvar (i - 1) else e
+  | _ => e
+def instLiftLeaf (vs : Array Expr) (e : Expr) (d : Nat) : Expr :=
+  match e with
+  | .bvar i .. =>
+    if i < d then e
+    else if h : i - d < vs.size then Expr.liftLooseBVarsP d vs[i - d] 0
+    else Expr.mkBvar (i - vs.size)
+  | _ => e
+def ilpLeaf (ks : List Name) (us : List Level) (e : Expr) (_ : Nat) : Expr :=
+  match e with
+  | .sort u .. => Expr.mkSort (Level.subst ks us u)
+  | .const n vs .. => Expr.mkConst n (vs.map (Level.subst ks us))
+  | _ => e
+def taLeaf (names : List Name) (lvls : List Level) (holes : List Expr) (e : Expr) (_ : Nat) : Expr :=
+  match e with
+  | .const n us .. => Expr.targetAbsConst names lvls holes n us
+  | _ => e
+
+theorem liftLooseBVarsP_rw (amount : Nat) (e : Expr) (c : Nat) :
+    Expr.liftLooseBVarsP amount e c =
+      rwP (fun e c => decide (e.bvarB ≤ c)) (liftLeaf amount) (fun e _ _ _ => some e) Nat.succ e c := by
+  induction e generalizing c <;> (rw [Expr.liftLooseBVarsP, rwP]; simp_all [liftLeaf])
+
+theorem instantiate1P_rw (v e : Expr) (d : Nat) :
+    Expr.instantiate1P v e d =
+      rwP (fun e c => decide (e.bvarB ≤ c)) (inst1Leaf v) (fun e _ _ _ => some e) Nat.succ e d := by
+  induction e generalizing d <;> (rw [Expr.instantiate1P, rwP]; simp_all [inst1Leaf])
+
+theorem instantiateLiftP_rw (vs : Array Expr) (e : Expr) (d : Nat) :
+    Expr.instantiateLiftP vs e d =
+      rwP (fun e c => decide (e.bvarB ≤ c)) (instLiftLeaf vs) (fun e _ _ _ => some e) Nat.succ e d := by
+  induction e generalizing d <;> (rw [Expr.instantiateLiftP, rwP]; simp_all [instLiftLeaf])
+
+theorem abstract1P_rw (d : Nat) (e : Expr) (k : Nat) :
+    Expr.abstract1P d e k =
+      rwP (fun e _ => decide (e.fvarB ≤ d)) (fun e _ => e)
+        (fun e idx _ k => some (if idx = d then Expr.mkBvar k else e)) Nat.succ e k := by
+  induction e generalizing k <;> (rw [Expr.abstract1P, rwP]; simp_all)
+
+theorem abstractRangeP_rw (d k : Nat) (e : Expr) (c : Nat) :
+    Expr.abstractRangeP d k e c =
+      rwP (fun e _ => decide (e.fvarB ≤ d)) (fun e _ => e)
+        (fun e idx _ c => some (if d ≤ idx ∧ idx < d + k then Expr.mkBvar (c + (d + k - 1 - idx)) else e))
+        Nat.succ e c := by
+  induction e generalizing c <;> (rw [Expr.abstractRangeP, rwP]; simp_all)
+
+theorem replaceFVarsP_rw (f : Nat → Option Expr) (e : Expr) :
+    Expr.replaceFVarsP f e =
+      rwP (fun e _ => e.fvarB == 0) (fun e _ => e)
+        (fun _ idx ty _ => some ((f idx).getD (.fvar idx ty))) id e 0 := by
+  induction e <;> (rw [Expr.replaceFVarsP, rwP]; simp_all)
+
+theorem instLevelParamsP_rw (ks : List Name) (us : List Level) (e : Expr) :
+    Expr.instLevelParamsP ks us e =
+      rwP (fun e _ => !e.hasLP) (ilpLeaf ks us) (fun _ _ _ _ => none) id e 0 := by
+  induction e <;> (rw [Expr.instLevelParamsP, rwP]; simp_all [ilpLeaf])
+
+theorem targetAbsP_rw (names : List Name) (lvls : List Level) (holes : List Expr) (e : Expr) :
+    Expr.targetAbsP names lvls holes e =
+      rwP (fun _ _ => false) (taLeaf names lvls holes) (fun e _ _ _ => some e) id e 0 := by
+  induction e <;> (rw [Expr.targetAbsP, rwP]; simp_all [taLeaf])
+
+
+/-! ## The memoised substitution walks (the replacements) -/
+
+def liftLooseBVarsM (amount : Nat) (e : Expr) (c : Nat) : Expr :=
+  (rwM (fun e c => decide (e.bvarB ≤ c)) (liftLeaf amount) (fun e _ _ _ => some e) Nat.succ (.leaf []) e c).1
+def instantiate1M (v e : Expr) (d : Nat) : Expr :=
+  (rwM (fun e c => decide (e.bvarB ≤ c)) (inst1Leaf v) (fun e _ _ _ => some e) Nat.succ (.leaf []) e d).1
+def instantiateLiftM (vs : Array Expr) (e : Expr) (d : Nat) : Expr :=
+  (rwM (fun e c => decide (e.bvarB ≤ c)) (instLiftLeaf vs) (fun e _ _ _ => some e) Nat.succ (.leaf []) e d).1
+def abstract1M (d : Nat) (e : Expr) (k : Nat) : Expr :=
+  (rwM (fun e _ => decide (e.fvarB ≤ d)) (fun e _ => e)
+    (fun e idx _ k => some (if idx = d then Expr.mkBvar k else e)) Nat.succ (.leaf []) e k).1
+def abstractRangeM (d k : Nat) (e : Expr) (c : Nat) : Expr :=
+  (rwM (fun e _ => decide (e.fvarB ≤ d)) (fun e _ => e)
+    (fun e idx _ c => some (if d ≤ idx ∧ idx < d + k then Expr.mkBvar (c + (d + k - 1 - idx)) else e))
+    Nat.succ (.leaf []) e c).1
+def replaceFVarsM (f : Nat → Option Expr) (e : Expr) : Expr :=
+  (rwM (fun e _ => e.fvarB == 0) (fun e _ => e)
+    (fun _ idx ty _ => some ((f idx).getD (.fvar idx ty))) id (.leaf []) e 0).1
+def instLevelParamsM (ks : List Name) (us : List Level) (e : Expr) : Expr :=
+  (rwM (fun e _ => !e.hasLP) (ilpLeaf ks us) (fun _ _ _ _ => none) id (.leaf []) e 0).1
+def targetAbsM (names : List Name) (lvls : List Level) (holes : List Expr) (e : Expr) : Expr :=
+  (rwM (fun _ _ => false) (taLeaf names lvls holes) (fun e _ _ _ => some e) id (.leaf []) e 0).1
+
+theorem liftLooseBVarsP_eq_M (amount : Nat) (e : Expr) (c : Nat) :
+    Expr.liftLooseBVarsP amount e c = liftLooseBVarsM amount e c := by
+  rw [liftLooseBVarsP_rw, liftLooseBVarsM, rwM_eq]
+theorem instantiate1P_eq_M (v e : Expr) (d : Nat) :
+    Expr.instantiate1P v e d = instantiate1M v e d := by
+  rw [instantiate1P_rw, instantiate1M, rwM_eq]
+theorem instantiateLiftP_eq_M (vs : Array Expr) (e : Expr) (d : Nat) :
+    Expr.instantiateLiftP vs e d = instantiateLiftM vs e d := by
+  rw [instantiateLiftP_rw, instantiateLiftM, rwM_eq]
+theorem abstract1P_eq_M (d : Nat) (e : Expr) (k : Nat) :
+    Expr.abstract1P d e k = abstract1M d e k := by
+  rw [abstract1P_rw, abstract1M, rwM_eq]
+theorem abstractRangeP_eq_M (d k : Nat) (e : Expr) (c : Nat) :
+    Expr.abstractRangeP d k e c = abstractRangeM d k e c := by
+  rw [abstractRangeP_rw, abstractRangeM, rwM_eq]
+theorem replaceFVarsP_eq_M (f : Nat → Option Expr) (e : Expr) :
+    Expr.replaceFVarsP f e = replaceFVarsM f e := by
+  rw [replaceFVarsP_rw, replaceFVarsM, rwM_eq]
+theorem instLevelParamsP_eq_M (ks : List Name) (us : List Level) (e : Expr) :
+    Expr.instLevelParamsP ks us e = instLevelParamsM ks us e := by
+  rw [instLevelParamsP_rw, instLevelParamsM, rwM_eq]
+theorem targetAbsP_eq_M (names : List Name) (lvls : List Level) (holes : List Expr) (e : Expr) :
+    Expr.targetAbsP names lvls holes e = targetAbsM names lvls holes e := by
+  rw [targetAbsP_rw, targetAbsM, rwM_eq]
+end ConPastel.Impl
+
+namespace ConPastel.Leche
+cake_datatype (ConPastel.Impl.ExprMemo (Nat × ConLeche.Expr))
+end ConPastel.Leche
+
+cake_replace ConLeche.Expr.liftLooseBVarsP ConPastel.Impl.liftLooseBVarsM ConPastel.Impl.liftLooseBVarsP_eq_M
+cake_replace ConLeche.Expr.instantiate1P ConPastel.Impl.instantiate1M ConPastel.Impl.instantiate1P_eq_M
+cake_replace ConLeche.Expr.instantiateLiftP ConPastel.Impl.instantiateLiftM ConPastel.Impl.instantiateLiftP_eq_M
+cake_replace ConLeche.Expr.abstract1P ConPastel.Impl.abstract1M ConPastel.Impl.abstract1P_eq_M
+cake_replace ConLeche.Expr.abstractRangeP ConPastel.Impl.abstractRangeM ConPastel.Impl.abstractRangeP_eq_M
+cake_replace ConLeche.Expr.replaceFVarsP ConPastel.Impl.replaceFVarsM ConPastel.Impl.replaceFVarsP_eq_M
+cake_replace ConLeche.Expr.instLevelParamsP ConPastel.Impl.instLevelParamsM ConPastel.Impl.instLevelParamsP_eq_M
+cake_replace ConLeche.Expr.targetAbsP ConPastel.Impl.targetAbsM ConPastel.Impl.targetAbsP_eq_M
