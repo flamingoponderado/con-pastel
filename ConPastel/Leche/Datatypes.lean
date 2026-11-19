@@ -291,4 +291,12 @@ cake_datatype (Std.Legacy.Range)
 cake_datatype (ForInStep (Std.HashMap Nat Nat))
 cake_datatype (Option (Std.DHashMap.Internal.AssocList Nat fun (x : Nat) => Nat))
 
+-- the interning parse (`ConPastel.Leche.Intern`): the parse state with its intern table
+cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool × ByteArray × Nat × Nat))
+cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool))
+cake_datatype (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool ⊕ ConLeche.Frontend.RecordVerdict)
+cake_datatype (Except String (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool ⊕ ConLeche.Frontend.RecordVerdict))
+cake_datatype (Except String (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool))
+cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool × Nat × USize))
+
 end ConPastel.Leche
