@@ -268,11 +268,206 @@ theorem chunkFinishI_eq (st : StateD) (it : ITab) (carry : ByteArray) (lineNo : 
     cases applyFinalLineI st it carry 0 lineNo <;> cases applyFinalLine st carry 0 lineNo <;>
       simp [Except.map] <;> intro h <;> subst h <;> rfl
 
+/-! ### The line loop on the unread list
+
+`scanLineSpec b i` reads the line at `i` off `tailAt b i`, the array's bytes
+from `i`: in the translation an array is a list, so that is a walk of the
+whole input per line. `feedChunkL` scans each line on the previous line's
+rest instead (the naive scanner's own continuation), and is proved equal to
+`feedChunkI` through con-leche's position lemmas (`tailAt_posAt`). -/
+
+theorem naiveLine_suffix (l : List UInt8) : (naiveLine l).rest <:+ l := by
+  unfold naiveLine
+  have hd := List.dropWhile_suffix (l := l) (p := isWs)
+  split
+  · rename_i rest h; rw [h] at hd; exact (List.suffix_cons _ _).trans hd
+  · simp [NRes.rest]
+  · rename_i l' h
+    split
+    · rename_i t r h2; simp only [NRes.rest]
+      have := NRes.suffix_of_err h2 (naiveLineLoop_rest_suffix _ _ _ _)
+      rw [h] at hd; exact this.trans ((List.suffix_cons _ _).trans hd)
+    · rename_i r l2 h2
+      have h3 : l2 <:+ l' := NRes.suffix_of_ok h2 (naiveLineLoop_rest_suffix _ _ _ _)
+      have h4 : l2 <:+ l := h3.trans ((List.suffix_cons _ _).trans (h ▸ hd))
+      have hd2 := List.dropWhile_suffix (l := l2) (p := isWs)
+      split
+      · rename_i rest h5; rw [h5] at hd2; exact ((List.suffix_cons _ _).trans hd2).trans h4
+      · simp [NRes.rest]
+      · simp only [NRes.rest]; exact hd2.trans h4
+  · simp only [NRes.rest]; exact hd
+
+theorem naiveLine_some_lt {l rest x : List UInt8} {r : LineRec}
+    (h : naiveLine l = .ok (r, some x) rest) : rest.length < l.length := by
+  unfold naiveLine at h
+  have hd := (List.dropWhile_suffix (l := l) (p := isWs)).length_le
+  split at h
+  · rename_i rest' h1; cases h; rw [h1] at hd; simp at hd; omega
+  · cases h
+  · rename_i l' h1
+    split at h
+    · cases h
+    · rename_i r' l2 h2
+      have h3 := (NRes.suffix_of_ok h2 (naiveLineLoop_rest_suffix _ _ _ _)).length_le
+      have hd2 := (List.dropWhile_suffix (l := l2) (p := isWs)).length_le
+      split at h
+      · rename_i rest' h5; cases h; rw [h5] at hd2; rw [h1] at hd; simp at hd hd2; omega
+      · cases h
+      · cases h
+  · cases h
+
+/-- `feedChunkI` on the unread input `tl` itself: each line's scan continues
+on the previous one's rest, instead of re-reading the array from the line's
+position (`tailAt`, a walk of the whole input per line in the translation,
+where an array is a list). The position is only computed for an error. -/
+def feedChunkL (st : StateD) (it : ITab) (b : ByteArray) (tl : List UInt8) (lineNo : Nat) :
+    Except (CheckError × Nat) (StateD × ITab × Nat × List UInt8) :=
+  match tl with
+  | [] => .ok (st, it, lineNo, [])
+  | c :: cs =>
+    match naiveLine (c :: cs) with
+    | .err t rest =>
+      if newlineFrom b ((bytes b).length - (c :: cs).length).toUSize then
+        .error (.internal (ScanErr.render ⟨(c :: cs).length - rest.length, t⟩), lineNo + 1)
+      else .ok (st, it, lineNo, c :: cs)
+    | .ok (_, none) _ => .ok (st, it, lineNo, c :: cs)
+    | .ok (r, some _) rest =>
+      match applyLineI st it r lineNo with
+      | .error msg => .error (.internal msg, lineNo + 1)
+      | .ok (.inr v) => .error (v.toError, lineNo + 1)
+      | .ok (.inl (st, it)) =>
+        if _h : rest.length < (c :: cs).length then feedChunkL st it b rest (lineNo + 1)
+        else .error (.internal "the line scanner made no progress", lineNo + 1)
+termination_by tl.length
+
+/-- A chunk result's position, read as the unread input there. -/
+def tailF (b : ByteArray) : StateD × ITab × Nat × USize → StateD × ITab × Nat × List UInt8
+  | (st, it, n, j) => (st, it, n, tailAt b j)
+
+theorem feedChunkL_eq (st : StateD) (it : ITab) (b : ByteArray) (i : USize) (lineNo : Nat)
+    (hi : i.toNat ≤ (bytes b).length) :
+    feedChunkL st it b (tailAt b i) lineNo = (feedChunkI st it b i lineNo).map (tailF b) := by
+  rw [feedChunkI]
+  by_cases hlt : i < b.usize
+  · rw [dif_pos hlt]
+    have hne : tailAt b i ≠ [] := by
+      intro h; have := congrArg List.length h
+      simp only [length_tailAt, List.length_nil] at this
+      have := USize.lt_iff_toNat_lt.mp hlt; omega
+    obtain ⟨c, cs, hcs⟩ := List.exists_cons_of_ne_nil hne
+    have hsuf := naiveLine_suffix (tailAt b i)
+    have hlt' : ∀ {r : LineRec} {x rest : List UInt8},
+        naiveLine (tailAt b i) = .ok (r, some x) rest → rest.length < (tailAt b i).length :=
+      fun h => naiveLine_some_lt h
+    rw [hcs] at hsuf hlt' ⊢
+    rw [feedChunkL]
+    simp only [scanLineSpec, hcs]
+    rcases hn : naiveLine (c :: cs) with ⟨⟨r, _ | x⟩, rest⟩ | ⟨t, rest⟩
+    · simp [Except.map, tailF, hcs]
+    · have hrs : rest <:+ tailAt b i := by rw [hcs]; rw [hn] at hsuf; exact hsuf
+      have hl : rest.length < (c :: cs).length := hlt' hn
+      have h1 := toNat_toUSize_posAt hi hrs
+      have h2 := posAt_le hi hrs
+      have htl := tailAt_posAt hi hrs
+      rw [hcs] at h1 h2 htl
+      have hj0 : (posAt i.toNat (c :: cs) rest).toUSize ≠ 0 := by
+        intro h0; rw [h0] at h1; simp only [USize.toNat_zero, posAt] at h1; omega
+      have hij : i < (posAt i.toNat (c :: cs) rest).toUSize := by
+        rw [USize.lt_iff_toNat_lt, h1]; simp only [posAt]; omega
+      have hj0' : USize.ofNat (posAt i.toNat (c :: cs) rest) ≠ 0 := hj0
+      have hj0b : ((posAt i.toNat (c :: cs) rest).toUSize == 0) = false := by simpa using hj0
+      have hij' : i < USize.ofNat (posAt i.toNat (c :: cs) rest) := hij
+      rcases ha : applyLineI st it r lineNo with msg | ⟨⟨st', it'⟩ | v⟩
+      · simp [Except.map, hj0', hj0b, ha]
+      · simp only [ha, dif_pos hl, hij, hij', hj0', hj0b, if_true, if_false, dite_true, Bool.false_eq_true]
+        have hle : (posAt i.toNat (c :: cs) rest).toUSize.toNat ≤ (bytes b).length := by
+          rw [h1]; exact h2
+        rw [← feedChunkL_eq st' it' b _ (lineNo + 1) hle, htl]
+      · simp [Except.map, hj0', hj0b, ha]
+    · have hpos : ((bytes b).length - (c :: cs).length).toUSize = i := by
+        rw [← hcs, length_tailAt, length_bytes]
+        have := USize.lt_iff_toNat_lt.mp hlt
+        rw [show b.usize.toNat - (b.usize.toNat - i.toNat) = i.toNat by omega]
+        exact USize.ofNat_toNat
+      rw [hpos]
+      by_cases hnl : newlineFrom b i = true
+      · simp only [hnl, if_true, Except.map, posAt]
+        congr 5; omega
+      · simp [hnl, Except.map, tailF, hcs]
+  · rw [dif_neg hlt, tailAt_of_not_lt hlt, feedChunkL]
+    simp [Except.map, tailF, tailAt_of_not_lt hlt]
+termination_by b.size - i.toNat
+decreasing_by
+  exact Nat.sub_lt_sub_left (usizeInBounds b i hlt) (USize.lt_iff_toNat_lt.mp hij)
+
+theorem feedChunkI_le (st : StateD) (it : ITab) (b : ByteArray) (i : USize) (lineNo : Nat)
+    (hi : i.toNat ≤ (bytes b).length) :
+    ∀ x, feedChunkI st it b i lineNo = .ok x → x.2.2.2.toNat ≤ (bytes b).length := by
+  intro x hx
+  rw [feedChunkI] at hx
+  by_cases hlt : i < b.usize
+  · rw [dif_pos hlt] at hx
+    simp only [scanLineSpec] at hx
+    have hsuf := naiveLine_suffix (tailAt b i)
+    rcases hn : naiveLine (tailAt b i) with ⟨⟨r, _ | y⟩, rest⟩ | ⟨t, rest⟩ <;> rw [hn] at hx
+    · simp at hx; rw [← hx]; exact hi
+    · have hrs : rest <:+ tailAt b i := by rw [hn] at hsuf; exact hsuf
+      have h1 := toNat_toUSize_posAt hi hrs
+      have h2 := posAt_le hi hrs
+      simp only at hx
+      split at hx
+      · cases hx; exact hi
+      · split at hx
+        · cases hx
+        · cases hx
+        · by_cases hij : i < (posAt i.toNat (tailAt b i) rest).toUSize
+          · rw [dif_pos hij] at hx
+            have hle : (posAt i.toNat (tailAt b i) rest).toUSize.toNat ≤ (bytes b).length := by
+              rw [h1]; exact h2
+            exact feedChunkI_le _ _ b _ (lineNo + 1) hle x hx
+          · rw [dif_neg hij] at hx; cases hx
+    · simp only at hx; split at hx
+      · cases hx
+      · cases hx; exact hi
+  · rw [dif_neg hlt] at hx; cases hx; exact hi
+termination_by b.size - i.toNat
+decreasing_by
+  exact Nat.sub_lt_sub_left (usizeInBounds b i hlt) (USize.lt_iff_toNat_lt.mp hij)
+
+/-- `chunkStepI` with the list-carrying line loop. -/
+def chunkStepL (st : StateD) (it : ITab) (carry : ByteArray) (lineNo total : Nat) (buf0 : ByteArray) :
+    Except (CheckError × Nat) (StateD × ITab × ByteArray × Nat × Nat) :=
+  if total + buf0.size ≥ USize.size then .error sizeError
+  else
+    let buf := if carry.isEmpty then buf0 else carry ++ buf0
+    match feedChunkL st it buf (bytes buf) lineNo with
+    | .error e => .error e
+    | .ok (st, it, lineNo, tl) =>
+      .ok (st, it, buf.extract ((bytes buf).length - tl.length) buf.size, lineNo, total + buf0.size)
+
+theorem chunkStepL_eq (st : StateD) (it : ITab) (carry : ByteArray) (lineNo total : Nat)
+    (buf0 : ByteArray) :
+    chunkStepL st it carry lineNo total buf0 = chunkStepI st it carry lineNo total buf0 := by
+  simp only [chunkStepL, chunkStepI]
+  split
+  · rfl
+  · generalize (if carry.isEmpty then buf0 else carry ++ buf0) = buf
+    have h0 : (0 : USize).toNat ≤ (bytes buf).length := by simp
+    have hb : bytes buf = tailAt buf 0 := by simp [tailAt]
+    have hle := feedChunkI_le st it buf 0 lineNo h0
+    rw [hb, feedChunkL_eq st it buf 0 lineNo h0]
+    rcases hf : feedChunkI st it buf 0 lineNo with e | ⟨st', it', n, j⟩
+    · rfl
+    · have hj := hle _ hf
+      simp only [Except.map, tailF, length_tailAt, ← hb]
+      simp only [length_bytes] at hj
+      rw [show (bytes buf).length - (buf.usize.toNat - j.toNat) = j.toNat by
+        simp only [length_bytes]; omega]
 def parseChunksGoI (st : StateD) (it : ITab) (carry : ByteArray) (lineNo total : Nat) :
     List ByteArray → Except (CheckError × Nat) ParseResultD
   | [] => chunkFinishI st it carry lineNo
   | c :: cs =>
-    match chunkStepI st it carry lineNo total c with
+    match chunkStepL st it carry lineNo total c with
     | .error e => .error e
     | .ok (st, it, carry, lineNo, total) => parseChunksGoI st it carry lineNo total cs
 
@@ -282,8 +477,9 @@ theorem parseChunksGoI_eq (st : StateD) (it : ITab) (carry : ByteArray) (lineNo 
   | c :: cs => by
     simp only [parseChunksGoI, parseChunks.go]
     have h := chunkStepI_eq st it carry lineNo total c
+    rw [← chunkStepL_eq] at h
     revert h
-    cases chunkStepI st it carry lineNo total c with
+    cases chunkStepL st it carry lineNo total c with
     | error e => cases chunkStep st carry lineNo total c <;> simp [Except.map] <;> intro h <;> subst h <;> rfl
     | ok x =>
       cases chunkStep st carry lineNo total c with
