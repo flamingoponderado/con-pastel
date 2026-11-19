@@ -52,22 +52,93 @@ theorem literalEqB_sound {a b : Literal} (h : literalEqB a b = true) : a = b := 
 theorem data_ne {a b : Expr} (h : (a.data == b.data) = false) : a ≠ b := by
   intro e; subst e; simp at h
 
-/-- The pointer test at `Expr`: equal hashes, then CakeML's `=` (a complete
-decision, so the continuation is never needed); unequal hashes decide. -/
+/-! ### Equality on deep terms
+
+CakeML's `=` returns at once on identical pointers, but on two equal terms
+built separately it walks the whole *tree*: exponential in the depth of a
+DAG.  So `=` runs only on shallow terms (`depthP ≤ eqSmall`, whose trees are
+small); a deep pair goes through con-leche's own memoised descent
+(`Expr.beqDec`), whose child step (`enterBeqD` below) applies the same gate.
+The descent's memo entries are verified by `=` against the stored pair: both
+sides of such a test are nodes of the same term. -/
+
+/-- The depth up to which CakeML's `=` decides expression equality. -/
+def eqSmall : Nat := 8
+
+/-- Expression equality as the pointer tests run it: the cached words, then
+`=` on a shallow pair and the memoised descent on a deep one. -/
+def exprEqD (a b : Expr) : Bool :=
+  a.data == b.data && (if a.depthP ≤ eqSmall then exprEqB a b else @decide (a = b) (Expr.beqDec a b))
+
+theorem exprEqD_iff (a b : Expr) : exprEqD a b = true ↔ a = b := by
+  unfold exprEqD
+  constructor
+  · intro h
+    simp only [Bool.and_eq_true] at h
+    obtain ⟨_, h⟩ := h
+    by_cases hs : a.depthP ≤ eqSmall
+    · rw [if_pos hs] at h; exact exprEqB_sound h
+    · rw [if_neg hs] at h; exact @of_decide_eq_true _ (Expr.beqDec a b) h
+  · intro e; subst e
+    simp only [beq_self_eq_true, Bool.true_and]
+    by_cases hs : a.depthP ≤ eqSmall
+    · rw [if_pos hs]; simp [exprEqB]
+    · rw [if_neg hs]; simp
+
+/-- The pointer test at `Expr`: the depth-gated equality (a complete
+decision, so the continuation is never needed). -/
 theorem ptrDecEq_expr (a b : Expr) (k : Unit → Decidable (a = b)) :
     ConLeche.ptrDecEq a b k =
-      if hh : (a.data == b.data) = true then
-        (if h : exprEqB a b = true then isTrue (exprEqB_sound h)
-         else isFalse (fun e => h (by subst e; exact decide_eq_true rfl)))
-      else isFalse (data_ne (by simpa using hh)) :=
+      if h : exprEqD a b = true then isTrue ((exprEqD_iff a b).mp h)
+      else isFalse (fun e => h ((exprEqD_iff a b).mpr e)) :=
   Subsingleton.elim _ _
 
 theorem withPtrEq_expr (a b : Expr) (k : Unit → Bool) (h : a = b → k () = true) :
-    withPtrEq a b k h = ((a.data == b.data && exprEqB a b) || k ()) := by
+    withPtrEq a b k h = (exprEqD a b || k ()) := by
   show k () = _
-  by_cases he : exprEqB a b = true
-  · rw [h (exprEqB_sound he)]; simp
+  by_cases he : exprEqD a b = true
+  · rw [h ((exprEqD_iff a b).mp he)]; simp
   · simp [he]
+
+/-- `probeHit` with the stored pair verified by CakeML's `=`. -/
+def probeHitD (m : Expr.BeqMap) (key : Nat) (pa pb : USize) (a b : Expr) :
+    { h : Bool // h = true → a = b } :=
+  let p := m.getD key Expr.EqPair.dflt
+  if p.pa == pa && p.pb == pb then
+    if h1 : exprEqB p.fst a = true then
+      if h2 : exprEqB p.snd b = true then
+        ⟨true, fun _ => (exprEqB_sound h1).symm.trans (p.eq.trans (exprEqB_sound h2))⟩
+      else ⟨false, fun h => Bool.noConfusion h⟩
+    else ⟨false, fun h => Bool.noConfusion h⟩
+  else ⟨false, fun h => Bool.noConfusion h⟩
+
+/-- The child step of con-leche's memoised descent (`Expr.enterBeq`), with
+identity read as above: the cached words, `=` on a shallow pair, and on a deep
+one the memo probe and the descent.  (con-leche's own step reads an address
+match as identity; here an address is the hash, so that would be `=` on every
+equal pair.) -/
+def enterBeqD (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
+    Expr.BeqOutX a b :=
+  if h : a.data != b.data then .no (fun e => by subst e; simp at h)
+  else if a.depthP ≤ eqSmall then
+    .mk (if h : exprEqB a b = true then isTrue (exprEqB_sound h)
+         else isFalse (fun e => h (by subst e; exact decide_eq_true rfl))) st
+  else if !Expr.beqRecursive a then rec st
+  else
+    let pa := a.data.toUSize
+    let pb := b.data.toUSize
+    let hit : { h : Bool // h = true → a = b } :=
+      match st.1 with
+      | .table m => probeHitD m (Expr.beqKey pa pb) pa pb a b
+      | _ => ⟨false, fun h => Bool.noConfusion h⟩
+    if hh : hit.1 then .yes st (hit.2 hh)
+    else Squash.lift (rec st) fun r =>
+      if h : r.1.ok then
+        .yes ⟨r.1.recordEq a b pa pb (r.2.mp h), Expr.BeqSt.record_ok ..⟩ (r.2.mp h)
+      else Quot.mk _ r
+
+theorem enterBeq_eq_D (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
+    Expr.enterBeq st a b rec = enterBeqD st a b rec := Subsingleton.elim _ _
 
 theorem withAddr_expr {β : Type v} [Subsingleton β] (a : Expr) (k : USize → β) :
     ConLeche.Expr.withAddr a k = k a.data.toUSize :=
@@ -170,6 +241,7 @@ cake_rewrite ConPastel.Impl.withAddr_expr
 
 cake_replace ConLeche.Expr.decEq ConLeche.Expr.decEqPtr ConPastel.Impl.expr_decEq_eq
 cake_replace ConLeche.Expr.beq ConLeche.Expr.beqMemo ConPastel.Impl.expr_beq_eq
+cake_replace ConLeche.Expr.enterBeq ConPastel.Impl.enterBeqD ConPastel.Impl.enterBeq_eq_D
 cake_replace ConLeche.Expr.looseBVarsBounded ConLeche.Expr.looseBVarsBoundedFast
   ConPastel.Impl.looseBVarsBounded_eq_fast
 cake_replace ConLeche.Expr.hasFvar ConLeche.Expr.hasFvarFast ConPastel.Impl.hasFvar_eq_fast
