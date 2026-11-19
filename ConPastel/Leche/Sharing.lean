@@ -1192,6 +1192,59 @@ theorem instLevelParamsP_eq_M (ks : List Name) (us : List Level) (e : Expr) :
 theorem targetAbsP_eq_M (names : List Name) (lvls : List Level) (holes : List Expr) (e : Expr) :
     Expr.targetAbsP names lvls holes e = targetAbsM names lvls holes e := by
   rw [targetAbsP_rw, targetAbsM, rwM_eq]
+
+/-! The simultaneous substitutions. Their leaf re-enters the plain walk on a
+substituted value (with a smaller count); only the outer walk is memoised. -/
+def instListLeaf (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) : Expr :=
+  match e with
+  | .bvar i .. =>
+    if i < d then e
+    else if i - d < k then
+      if h : i - d < vs.size then
+        let w := vs[i - d]
+        if i - d = 0 || w.bvarB ≤ d then w
+        else Expr.instantiateListP vs w (i - d) d
+      else e
+    else Expr.mkBvar (i - k)
+  | _ => e
+def instRevLeaf (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) : Expr :=
+  match e with
+  | .bvar i .. =>
+    if i < d then e
+    else if i - d < k then
+      if h : i - d < vs.size then
+        let w := vs[vs.size - 1 - (i - d)]'(by omega)
+        if i - d = 0 || w.bvarB ≤ d then w
+        else Expr.instantiateRevP vs w (i - d) d
+      else e
+    else Expr.mkBvar (i - k)
+  | _ => e
+
+theorem instantiateListP_rw (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) :
+    Expr.instantiateListP vs e k d =
+      rwP (fun e c => k == 0 || decide (e.bvarB ≤ c)) (instListLeaf vs k) (fun e _ _ _ => some e)
+        Nat.succ e d := by
+  induction e generalizing d <;> (rw [Expr.instantiateListP, rwP]; simp_all [instListLeaf]) <;>
+    (split <;> simp_all)
+theorem instantiateRevP_rw (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) :
+    Expr.instantiateRevP vs e k d =
+      rwP (fun e c => k == 0 || decide (e.bvarB ≤ c)) (instRevLeaf vs k) (fun e _ _ _ => some e)
+        Nat.succ e d := by
+  induction e generalizing d <;> (rw [Expr.instantiateRevP, rwP]; simp_all [instRevLeaf]) <;>
+    (split <;> simp_all)
+
+def instantiateListM (vs : Array Expr) (e : Expr) (k d : Nat) : Expr :=
+  (rwM (fun e c => k == 0 || decide (e.bvarB ≤ c)) (instListLeaf vs k) (fun e _ _ _ => some e)
+    Nat.succ (.leaf []) e d).1
+def instantiateRevM (vs : Array Expr) (e : Expr) (k d : Nat) : Expr :=
+  (rwM (fun e c => k == 0 || decide (e.bvarB ≤ c)) (instRevLeaf vs k) (fun e _ _ _ => some e)
+    Nat.succ (.leaf []) e d).1
+theorem instantiateListP_eq_M (vs : Array Expr) (e : Expr) (k d : Nat) :
+    Expr.instantiateListP vs e k d = instantiateListM vs e k d := by
+  rw [instantiateListP_rw, instantiateListM, rwM_eq]
+theorem instantiateRevP_eq_M (vs : Array Expr) (e : Expr) (k d : Nat) :
+    Expr.instantiateRevP vs e k d = instantiateRevM vs e k d := by
+  rw [instantiateRevP_rw, instantiateRevM, rwM_eq]
 end ConPastel.Impl
 
 namespace ConPastel.Leche
@@ -1206,3 +1259,5 @@ cake_replace ConLeche.Expr.abstractRangeP ConPastel.Impl.abstractRangeM ConPaste
 cake_replace ConLeche.Expr.replaceFVarsP ConPastel.Impl.replaceFVarsM ConPastel.Impl.replaceFVarsP_eq_M
 cake_replace ConLeche.Expr.instLevelParamsP ConPastel.Impl.instLevelParamsM ConPastel.Impl.instLevelParamsP_eq_M
 cake_replace ConLeche.Expr.targetAbsP ConPastel.Impl.targetAbsM ConPastel.Impl.targetAbsP_eq_M
+cake_replace ConLeche.Expr.instantiateListP ConPastel.Impl.instantiateListM ConPastel.Impl.instantiateListP_eq_M
+cake_replace ConLeche.Expr.instantiateRevP ConPastel.Impl.instantiateRevM ConPastel.Impl.instantiateRevP_eq_M
