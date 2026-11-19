@@ -289,7 +289,7 @@ def key (e : Expr) : Nat := (e.data.toNat / 4294967296) % 65536
 
 def findL (e : Expr) : List (Expr × α) → Option α
   | [] => none
-  | (x, v) :: t => if x.data == e.data && exprEqB x e then some v else findL e t
+  | (x, v) :: t => if exprEqD x e then some v else findL e t
 
 /-- The value stored for (a node equal to) `e`: the data words first, then
 CakeML's `=` (at once on the same pointer). -/
@@ -319,7 +319,7 @@ theorem findL_sound {P : Expr → α → Prop} {e : Expr} :
   | (x, w) :: t, v, hl, h => by
     simp only [findL] at h
     split at h
-    · rename_i hx; cases h; have := exprEqB_sound (Bool.and_eq_true _ _ ▸ hx).2; subst this
+    · rename_i hx; cases h; have := (exprEqD_iff x e).mp hx; subst this
       exact hl (x, _) (by simp)
     · exact findL_sound (fun p hp => hl p (by simp [hp])) h
 
@@ -973,7 +973,7 @@ abbrev RMemo := ExprMemo (Nat × Expr)
 
 def findC (e : Expr) (c : Nat) : List (Expr × Nat × Expr) → Option Expr
   | [] => none
-  | (x, c', r) :: t => if x.data == e.data && c' == c && exprEqB x e then some r else findC e c t
+  | (x, c', r) :: t => if c' == c && exprEqD x e then some r else findC e c t
 
 def RMemo.find? (e : Expr) (c : Nat) : RMemo → Nat → Option Expr
   | .leaf l, _ => findC e c l
@@ -987,8 +987,8 @@ theorem findC_sound {P : Expr → Nat × Expr → Prop} {e : Expr} {c : Nat} :
     split at h
     · rename_i hx; cases h
       simp only [Bool.and_eq_true, beq_iff_eq] at hx
-      obtain ⟨⟨_, hc⟩, he⟩ := hx
-      have := exprEqB_sound he; subst this; subst hc
+      obtain ⟨hc, he⟩ := hx
+      have := (exprEqD_iff x e).mp he; subst this; subst hc
       exact hl (x, c', _) (by simp)
     · exact findC_sound (fun p hp => hl p (by simp [hp])) h
 
@@ -1464,7 +1464,7 @@ abbrev BMemo := ExprMemo (Nat × Bool)
 
 def findCB (e : Expr) (c : Nat) : List (Expr × Nat × Bool) → Option Bool
   | [] => none
-  | (x, c', r) :: t => if x.data == e.data && c' == c && exprEqB x e then some r else findCB e c t
+  | (x, c', r) :: t => if c' == c && exprEqD x e then some r else findCB e c t
 
 def BMemo.find? (e : Expr) (c : Nat) : BMemo → Nat → Option Bool
   | .leaf l, _ => findCB e c l
@@ -1478,8 +1478,8 @@ theorem findCB_sound {P : Expr → Nat × Bool → Prop} {e : Expr} {c : Nat} :
     split at h
     · rename_i hx; cases h
       simp only [Bool.and_eq_true, beq_iff_eq] at hx
-      obtain ⟨⟨_, hc⟩, he⟩ := hx
-      have := exprEqB_sound he; subst this; subst hc
+      obtain ⟨hc, he⟩ := hx
+      have := (exprEqD_iff x e).mp he; subst this; subst hc
       exact hl (x, c', _) (by simp)
     · exact findCB_sound (fun p hp => hl p (by simp [hp])) h
 
