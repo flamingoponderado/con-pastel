@@ -126,7 +126,7 @@ output from a run that exits with code 0 is a verdict:
 | exit code | meaning |
 |---|---|
 | 0 | the output is the verdict |
-| 1, 2 | CakeML ran out of heap or stack before finishing; no verdict. Rerun with a larger `CML_HEAP_SIZE` / `CML_STACK_SIZE` (MiB; defaults are 16384 and 4096). |
+| 1, 2 | CakeML ran out of heap or stack before finishing; no verdict. Rerun with a larger `CML_HEAP_SIZE` / `CML_STACK_SIZE` (MiB; defaults are 4096 and 4096). |
 | 3 | the runtime could not allocate the heap and stack |
 | 4 | an FFI failure (an I/O error) |
 

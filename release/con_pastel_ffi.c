@@ -14,11 +14,12 @@
     FFI failure: the process stops with exit code 4.
 
   The program only calls `read` and `write`. The runtime part (heap/stack
-  allocation, `cml_exit`, `cml_err`, `main`) follows CakeML's basis_ffi.c
+  allocation, here mapped on huge pages, `cml_exit`, `cml_err`, `main`) follows CakeML's basis_ffi.c
   (CakeML release v3479), without the basis library's FFI functions.
 */
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -94,19 +95,29 @@ static unsigned long env_mib(const char *name, unsigned long dflt) {
 int main(int argc, char **argv) {
   (void)argc; (void)argv;
   const unsigned long mib = 1024UL * 1024UL;
-  /* defaults: 16 GiB heap, 4 GiB stack (con-leche's data is large) */
-  unsigned long heap_sz = env_mib("CML_HEAP_SIZE", 16384) * mib;
+  /* defaults: 4 GiB heap, 4 GiB stack. The copying collector first runs
+     when the heap is full, so every run touches the whole heap: a larger
+     default costs memory and page faults on every input. */
+  unsigned long heap_sz = env_mib("CML_HEAP_SIZE", 4096) * mib;
   unsigned long stack_sz = env_mib("CML_STACK_SIZE", 4096) * mib;
   if (heap_sz < mib || stack_sz < mib) {
     fprintf(stderr, "con-pastel: heap and stack must be at least 1 MiB each\n");
     exit(3);
   }
   /* Layout expected by CakeML: |--- heap ---||--- stack ---| */
-  cml_heap = malloc(heap_sz + stack_sz);
-  if (cml_heap == NULL) {
-    perror("con-pastel: malloc");
+  /* Mapped on a 2 MiB boundary and marked for transparent huge pages:
+     the heap is touched for the first time as the program allocates, and
+     with 4 KiB pages those first-touch faults dominate short runs. */
+  const unsigned long huge = 2 * mib;
+  unsigned long total = heap_sz + stack_sz;
+  char *raw = mmap(NULL, total + huge, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (raw == MAP_FAILED) {
+    perror("con-pastel: mmap");
     exit(3);
   }
+  cml_heap = (void *)(((unsigned long)raw + huge - 1) & ~(huge - 1));
+  madvise(cml_heap, total, MADV_HUGEPAGE);
   cml_stack = (char *)cml_heap + heap_sz;
   cml_stackend = (char *)cml_stack + stack_sz;
   cml_main();
