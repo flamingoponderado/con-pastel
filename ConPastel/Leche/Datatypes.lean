@@ -150,6 +150,9 @@ cake_datatype (ConPastel.Leche.Blob.Ref)
 cake_datatype (ConPastel.Leche.Blob.Ent)
 cake_datatype (ConPastel.Leche.Blob.Obj)
 cake_datatype (Option ConPastel.Leche.Blob.Obj)
+cake_datatype (ConPastel.Leche.Blob.Tab)
+-- decode through the position trie (linear-log, not quadratic)
+cake_replace ConPastel.Leche.Blob.decodeBlob ConPastel.Leche.Blob.decodeBlobF ConPastel.Leche.Blob.decodeBlob_eq_F
 
 -- the frontend
 cake_datatype (Except (ConLeche.CheckError × Nat) ConLeche.Frontend.PreludeIx)
