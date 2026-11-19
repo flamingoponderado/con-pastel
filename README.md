@@ -133,27 +133,31 @@ output from a run that exits with code 0 is a verdict:
 CakeML's compiler correctness theorem allows the program to stop early when
 it runs out of resources. It does not allow any other deviation.
 
-> **Performance: slow, and exponential on heavily shared terms.** An empty
-> export (con-leche checks only its built-in prelude) takes about 30 s with
-> a 4 GiB heap (`CML_HEAP_SIZE=4096`). On con-leche's 561 end-to-end
-> fixtures, with a 4 GiB heap and a one-hour limit, 521 give con-leche's
-> verdict (median 104 s) and none gives a different one. Of the other 40:
+> **Performance.** Times below are with a 4 GiB heap
+> (`CML_HEAP_SIZE=4096`) on a shared 32-core machine.
 >
-> * 5 (`nat_size_limit_*`) expect `--max-nat-size=16`. con-pastel always
->   uses con-leche's default limit (128 MiB), at which con-leche accepts
->   them too.
-> * 11 (`tower_*`) hold a deeply shared term (a depth-60 DAG, about 2^60
->   nodes unshared) and run out of heap or time. con-leche stays fast on
->   them by comparing and memoizing terms by pointer (`withPtrEq`,
->   `withPtrAddr`). The translator uses the logical definitions of these
->   functions, which ignore sharing. CakeML has no pointer-equality
->   primitive, so the port walks the unshared tree.
-> * 21 are large exports (265–805 KB, 15–45 times the median fixture)
->   that did not finish within the hour. Passing fixtures of similar size
->   took 20–50 minutes.
-> * 3 are small and not yet explained: `mutual_rec_elim_levels` runs out
->   of a 4 GiB heap; `nat_size_ok` and `eager_open_nat_control` do not
->   finish within the hour.
+> * An empty export (con-leche checks only its built-in prelude) takes
+>   about 1.3 s.
+> * Small end-to-end fixtures take 1.3–6 s; for example
+>   `basis_eq_other_names` 1.4 s, `defeq_binding_pi` 5.7 s.
+> * Of the 13 `tower_*` fixtures (a deeply shared term: a depth-60 DAG,
+>   about 2^60 nodes unshared), 6 finish in 1.4–3.6 s and 7 do not finish
+>   within 10 minutes. con-leche stays fast on such terms by comparing and
+>   memoizing them by pointer (`withPtrEq`, `withPtrAddr`). CakeML has no
+>   pointer test; the port reads identity as "equal hashes, then CakeML's
+>   `=`", and `=` returns at once on identical pointers but walks the
+>   whole tree of two equal terms built separately. Issue #21 tracks the
+>   rest.
+> * 5 fixtures (`nat_size_limit_*`) expect `--max-nat-size=16`.
+>   con-pastel always uses con-leche's default limit (128 MiB), at which
+>   con-leche accepts them too.
+>
+> The last full run over con-leche's 561 end-to-end fixtures predates the
+> sharing work (#18, #25, #26); then 521 gave con-leche's verdict and none
+> gave a different one, 21 large exports (265–805 KB) did not finish
+> within the hour, and 3 small ones were unexplained
+> (`mutual_rec_elim_levels` ran out of heap; `nat_size_ok` and
+> `eager_open_nat_control` did not finish). A new full run is pending.
 
 ### Test
 
