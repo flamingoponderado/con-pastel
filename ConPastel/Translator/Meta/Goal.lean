@@ -716,7 +716,15 @@ partial def solveLet (g : MVarId) (env inv : Expr) (n : Name) (ty v b : Expr) : 
   let opaqueOk ← if n == `z then pure true else withLocalDeclD n ty fun x => do
     let b' := b.instantiate1 x
     if !(← occursInProofOrType b' x.fvarId!) then return true
-    try Meta.check b'; return true catch _ => return false
+    -- bounded: a failing check can unfold for minutes (e.g. the `UInt32`
+    -- arithmetic in `ByteArray.utf8DecodeChar?.assemble₃`); giving up only
+    -- means substituting, as before
+    tryCatchRuntimeEx
+      (withTheReader Core.Context (fun c => { c with maxHeartbeats := 20000 * 1000 }) do
+        Core.withCurrHeartbeats do
+          withTransparency .instances (Meta.check b')
+        return true)
+      fun _ => return false
   unless opaqueOk do
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
     return ← solve g'
