@@ -1,4 +1,4 @@
-import ConPastel.Leche.KernelTypes
+import ConPastel.Leche.Sharing
 
 /-!
 # Kernel dependencies, part: definition unfolding, recursor rules and proof tests

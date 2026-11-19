@@ -710,8 +710,21 @@ partial def solveLet (g : MVarId) (env inv : Expr) (n : Name) (ty v b : Expr) : 
   -- a body that only typechecks with the definition unfolded (proofs about the
   -- bound value, e.g. Lean's own decreasing proofs): substitute
   -- (the solver's own discriminant lets `z` are built to typecheck opaquely)
+  -- (an occurrence in a proposition, e.g. an `if`'s condition `x.1 = true`, is
+  -- fine as long as the body typechecks with `x` opaque: substituting would
+  -- evaluate the bound value at every use)
   let opaqueOk ← if n == `z then pure true else withLocalDeclD n ty fun x => do
-    return !(← occursInProofOrType (b.instantiate1 x) x.fvarId!)
+    let b' := b.instantiate1 x
+    if !(← occursInProofOrType b' x.fvarId!) then return true
+    -- bounded: a failing check can unfold for minutes (e.g. the `UInt32`
+    -- arithmetic in `ByteArray.utf8DecodeChar?.assemble₃`); giving up only
+    -- means substituting, as before
+    tryCatchRuntimeEx
+      (withTheReader Core.Context (fun c => { c with maxHeartbeats := 20000 * 1000 }) do
+        Core.withCurrHeartbeats do
+          withTransparency .instances (Meta.check b')
+        return true)
+      fun _ => return false
   unless opaqueOk do
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv (b.instantiate1 v)])
     return ← solve g'
@@ -902,8 +915,14 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let τ := d.ty
   let dep ← withLocalDeclD `x τ fun x => do
     return (← instantiateMVars (motive.beta #[x])).headBeta.containsFVar x.fvarId!
-  if dep then return ← solveDepCasesNewtype g env inv fn np args τ
+  if dep && inv.isAppOf ``NEWTYPE then return ← solveDepCasesNewtype g env inv fn np args τ
+  -- a dependent motive (e.g. a result type indexed by the scrutinee): `Eval`'s
+  -- predicate is on values only, so the clauses are translated at their own
+  -- instances of the motive, each with the invariant of its own type
+  let invAt (x : Expr) : MetaM Expr := do
+    if dep then invOf (← instantiateMVars (motive.beta #[x])).headBeta else pure inv
   unless major.isFVar do
+    if dep then throwError "dependent casesOn on a non-variable {major}"
     let letT := Expr.letE `z τ major (mkAppN fn (args[:np].toArray ++ #[motive, .bvar 0] ++ alts)) false
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv letT])
     return ← solve g'
@@ -914,7 +933,7 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
   let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invT major, hl, lv.rel]
   let qfun ← withLocalDeclD `x τ fun x => do
-    mkLambdaFVars #[x] (mkApp inv (mkAppN fn (args[:np].toArray ++ #[motive, x] ++ alts)))
+    mkLambdaFVars #[x] (mkApp (← invAt x) (mkAppN fn (args[:np].toArray ++ #[motive, x] ++ alts)))
   let mut lemArgs : Array (Option Expr) := #[some env, some hc, none, some major, some he, some qfun]
   let params := τ.getAppArgs
   let .const _ lvls := τ.getAppFn | unreachable!
@@ -941,7 +960,7 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
         let wList ← mkListLit (mkConst ``Value) (zs.toList ++ ws.toList)
         let envK ← mkAppM ``clauseEnv #[env, nameList, wList]
         let branchT := (mkAppN alts[k]! as).headBeta
-        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envK, bk, mkApp inv branchT])
+        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envK, bk, mkApp (← invAt ctorApp) branchT])
         let saved := (← get).locals
         for i in [0:dataAs.length] do
           let lv : GLVar := { fvar := dataAs[i]!, cname := names[i]!, value := ws[i]!, rel := hws[i]! }

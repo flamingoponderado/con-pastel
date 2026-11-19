@@ -1,4 +1,4 @@
-import ConPastel.Leche.KernelTypes
+import ConPastel.Leche.Sharing
 
 /-!
 # Kernel dependencies, part: beta peeling and instantiation

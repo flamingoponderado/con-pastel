@@ -22,7 +22,11 @@ namespace ConPastel.Leche
 open ConLeche ConLeche.Cached ConLeche.Frontend in
 -- the units after the block's name are needed by its members but not found by
 -- the dependency pre-pass (each `cake_mutual_part` reports any that are missing)
-cake_mutual_prepare ConLeche.Cached.whnfCoreI
+cake_mutual_prepare ConLeche.Cached.whnfCoreI ConLeche.Expr.beqMemo ConLeche.Expr.hasFvarFast
+  ConLeche.Expr.looseBVarsBoundedFast ConPastel.Impl.mkBvarD
+  ConPastel.Impl.instantiate1M ConPastel.Impl.instantiateLiftM ConPastel.Impl.liftLooseBVarsM
+  ConPastel.Impl.abstract1M ConPastel.Impl.abstractRangeM ConPastel.Impl.instLevelParamsM
+  ConPastel.Impl.instantiateListM ConPastel.Impl.instantiateRevM
   (@BitVec.toNat 64) ConPastel.leanMixHash (@List.instDecidableEqNil ConLeche.Level) Nat.ble
   UInt8.ofNat (@instDecidableEqList ConLeche.Name ConLeche.instDecidableEqName)
 end ConPastel.Leche

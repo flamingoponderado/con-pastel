@@ -1,4 +1,4 @@
-import ConPastel.Leche.KernelTypes
+import ConPastel.Leche.Sharing
 
 /-!
 # Kernel dependencies, part: projection types, free-variable leaves and binder residuals
