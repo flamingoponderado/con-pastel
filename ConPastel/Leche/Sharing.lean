@@ -1193,6 +1193,108 @@ theorem targetAbsP_eq_M (names : List Name) (lvls : List Level) (holes : List Ex
     Expr.targetAbsP names lvls holes e = targetAbsM names lvls holes e := by
   rw [targetAbsP_rw, targetAbsM, rwM_eq]
 
+/-- A copy of `Expr.instantiateListP` that `cake_replace` leaves alone (the memoised
+walk's leaf re-enters it). -/
+def instListPl (vs : Array Expr) (e : Expr) (k : Nat) (d : Nat) : Expr :=
+  if k = 0 then e
+  else if e.bvarB ≤ d then e
+  else
+    match e with
+    | .bvar i .. =>
+      if i < d then e
+      else if _h : i - d < k then
+        if h : i - d < vs.size then
+          let w := vs[i - d]
+          if i - d = 0 || w.bvarB ≤ d then w
+          else instListPl vs w (i - d) d
+        else e
+      else Expr.mkBvar (i - k)
+    | .fvar .. | .sort .. | .const .. | .lit .. => e
+    | .app f a .. => Expr.mkApp (instListPl vs f k d) (instListPl vs a k d)
+    | .lam ty body .. => Expr.mkLam (instListPl vs ty k d) (instListPl vs body k (d + 1))
+    | .forallE ty body .. =>
+      Expr.mkForallE (instListPl vs ty k d) (instListPl vs body k (d + 1))
+    | .letE ty val body .. =>
+      Expr.mkLetE (instListPl vs ty k d) (instListPl vs val k d) (instListPl vs body k (d + 1))
+    | .proj sn i sub .. => Expr.mkProj sn i (instListPl vs sub k d)
+termination_by (k, sizeOf e)
+decreasing_by
+  all_goals first
+    | (apply Prod.Lex.left; omega)
+    | (apply Prod.Lex.right; simp +arith +decide)
+
+theorem instListPl_eq (vs : Array Expr) : ∀ (k : Nat) (e : Expr) (d : Nat),
+    instListPl vs e k d = Expr.instantiateListP vs e k d := by
+  intro k
+  induction k using Nat.strongRecOn with
+  | _ k ihk =>
+    intro e
+    induction e with
+    | bvar i =>
+      intro d; rw [instListPl, Expr.instantiateListP]
+      by_cases hk : k = 0
+      · simp [hk]
+      · simp only [hk, if_false]
+        split <;> try rfl
+        split <;> try rfl
+        split
+        · rename_i hlt; split <;> try rfl
+          split <;> try rfl
+          exact ihk _ hlt _ _
+        · rfl
+    | _ => intro d; rw [instListPl, Expr.instantiateListP] <;> simp_all
+
+/-- A copy of `Expr.instantiateRevP` that `cake_replace` leaves alone (the memoised
+walk's leaf re-enters it). -/
+def instRevPl (vs : Array Expr) (e : Expr) (k : Nat) (d : Nat) : Expr :=
+  if k = 0 then e
+  else if e.bvarB ≤ d then e
+  else
+    match e with
+    | .bvar i .. =>
+      if i < d then e
+      else if _h : i - d < k then
+        if h : i - d < vs.size then
+          let w := vs[vs.size - 1 - (i - d)]'(by omega)
+          if i - d = 0 || w.bvarB ≤ d then w
+          else instRevPl vs w (i - d) d
+        else e
+      else Expr.mkBvar (i - k)
+    | .fvar .. | .sort .. | .const .. | .lit .. => e
+    | .app f a .. => Expr.mkApp (instRevPl vs f k d) (instRevPl vs a k d)
+    | .lam ty body .. => Expr.mkLam (instRevPl vs ty k d) (instRevPl vs body k (d + 1))
+    | .forallE ty body .. =>
+      Expr.mkForallE (instRevPl vs ty k d) (instRevPl vs body k (d + 1))
+    | .letE ty val body .. =>
+      Expr.mkLetE (instRevPl vs ty k d) (instRevPl vs val k d) (instRevPl vs body k (d + 1))
+    | .proj sn i sub .. => Expr.mkProj sn i (instRevPl vs sub k d)
+termination_by (k, sizeOf e)
+decreasing_by
+  all_goals first
+    | (apply Prod.Lex.left; omega)
+    | (apply Prod.Lex.right; simp +arith +decide)
+
+theorem instRevPl_eq (vs : Array Expr) : ∀ (k : Nat) (e : Expr) (d : Nat),
+    instRevPl vs e k d = Expr.instantiateRevP vs e k d := by
+  intro k
+  induction k using Nat.strongRecOn with
+  | _ k ihk =>
+    intro e
+    induction e with
+    | bvar i =>
+      intro d; rw [instRevPl, Expr.instantiateRevP]
+      by_cases hk : k = 0
+      · simp [hk]
+      · simp only [hk, if_false]
+        split <;> try rfl
+        split <;> try rfl
+        split
+        · rename_i hlt; split <;> try rfl
+          split <;> try rfl
+          exact ihk _ hlt _ _
+        · rfl
+    | _ => intro d; rw [instRevPl, Expr.instantiateRevP] <;> simp_all
+
 /-! The simultaneous substitutions. Their leaf re-enters the plain walk on a
 substituted value (with a smaller count); only the outer walk is memoised. -/
 def instListLeaf (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) : Expr :=
@@ -1203,7 +1305,7 @@ def instListLeaf (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) : Expr :=
       if h : i - d < vs.size then
         let w := vs[i - d]
         if i - d = 0 || w.bvarB ≤ d then w
-        else Expr.instantiateListP vs w (i - d) d
+        else instListPl vs w (i - d) d
       else e
     else Expr.mkBvar (i - k)
   | _ => e
@@ -1215,7 +1317,7 @@ def instRevLeaf (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) : Expr :=
       if h : i - d < vs.size then
         let w := vs[vs.size - 1 - (i - d)]'(by omega)
         if i - d = 0 || w.bvarB ≤ d then w
-        else Expr.instantiateRevP vs w (i - d) d
+        else instRevPl vs w (i - d) d
       else e
     else Expr.mkBvar (i - k)
   | _ => e
@@ -1224,13 +1326,13 @@ theorem instantiateListP_rw (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) :
     Expr.instantiateListP vs e k d =
       rwP (fun e c => k == 0 || decide (e.bvarB ≤ c)) (instListLeaf vs k) (fun e _ _ _ => some e)
         Nat.succ e d := by
-  induction e generalizing d <;> (rw [Expr.instantiateListP, rwP]; simp_all [instListLeaf]) <;>
+  induction e generalizing d <;> (rw [Expr.instantiateListP, rwP]; simp_all [instListLeaf, instListPl_eq]) <;>
     (split <;> simp_all)
 theorem instantiateRevP_rw (vs : Array Expr) (k : Nat) (e : Expr) (d : Nat) :
     Expr.instantiateRevP vs e k d =
       rwP (fun e c => k == 0 || decide (e.bvarB ≤ c)) (instRevLeaf vs k) (fun e _ _ _ => some e)
         Nat.succ e d := by
-  induction e generalizing d <;> (rw [Expr.instantiateRevP, rwP]; simp_all [instRevLeaf]) <;>
+  induction e generalizing d <;> (rw [Expr.instantiateRevP, rwP]; simp_all [instRevLeaf, instRevPl_eq]) <;>
     (split <;> simp_all)
 
 def instantiateListM (vs : Array Expr) (e : Expr) (k d : Nat) : Expr :=
