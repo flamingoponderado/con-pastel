@@ -1,4 +1,5 @@
 import ConPastel.Leche.Datatypes
+import ConPastel.Leche.Intern
 import ConPastel.Leche.Frontend.IndDecl
 import ConPastel.Leche.Frontend.DefQuot
 import ConPastel.Leche.Frontend.MiscDecl
@@ -24,5 +25,7 @@ set_option maxRecDepth 200000
 
 namespace ConPastel.Leche
 cake_module "Frontend"
-cake_unit ConLeche.Frontend.builtinPreludeE ConLeche.Frontend.parseChunks ConLeche.Frontend.preparePrelude
+-- the export is parsed with interning (`ConPastel.Leche.Intern`)
+cake_replace ConLeche.Frontend.parseChunks ConPastel.Impl.parseChunksI ConPastel.Impl.parseChunks_eq_I
+cake_unit ConLeche.Frontend.builtinPreludeE ConPastel.Impl.parseChunksI ConLeche.Frontend.preparePrelude
 end ConPastel.Leche
