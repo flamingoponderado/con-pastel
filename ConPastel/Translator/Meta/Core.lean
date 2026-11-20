@@ -6,6 +6,9 @@ import ConPastel.Translator.List
 import ConPastel.Translator.Braun
 import ConPastel.Translator.EvalM
 import ConPastel.Translator.Push
+import ConPastel.Translator.HashMapM
+import ConPastel.Translator.StateOps
+import ConPastel.Translator.Swap
 
 /-!
 # The proof-producing translator: expressions
@@ -138,7 +141,41 @@ def stateArrMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
   unless m.isAppOfArity ``Except 1 do return none
   return some (σ.appArg!, m.appArg!, α)
 
+/-- `StateT (Std.DHashMap.Raw K β) (Except ε) α`: a hash table updated in
+place (`tblRel`): `(σ, bucket type, ε, α)`. -/
+def stateTblMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr × Expr)) := do
+  let ty ← whnfR (← instantiateMVars ty)
+  unless ty.isAppOfArity ``StateT 3 do return none
+  let #[σ, m, α] := ty.getAppArgs | return none
+  let σ' ← whnfR σ
+  unless σ'.isAppOfArity ``Std.DHashMap.Raw 2 do return none
+  let m ← whnfR m
+  unless m.isAppOfArity ``Except 1 do return none
+  let bkt := mkAppN (mkConst ``Std.DHashMap.Internal.AssocList [levelZero, levelZero]) σ'.getAppArgs
+  return some (σ, bkt, m.appArg!, α)
+
+/-- `StateT σ (Except ε) α` with `σ` a registered state record (`cake_state_record`). -/
+def stateRecMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr × StateRecInfo)) := do
+  let ty ← whnfR (← instantiateMVars ty)
+  unless ty.isAppOfArity ``StateT 3 do return none
+  let #[σ, m, α] := ty.getAppArgs | return none
+  let .const sc _ := (← whnfR σ).getAppFn | return none
+  let some info := (stateRecExt.getState (← getEnv)).find? sc | return none
+  let m ← whnfR m
+  unless m.isAppOfArity ``Except 1 do return none
+  return some (σ, m.appArg!, α, info)
+
 partial def invOf (ty : Expr) : MetaM Expr := do
+  if let some (σ, ε, α, info) ← stateRecMonad? ty then
+    let rf ← withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+      mkLambdaFVars #[loc] (← mkAppOptM ``ConPastel.Translator.recRel
+        #[σ, mkConst info.tabs, mkConst info.plain, loc])
+    return ← mkAppOptM ``ConPastel.Translator.MRET #[σ, ε, α, rf, ← invOf α, ← invOf ε]
+  if let some (σ, bkt, ε, α) ← stateTblMonad? ty then
+    let invB ← invOf bkt
+    let rf ← withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+      mkLambdaFVars #[loc] (← mkAppM ``ConPastel.Translator.tblRel #[invB, loc])
+    return ← mkAppOptM ``ConPastel.Translator.MRET #[σ, ε, α, rf, ← invOf α, ← invOf ε]
   if let some (el, ε, α) ← stateArrMonad? ty then
     let invE ← invOf el
     let rf ← withLocalDeclD `loc (mkConst ``Nat) fun loc => do

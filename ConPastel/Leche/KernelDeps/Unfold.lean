@@ -15,5 +15,5 @@ set_option linter.all false
 
 namespace ConPastel.Leche
 cake_module "KernelDepsUnfold"
-cake_unit ConLeche.Cached.unfoldDefinitionI ConLeche.Cached.ruleRhsAtM ConLeche.notProofFast
+cake_unit ConLeche.Cached.unfoldDefinitionI ConPastel.Leche.StateRw.ruleRhsAtMR ConLeche.notProofFast
 end ConPastel.Leche
