@@ -40,6 +40,10 @@ theorem eqType_NAT : EqType NAT := by
   intro x y v w hx hy; subst hx hy
   rw [doEq]; simp [litSameType, Int.ofNat_inj]
 
+theorem eqType_UINT64 : EqType UINT64 := by
+  intro x y v w hx hy; subst hx hy
+  rw [doEq]; simp [litSameType, UInt64.toBitVec_inj]
+
 theorem eqType_UNIT : EqType UNIT := by
   intro x y v w hx hy; subst hx hy
   rw [doEq]; simp [doEqList]
@@ -153,7 +157,7 @@ macro_rules
   | `(tactic| eqtype_field $[[$ts,*]]?) => do
     let ts : Array (TSyntax `term) := match ts with | some ts => ts.getElems | none => #[]
     `(tactic| repeat' (first
-        | exact eqType_NAT | exact eqType_UNIT
+        | exact eqType_NAT | exact eqType_UNIT | exact eqType_UINT64
         $[| exact $ts]*
         | apply eqType_LIST | apply eqType_PAIR | apply eqType_NEWTYPE
         | (intro a b h; cases a; cases b; cases h; rfl)))

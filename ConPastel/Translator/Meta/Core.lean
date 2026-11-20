@@ -62,6 +62,8 @@ def isErasedType (ty : Expr) : MetaM Bool := do
 field's index and type (with the other fields abstracted as projections). -/
 def newtypeInfo? (ty : Expr) : MetaM (Option (Name × Nat × Expr)) := do
   let ty ← whnfR ty
+  -- `UInt64` is a CakeML word (`UINT64`), not its `BitVec` field
+  if ty.isConstOf ``UInt64 then return none
   let .const I lvls := ty.getAppFn | return none
   let some (.inductInfo ii) := (← getEnv).find? I | return none
   unless ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec do return none
@@ -97,6 +99,7 @@ partial def invOf (ty : Expr) : MetaM Expr := do
   if ty.isConstOf ``Nat then return mkConst ``NAT
   if ty.isConstOf ``Int then return mkConst ``INT
   if ty.isConstOf ``Bool then return mkConst ``BOOL
+  if ty.isConstOf ``UInt64 then return mkConst ``UINT64
   if ty.isConstOf ``Unit || ty.isAppOfArity ``PUnit 0 then return mkConst ``UNIT
   if let .const c [] := ty then
     if (ghostExt.getState (← getEnv)).contains c then return ← mkAppM ``GHOST #[ty]
