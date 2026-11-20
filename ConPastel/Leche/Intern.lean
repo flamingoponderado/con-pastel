@@ -1,4 +1,5 @@
 import ConPastel.Leche.Datatypes
+import ConLeche.Verify.Frontend.Local
 
 /-!
 # Hash-consing the parsed expressions
@@ -434,13 +435,103 @@ termination_by b.size - i.toNat
 decreasing_by
   exact Nat.sub_lt_sub_left (usizeInBounds b i hlt) (USize.lt_iff_toNat_lt.mp hij)
 
+/-! ### Lines cut at their newline -/
+
+/-- The input up to its first newline, and the rest after it. -/
+def splitNl : List UInt8 → Option (List UInt8 × List UInt8)
+  | [] => none
+  | c :: l => if c == 10 then some ([], l) else (splitNl l).map fun (p, x) => (c :: p, x)
+
+theorem splitNl_some : ∀ {l pre x : List UInt8}, splitNl l = some (pre, x) → l = pre ++ 10 :: x ∧ 10 ∉ pre
+  | [], _, _, h => by simp [splitNl] at h
+  | c :: l, pre, x, h => by
+    simp only [splitNl] at h
+    split at h
+    · rename_i hc
+      simp only [Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      simp only [beq_iff_eq] at hc
+      simp [hc]
+    · rename_i hc
+      rcases hs : splitNl l with _ | ⟨p, y⟩ <;> rw [hs] at h
+      · simp at h
+      · simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        obtain ⟨h1, h2⟩ := splitNl_some hs
+        refine ⟨by simp [h1], ?_⟩
+        simp only [List.mem_cons, not_or]
+        exact ⟨fun h => hc (by simp [← h]), h2⟩
+
+/-- `feedChunkL`, scanning each line cut at its newline: the scanners'
+progress guards measure the remaining input, so on the whole unread input
+each costs a walk of it. A line is read inside its line (con-leche's
+`naiveLine_local`), so the scan of the cut line is the scan of the input.
+The recursion is on `fuel` (structural); out of fuel, `feedChunkL` takes
+over, so the result is `feedChunkL`'s for every `fuel`. -/
+def feedChunkC (fuel : Nat) (st : StateD) (it : ITab) (b : ByteArray) (tl : List UInt8) (lineNo : Nat) :
+    Except (CheckError × Nat) (StateD × ITab × Nat × List UInt8) :=
+  match fuel with
+  | 0 => feedChunkL st it b tl lineNo
+  | fuel + 1 =>
+    match splitNl tl with
+    | none => feedChunkL st it b tl lineNo
+    | some (pre, x) =>
+      match naiveLine (pre ++ [10]) with
+      | .err t rest =>
+        if newlineFrom b ((bytes b).length - tl.length).toUSize then
+          .error (.internal (ScanErr.render ⟨(pre ++ [10]).length - rest.length, t⟩), lineNo + 1)
+        else .ok (st, it, lineNo, tl)
+      | .ok (_, none) _ => .ok (st, it, lineNo, tl)
+      | .ok (r, some _) _ =>
+        match applyLineI st it r lineNo with
+        | .error msg => .error (.internal msg, lineNo + 1)
+        | .ok (.inr v) => .error (v.toError, lineNo + 1)
+        | .ok (.inl (st, it)) => feedChunkC fuel st it b x (lineNo + 1)
+
+theorem feedChunkC_eq (fuel : Nat) (st : StateD) (it : ITab) (b : ByteArray) (tl : List UInt8)
+    (lineNo : Nat) : feedChunkC fuel st it b tl lineNo = feedChunkL st it b tl lineNo := by
+  induction fuel generalizing st it tl lineNo with
+  | zero => rfl
+  | succ fuel ih =>
+  rw [feedChunkC]
+  split
+  · rfl
+  · rename_i pre x h
+    obtain ⟨rfl, hpre⟩ := splitNl_some h
+    rcases naiveLine_local pre hpre with ⟨r, hr⟩ | ⟨t, r', _, hr⟩
+    · have h0 := hr []
+      rw [h0]
+      obtain ⟨c, cs, hcs⟩ : ∃ c cs, pre ++ 10 :: x = c :: cs := by
+        cases pre <;> simp
+      have hx := hr x
+      rw [hcs] at hx ⊢
+      rw [feedChunkL, hx]
+      simp only
+      have hl : x.length < (c :: cs).length := by rw [← hcs]; simp; omega
+      rcases ha : applyLineI st it r lineNo with msg | ⟨⟨st', it'⟩ | v⟩
+      · rfl
+      · simp only [hl, dite_true]
+        exact ih st' it' x (lineNo + 1)
+      · rfl
+    · have h0 := hr []
+      rw [h0]
+      obtain ⟨c, cs, hcs⟩ : ∃ c cs, pre ++ 10 :: x = c :: cs := by
+        cases pre <;> simp
+      have hx := hr x
+      rw [hcs] at hx ⊢
+      rw [feedChunkL, hx]
+      simp only
+      have : (pre ++ [10]).length - (r' ++ [10]).length = (c :: cs).length - (r' ++ 10 :: x).length := by
+        rw [← hcs]; simp; omega
+      rw [this]
+
 /-- `chunkStepI` with the list-carrying line loop. -/
 def chunkStepL (st : StateD) (it : ITab) (carry : ByteArray) (lineNo total : Nat) (buf0 : ByteArray) :
     Except (CheckError × Nat) (StateD × ITab × ByteArray × Nat × Nat) :=
   if total + buf0.size ≥ USize.size then .error sizeError
   else
     let buf := if carry.isEmpty then buf0 else carry ++ buf0
-    match feedChunkL st it buf (bytes buf) lineNo with
+    match feedChunkC buf.size st it buf (bytes buf) lineNo with
     | .error e => .error e
     | .ok (st, it, lineNo, tl) =>
       .ok (st, it, buf.extract ((bytes buf).length - tl.length) buf.size, lineNo, total + buf0.size)
@@ -451,7 +542,8 @@ theorem chunkStepL_eq (st : StateD) (it : ITab) (carry : ByteArray) (lineNo tota
   simp only [chunkStepL, chunkStepI]
   split
   · rfl
-  · generalize (if carry.isEmpty then buf0 else carry ++ buf0) = buf
+  · rw [feedChunkC_eq]
+    generalize (if carry.isEmpty then buf0 else carry ++ buf0) = buf
     have h0 : (0 : USize).toNat ≤ (bytes buf).length := by simp
     have hb : bytes buf = tailAt buf 0 := by simp [tailAt]
     have hle := feedChunkI_le st it buf 0 lineNo h0
