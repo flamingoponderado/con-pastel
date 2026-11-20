@@ -645,6 +645,8 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     return
   match t with
   | .proj I j sExp =>
+    if I == ``Array && j == 0 && (← treeArrayElem? (← inferType sExp)).isSome then
+      return ← solveArrayToList g env inv sExp
     if let some v ← Meta.projectCore? sExp.consumeMData j then
       return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv v]))
     if let some (I', j', _) ← newtypeInfo? (← inferType sExp) then
@@ -876,6 +878,20 @@ partial def solveDecSplit (g : MVarId) (env inv t : Expr) (pos : Nat) : GoalM Bo
   let motive ← withLocalDeclD `w R fun w => do mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp inv w])
   g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
   return true
+
+/-- `a.toList` of a Braun-tree array (`treeArrayElem?`): the list of its tree,
+`a.toList = (toA a).toList` (`toList_toA`). -/
+partial def solveArrayToList (g : MVarId) (env inv a : Expr) : GoalM Unit := do
+  let heq ← mkAppM ``ConPastel.Braun.toList_toA #[a]
+  let some (_, lhs, rhs) := (← inferType heq).eq? | throwError "solveArrayToList: bad lemma"
+  let ce ← evalGoalCe g
+  let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv rhs])
+  solve gb.mvarId!
+  let motive ← withLocalDeclD `x (← inferType rhs) fun x => do
+    mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+  let pf ← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb)
+  let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp inv lhs])
+  g.assign pf
 
 /-- A `casesOn` with a dependent motive whose result is a newtype (e.g.
 `Decidable (x = b)`): the projection commutes with the case split,
@@ -1326,20 +1342,62 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
           return
         (saved.restore : MetaM Unit)
+  -- Braun-tree arrays (`treeArrayElem?`): the constructor, the list projection,
+  -- the representation function `toA` and the canonical injection `ofAC`
+  if let .const cn us := fn then
+    if cn == ``Array.mk && args.size == 2 then
+     if (← treeArrayElem? (← inferType t)).isSome then
+      let (``NEWTYPE, #[_, _, _, A]) := inv.getAppFnArgs | throwError "array invariant {inv}"
+      let t' ← mkAppM ``ConPastel.Braun.A.ofList #[args[1]!]
+      let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp A t'])
+      return ← solve g'
+    if cn == ``Array.toList && args.size == 2 then
+      -- (nested: a `←` inside `&&` would run before the size test)
+      if (← treeArrayElem? (← inferType args[1]!)).isSome then
+        return ← solveArrayToList g env inv args[1]!
+    if cn == ``ConPastel.Braun.toA && args.size == 2 then
+      let invS ← invOf (← inferType args[1]!)
+      if invS.isAppOf ``NEWTYPE then
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp invS args[1]!])
+        return ← solve g'
+    if cn == ``ConPastel.Braun.ofAC && args.size == 3 then
+     if (← treeArrayElem? (← inferType t)).isSome then
+      let (``NEWTYPE, #[_, _, _, A]) := inv.getAppFnArgs | throwError "array invariant {inv}"
+      let ce ← evalGoalCe g
+      let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp A args[1]!])
+      solve gb.mvarId!
+      let heq := mkAppN (mkConst ``ConPastel.Braun.toA_ofAC []) args
+      let motive ← withLocalDeclD `w (← inferType args[1]!) fun w => do
+        mkLambdaFVars #[w] (← mkAppM ``Eval #[env, ce, mkApp A w])
+      let pf ← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb)
+      let g ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ce, mkApp A (← inferType heq).appFn!.appArg!])
+      g.assign pf
+      return
   -- registered replacements `K xs = K' xs`
   if let .const c us := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
-      let n ← forallTelescope (← inferType (mkConst thm us)) fun xs _ => pure xs.size
-      if args.size == n then
-        let heq := mkAppN (mkConst thm us) args
-        let t' := mkAppN (mkConst rc us) args
-        let ce ← evalGoalCe g
-        let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
-        solve gb.mvarId!
-        let motive ← withLocalDeclD `x (← inferType t) fun x => do
-          mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
-        g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
-        return
+      -- an `Array` replacement (on the Braun tree) only where the array is a tree
+      let mut skip := false
+      if (`ConPastel.Braun).isPrefixOf rc && args.size > 0 then
+        skip := (← whnfR args[0]!).isConstOf ``UInt8
+      -- a monomorphic theorem (`cake_replace` at universe 0) applies at universe 0 only
+      let thmMono := ((← getConstInfo thm).levelParams).isEmpty && !us.isEmpty
+      skip := skip || (thmMono && !us.all (· == levelZero))
+      let tus := if thmMono then [] else us
+      let rcLevels := (← getConstInfo rc).levelParams
+      let rus := if thmMono then rcLevels.map fun _ => levelZero else us
+      if !skip then
+        let n ← forallTelescope (← inferType (mkConst thm tus)) fun xs _ => pure xs.size
+        if args.size == n then
+          let heq := mkAppN (mkConst thm tus) args
+          let t' := mkAppN (mkConst rc rus) args
+          let ce ← evalGoalCe g
+          let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
+          solve gb.mvarId!
+          let motive ← withLocalDeclD `x (← inferType t) fun x => do
+            mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+          g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
+          return
   -- matchers and sparse casesOn auxiliaries
   if let .const fnName _ := fn then
     if (← Meta.isMatcher fnName) then

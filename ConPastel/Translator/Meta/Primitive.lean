@@ -85,9 +85,15 @@ elab "cake_replace " k:ident r:ident thm:ident : command => do
   let tc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo thm
   liftTermElabM do
     let us := ((← getConstInfo tc).levelParams).map Level.param
+    -- a monomorphic theorem may state the replacement of a universe-polymorphic
+    -- `K` at universe 0; it then applies to the occurrences of `K` at universe 0
+    let kLevels := (← getConstInfo kc).levelParams
+    let rLevels := (← getConstInfo rc).levelParams
+    let kus := if us.isEmpty then kLevels.map fun _ => levelZero else us
+    let rus := if us.isEmpty then rLevels.map fun _ => levelZero else us
     let ok ← forallTelescope (← inferType (mkConst tc us)) fun xs ty => do
       let some (_, l, rr) := ty.eq? | return false
-      return l == mkAppN (mkConst kc us) xs && rr == mkAppN (mkConst rc us) xs
+      return l == mkAppN (mkConst kc kus) xs && rr == mkAppN (mkConst rc rus) xs
     unless ok do throwError "{tc} must state ∀ xs, {kc} xs = {rc} xs (same universe parameters, in order)"
   modifyEnv fun env => replaceExt.addEntry env (kc, rc, tc)
 

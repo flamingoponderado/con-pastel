@@ -27,6 +27,8 @@ cake_mutual_prepare ConLeche.Cached.whnfCoreI ConLeche.Expr.beqMemo ConLeche.Exp
   ConPastel.Impl.instantiate1M ConPastel.Impl.instantiateLiftM ConPastel.Impl.liftLooseBVarsM
   ConPastel.Impl.abstract1M ConPastel.Impl.abstractRangeM ConPastel.Impl.instLevelParamsM
   ConPastel.Impl.instantiateListM ConPastel.Impl.instantiateRevM ConPastel.Impl.u64toBV
+  (@ConPastel.Braun.arrSize ConLeche.Expr) (@ConPastel.Braun.arrPush ConLeche.Expr)
+  (@ConPastel.Braun.arrGet ConLeche.Expr) (@ConPastel.Braun.A.toList ConLeche.Expr)
   (@BitVec.toNat 64) ConPastel.leanMixHash (@List.instDecidableEqNil ConLeche.Level) Nat.ble
   UInt8.ofNat (@instDecidableEqList ConLeche.Name ConLeche.instDecidableEqName)
 end ConPastel.Leche

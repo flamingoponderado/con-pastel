@@ -3,6 +3,7 @@ import ConPastel.Translator.Lemmas
 import ConPastel.Translator.Tuple
 import ConPastel.Translator.Meta.Ext
 import ConPastel.Translator.List
+import ConPastel.Translator.Braun
 
 /-!
 # The proof-producing translator: expressions
@@ -58,12 +59,27 @@ def shortIdent (s : String) : Expr :=
 def isErasedType (ty : Expr) : MetaM Bool := do
   return (← isProp ty) || (← isTypeFormerType ty)
 
+/-- The element type of an array represented by a Braun tree (`NEWTYPE toA`):
+every `Array α` except `Array UInt8` (byte arrays and strings stay lists). -/
+def treeArrayElem? (ty : Expr) : MetaM (Option Expr) := do
+  let ty ← whnfR ty
+  if ty.isAppOfArity ``Array 1 then
+    let α := ty.appArg!
+    if (← whnfR α).isConstOf ``UInt8 then return none
+    if α.hasLooseBVars then return none
+    -- the tree library is at `Type`
+    unless (← getLevel α) == levelOne do return none
+    return some α
+  return none
+
 /-- A structure type with exactly one data field: `(I, j, fieldType)`, the
 field's index and type (with the other fields abstracted as projections). -/
 def newtypeInfo? (ty : Expr) : MetaM (Option (Name × Nat × Expr)) := do
   let ty ← whnfR ty
   -- `UInt64` is a CakeML word (`UINT64`), not its `BitVec` field
   if ty.isConstOf ``UInt64 then return none
+  -- arrays are Braun trees (`treeArrayElem?`), not their list field
+  if (← treeArrayElem? ty).isSome then return none
   let .const I lvls := ty.getAppFn | return none
   let some (.inductInfo ii) := (← getEnv).find? I | return none
   unless ii.ctors.length == 1 && ii.numIndices == 0 && !ii.isRec do return none
@@ -109,6 +125,10 @@ partial def invOf (ty : Expr) : MetaM Expr := do
     return ← mkAppOptM ``QUOT #[ty.appFn!.appArg!, ty.appArg!, ← invOf ty.appFn!.appArg!]
   if ty.isAppOfArity ``Prod 2 then
     return ← mkAppM ``PAIR #[← invOf ty.appFn!.appArg!, ← invOf ty.appArg!]
+  if let some α ← treeArrayElem? ty then
+    let aTy := mkApp (mkConst ``ConPastel.Braun.A []) α
+    let proj := mkApp (mkConst ``ConPastel.Braun.toA []) α
+    return ← mkAppOptM ``NEWTYPE #[ty, aTy, proj, ← invOf aTy]
   if let some (I, j, fty) ← newtypeInfo? ty then
     let proj ← withLocalDeclD `s ty fun x => mkLambdaFVars #[x] (.proj I j x)
     return ← mkAppOptM ``NEWTYPE #[ty, fty, proj, ← invOf fty]

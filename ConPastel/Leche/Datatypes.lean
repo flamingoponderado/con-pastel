@@ -299,5 +299,14 @@ cake_datatype (Except String (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMem
 cake_datatype (Except String (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool))
 cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool × Nat × USize))
 cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool × Nat × List UInt8))
+cake_datatype (ConPastel.Braun.T Nat)
+cake_datatype (ConPastel.Braun.A Nat)
+cake_datatype (ConPastel.Braun.T ConLeche.Frontend.IndCtorRec)
+cake_datatype (ConPastel.Braun.A ConLeche.Frontend.IndCtorRec)
+cake_datatype (ConPastel.Braun.T ConLeche.NestHole)
+cake_datatype (ConPastel.Braun.A ConLeche.NestHole)
+cake_datatype (Option ConLeche.NestKey)
+
+cake_datatype (Option (ConLeche.Frontend.IndCtorRec × ConLeche.Name))
 
 end ConPastel.Leche
