@@ -1,6 +1,7 @@
 import ConPastel.Translator.Prims
 import ConPastel.Translator.Word
 import ConPastel.Translator.Word64
+import ConPastel.Translator.FastIdx
 import ConPastel.Translator.ArrayB
 import ConPastel.Spec
 

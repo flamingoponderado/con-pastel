@@ -31,4 +31,10 @@ cake_mutual_prepare ConLeche.Cached.whnfCoreI ConLeche.Expr.beqMemo ConLeche.Exp
   (@ConPastel.Braun.arrGet ConLeche.Expr) (@ConPastel.Braun.A.toList ConLeche.Expr)
   (@BitVec.toNat 64) ConPastel.leanMixHash (@List.instDecidableEqNil ConLeche.Level) Nat.ble
   UInt8.ofNat (@instDecidableEqList ConLeche.Name ConLeche.instDecidableEqName)
+  ConPastel.Leche.StateRw.memoBIR ConPastel.Leche.StateRw.whnfCoreLookupIR ConPastel.Leche.StateRw.storeChainIR
+  ConPastel.Leche.StateRw.instListMR ConPastel.Leche.StateRw.isEquivLMR ConPastel.Leche.StateRw.constTyAtMR
+  ConPastel.Leche.StateRw.constValAtMR ConPastel.Leche.StateRw.ruleRhsAtMR ConPastel.Leche.StateRw.maxNatSizeMR
+  (@ConPastel.Translator.getM ConLeche.Expr ConLeche.Expr ConLeche.CheckError _ _)
+  (@ConPastel.Translator.insertM ConLeche.Expr ConLeche.Expr ConLeche.CheckError _ _)
+  (@ConPastel.Leche.StateRw.withEagerMemosR Bool)
 end ConPastel.Leche
