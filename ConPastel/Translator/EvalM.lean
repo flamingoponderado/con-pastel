@@ -563,6 +563,35 @@ theorem Runs.handle_raise {τ : Type} {s s₁ s₂ : State τ} {env : SemEnv Val
   rw [Nat.add_comm a₂ b₁]
   exact hb'
 
+/-! ## `let` of pure code -/
+
+theorem EvalM_let {σ ε α β : Type} {R : StateRel σ} {env : SemEnv Value} {n : VarN} {e₁ body : Exp}
+    {A' : RefInv β} {A : RefInv α} {B : RefInv ε} {a : β} {f : StateT σ (Except ε) α}
+    (h₁ : Eval env e₁ (A' a))
+    (h₂ : ∀ v, A' a v → EvalM R { env with v := nsOptBind (some n) v env.v } body A B f) :
+    EvalM R env (.let_ (some n) e₁ body) A B f := by
+  intro τ s st hst
+  obtain ⟨v, extra, hv, hA⟩ := h₁ τ s
+  obtain ⟨refs', res, hr, hfr, hm⟩ := h₂ v hA τ { s with refs := s.refs ++ extra } st (StateRel.rel_append hst extra)
+  refine ⟨refs', res, ?_, (Frame.append hst extra).trans hfr, hm⟩
+  have := Runs.let_ (n := some n) hv.runs (by simpa using hr) hm.not_timeout
+  simpa using this
+
+/-! ## Array state operations -/
+
+/-- Read an element of the array state, with a default. -/
+def getsD {α ε : Type} (i : Nat) (d : α) : StateT (Array α) (Except ε) α := fun st => .ok (st.getD i d, st)
+
+/-- Write an element of the array state, in place. -/
+def setM {α ε : Type} (i : Nat) (y : α) : StateT (Array α) (Except ε) Unit :=
+  fun st => .ok ((), st.setIfInBounds i y)
+
+/-- Run a computation on a fresh array of `n` copies of `x`. -/
+def runArr {α ε β : Type} (n : Nat) (x : α) (m : StateT (Array α) (Except ε) β) : Except ε β :=
+  match m (Array.replicate n x) with
+  | .ok (b, _) => .ok b
+  | .error e => .error e
+
 /-! ## Derived state operations, as `bind`, `get`, `set` and `pure` -/
 
 theorem modify_eq_bind {σ ε : Type} (f : σ → σ) :
@@ -658,5 +687,145 @@ theorem Eval_runRef {σ ε α β : Type} {S : RefInv σ} {A : RefInv α} {B : Re
     have := Runs.let_ (n := some h) (env := env) href (by simpa [s₂, env₁] using hh) (by simp)
     rw [hext] at this
     simpa [List.append_assoc] using this
+
+/-! ## Running a computation on a fresh CakeML array -/
+
+theorem Runs.aalloc {τ : Type} {s s₁ : State τ} {env : SemEnv Value} {en ex : Exp} {vx : Value} {n : Nat}
+    (h : Runs s env [ex, en] s₁ (.val [vx, .litv (.intLit n)])) :
+    Runs s env [.app .aalloc [en, ex]] { s₁ with refs := s₁.refs ++ [.varray (List.replicate n vx)] }
+      (.val [.loc true s₁.refs.length]) := by
+  obtain ⟨a₁, a₂, ha⟩ := h
+  refine ⟨a₁, a₂, ?_⟩
+  have := evaluate_app_simple (s := { s with clock := a₁ }) (s₁ := { s₁ with clock := a₂ }) (env := env)
+    (op := .aalloc) (args := [en, ex]) (vs := [vx, .litv (.intLit n)])
+    (refs := s₁.refs ++ [.varray (List.replicate n vx)]) (ffi := s₁.ffi) (r := .val (.loc true s₁.refs.length))
+    (by simpa using ha) rfl
+    (by
+      have hneg : ¬ ((n : Int) < 0) := by omega
+      simp [doApp, doAppBasic, doAppNumericCore, storeAlloc, hneg])
+  simpa [listResult] using this
+
+theorem forall₂_replicate {α : Type} {A : RefInv α} {x : α} {vx : Value} (hx : A x vx) :
+    ∀ n, List.Forall₂ A (List.replicate n x) (List.replicate n vx)
+  | 0 => .nil
+  | n + 1 => by simp only [List.replicate_succ]; exact .cons hx (forall₂_replicate hx n)
+
+/-- Run `m` on a fresh CakeML array of `n` copies of `x` (`Array.array n x`), as
+pure code. -/
+theorem Eval_runArr {α ε γ β : Type} {A : RefInv α} {C : RefInv γ} {B : RefInv ε} {P : RefInv β}
+    {env : SemEnv Value} {en ex em eok eerr : Exp} {h x y : VarN} {n : Nat} {x₀ : α}
+    {m : StateT (Array α) (Except ε) γ} {ok : γ → β} {err : ε → β}
+    (hn : Eval env en (NAT n)) (hx : Eval env ex (A x₀))
+    (hm : ∀ b loc, Eval { env with v := nsOptBind (some h) (.loc b loc) env.v } em (MRET (arrRel A) C B m))
+    (hok : ∀ b loc c v, C c v →
+      Eval { env with v := nsOptBind (some x) v (nsOptBind (some h) (.loc b loc) env.v) } eok (P (ok c)))
+    (herr : ∀ b loc e v, B e v →
+      Eval { env with v := nsAppend (alistToNs [(y, v)]) (nsOptBind (some h) (.loc b loc) env.v) } eerr
+        (P (err e))) :
+    Eval env (.let_ (some h) (.app .aalloc [en, ex])
+      (.handle (.let_ (some x) (.app .opapp [em, .var (.short h)]) eok) [(.pvar y, eerr)]))
+      (P (match m (Array.replicate n x₀) with | .ok (c, _) => ok c | .error e => err e)) := by
+  intro τ s
+  obtain ⟨vx, extra₁, hvx, hA⟩ := hx τ s
+  obtain ⟨vn, extra₂, hvn, hN⟩ := hn τ { s with refs := s.refs ++ extra₁ }
+  have hvn' : vn = .litv (.intLit n) := hN
+  subst hvn'
+  let s₁ : State τ := { s with refs := s.refs ++ extra₁ ++ extra₂ }
+  have hargs : Runs s env [ex, en] s₁ (.val [vx, .litv (.intLit n)]) := by
+    have := Runs.cons hvx.runs (by simpa using hvn.runs)
+    simpa [s₁, List.append_assoc] using this
+  let loc := s₁.refs.length
+  have halloc := Runs.aalloc (s := s) (s₁ := s₁) hargs
+  let env₁ : SemEnv Value := { env with v := nsOptBind (some h) (.loc true loc) env.v }
+  let s₂ : State τ := { s₁ with refs := s₁.refs ++ [.varray (List.replicate n vx)] }
+  have hst : (arrRel A loc).rel (Array.replicate n x₀) s₂.refs :=
+    ⟨List.replicate n vx, by simp [s₂, loc], by simpa using forall₂_replicate hA n⟩
+  have hrun := EvalM_run (RF := arrRel A) (env := env₁) (h := .short h) (b := true) (loc := loc)
+    (by simp [env₁, nsOptBind, nsLookup_nsBind_short]) (hm true loc)
+  obtain ⟨refs', res, hr, hfr, hres⟩ := hrun τ s₂ _ hst
+  have hpre : ∀ l < s₁.refs.length, refs'[l]? = s₂.refs[l]? := fun l hl =>
+    hfr.2.1 l (by simp [s₂]; omega) (fun ho => by simp [arrRel] at ho; omega)
+  have hext : refs' = s.refs ++ refs'.drop s.refs.length := by
+    have hlen : s₂.refs.length ≤ refs'.length := hfr.1
+    apply List.ext_getElem?
+    intro l
+    by_cases hl : l < s.refs.length
+    · rw [List.getElem?_append_left (by simpa using hl), hpre l (by simp [s₁]; omega)]
+      simp [s₂, s₁, List.getElem?_append_left hl]
+    · rw [List.getElem?_append_right (by omega), List.getElem?_drop]
+      congr 1; omega
+  revert hres
+  cases hm' : m (Array.replicate n x₀) with
+  | ok p =>
+    obtain ⟨c, st'⟩ := p
+    intro hres
+    obtain ⟨_, v, hv, hC⟩ := hres
+    subst hv
+    obtain ⟨w, extra₃, hw, hP⟩ := hok true loc c v hC τ { s with refs := refs' }
+    refine ⟨w, refs'.drop s.refs.length ++ extra₃, ?_, hP⟩
+    apply Runs.evalRel
+    have hlet := Runs.let_ (n := some x) (env := env₁) hr (by simpa using hw.runs) (by simp)
+    have hh := Runs.handle_val (cls := [(.pvar y, eerr)]) hlet
+    have := Runs.let_ (n := some h) (env := env) halloc (by simpa [s₂, env₁] using hh) (by simp)
+    rw [hext] at this
+    simpa [List.append_assoc] using this
+  | error e =>
+    intro hres
+    obtain ⟨v, hv, hB⟩ := hres
+    subst hv
+    obtain ⟨w, extra₃, hw, hP⟩ := herr true loc e v hB τ { s with refs := refs' }
+    refine ⟨w, refs'.drop s.refs.length ++ extra₃, ?_, hP⟩
+    apply Runs.evalRel
+    have hlet := Runs.let_err (n := some x) (e₂ := eok) (env := env₁) hr
+    have hh := Runs.handle_raise (x := y) (rhs := eerr) hlet (by simpa [env₁] using hw.runs) (by simp)
+    have := Runs.let_ (n := some h) (env := env) halloc (by simpa [s₂, env₁] using hh) (by simp)
+    rw [hext] at this
+    simpa [List.append_assoc] using this
+
+/-! ## The array operations as the translation emits them -/
+
+/-- `()`. -/
+abbrev unitExp : Exp := .con none []
+
+theorem nsLookup_optBind_ne {env : SemEnv Value} {x h : VarN} {v w : Value}
+    (hne : x ≠ h) (hh : nsLookup env.v (.short h) = some w) :
+    nsLookup (nsOptBind (some x) v env.v) (.short h) = some w := by
+  simp [nsOptBind, nsLookup_nsBind_short, Ne.symm hne, hh]
+
+theorem nsLookup_optBind_self {env : SemEnv Value} {x : VarN} {v : Value} :
+    nsLookup (nsOptBind (some x) v env.v) (.short x) = some v := by
+  simp [nsOptBind, nsLookup_nsBind_short]
+
+/-- `getsD i d`: `let ix = i in if ix < Array.length h then Array.sub h ix else d`. -/
+theorem EvalM_getsD {α ε : Type} {A : RefInv α} {B : RefInv ε} {env : SemEnv Value} {h ix : VarN}
+    {ei ed : Exp} {i : Nat} {d : α} {b : Bool} {loc : Nat}
+    (hh : nsLookup env.v (.short h) = some (.loc b loc)) (hne : ix ≠ h)
+    (hi : Eval env ei (NAT i))
+    (hd : ∀ v, Eval { env with v := nsOptBind (some ix) v env.v } ed (A d)) :
+    EvalM (arrRel A loc) env
+      (.let_ (some ix) ei (.if_ (ltLen (.short ix) (.short h)) (.app .asub [.var (.short h), .var (.short ix)]) ed))
+      A B (getsD i d) :=
+  EvalM_let hi fun v hv => by
+    have hv' : v = .litv (.intLit i) := hv
+    subst hv'
+    exact EvalM_arrGetD (nsLookup_optBind_ne hne hh) nsLookup_optBind_self (hd _)
+
+/-- `setM i y`: `let ix = i in let xv = y in if ix < Array.length h then Array.update h ix xv else ()`. -/
+theorem EvalM_setM {α ε : Type} {A : RefInv α} {B : RefInv ε} {env : SemEnv Value} {h ix xv : VarN}
+    {ei ey : Exp} {i : Nat} {y : α} {b : Bool} {loc : Nat}
+    (hh : nsLookup env.v (.short h) = some (.loc b loc)) (hne₁ : ix ≠ h) (hne₂ : xv ≠ h) (hne₃ : xv ≠ ix)
+    (hi : Eval env ei (NAT i))
+    (hy : ∀ v, Eval { env with v := nsOptBind (some ix) v env.v } ey (A y)) :
+    EvalM (arrRel A loc) env
+      (.let_ (some ix) ei (.let_ (some xv) ey
+        (.if_ (ltLen (.short ix) (.short h)) (.app .aupdate [.var (.short h), .var (.short ix), .var (.short xv)])
+          (.con none []))))
+      UNIT B (setM i y) :=
+  EvalM_let hi fun v hv => by
+    have hv' : v = .litv (.intLit i) := hv
+    subst hv'
+    exact EvalM_let (hy _) fun w hw =>
+      EvalM_arrSet (nsLookup_optBind_ne hne₂ (nsLookup_optBind_ne hne₁ hh))
+        (nsLookup_optBind_ne hne₃ nsLookup_optBind_self) nsLookup_optBind_self hw
 
 end ConPastel.Translator

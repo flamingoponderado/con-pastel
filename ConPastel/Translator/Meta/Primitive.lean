@@ -103,6 +103,13 @@ elab "cake_state_ref " t:ident : command => do
   let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
   modifyEnv fun env => stateRefExt.addEntry env c
 
+/-- `cake_state_array T`: computations `StateT (Array T) (Except ε) α` are
+translated over a CakeML `Array.array` holding the state (read with `getsD`,
+written in place with `setM`). -/
+elab "cake_state_array " t:ident : command => do
+  let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+  modifyEnv fun env => stateArrExt.addEntry env c
+
 /-- `cake_ghost T`: the closed type `T` becomes a ghost type (`GHOST T`). -/
 elab "cake_ghost " t:ident : command => do
   let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t

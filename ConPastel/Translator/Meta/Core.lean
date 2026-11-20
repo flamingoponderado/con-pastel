@@ -121,7 +121,26 @@ def stateRefMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
   unless m.isAppOfArity ``Except 1 do return none
   return some (σ, m.appArg!, α)
 
+/-- `StateT (Array T) (Except ε) α` with `T` a registered array-state element
+type (`cake_state_array`): `(T, ε, α)`. -/
+def stateArrMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
+  let ty ← instantiateMVars ty
+  unless ty.isAppOfArity ``StateT 3 do return none
+  let #[σ, m, α] := ty.getAppArgs | return none
+  let σ ← whnfR σ
+  unless σ.isAppOfArity ``Array 1 do return none
+  let .const ec _ := (← whnfR σ.appArg!).getAppFn | return none
+  unless (stateArrExt.getState (← getEnv)).contains ec do return none
+  let m ← whnfR m
+  unless m.isAppOfArity ``Except 1 do return none
+  return some (σ.appArg!, m.appArg!, α)
+
 partial def invOf (ty : Expr) : MetaM Expr := do
+  if let some (el, ε, α) ← stateArrMonad? ty then
+    let invE ← invOf el
+    let rf ← withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+      mkLambdaFVars #[loc] (← mkAppM ``ConPastel.Translator.arrRel #[invE, loc])
+    return ← mkAppOptM ``ConPastel.Translator.MRET #[← mkAppM ``Array #[el], ε, α, rf, ← invOf α, ← invOf ε]
   if let some (σ, ε, α) ← stateRefMonad? ty then
     let invS ← invOf σ
     let rf ← withLocalDeclD `loc (mkConst ``Nat) fun loc => do

@@ -96,6 +96,14 @@ initialize stateRefExt : SimplePersistentEnvExtension Name NameSet ←
     addImportedFn := fun as => as.foldl (fun acc a => a.foldl (·.insert ·) acc) {}
   }
 
+/-- Element types of array states (`cake_state_array T`): `StateT (Array T) (Except ε) α`
+is refined by `MRET (arrRel (invOf T)) …`, the state a CakeML `Array.array`. -/
+initialize stateArrExt : SimplePersistentEnvExtension Name NameSet ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun s n => s.insert n
+    addImportedFn := fun as => as.foldl (fun acc a => a.foldl (·.insert ·) acc) {}
+  }
+
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 

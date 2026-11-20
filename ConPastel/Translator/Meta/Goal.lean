@@ -457,6 +457,8 @@ def recAsCasesOn? (recN : Name) (lvls : List Level) (args : Array Expr) : MetaM 
   let rest := args[np + 1 + nm + ni + 1:].toArray
   return some (mkAppN (mkConst (I ++ `casesOn) lvls) (params ++ #[motive] ++ indices ++ #[major] ++ minors ++ rest))
 
+-- the solver block compiles past the default limit (LCNF)
+set_option maxHeartbeats 1000000 in
 mutual
 
 partial def solve (g : MVarId) : GoalM Unit := do
@@ -933,6 +935,51 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
     let motive ← withLocalDeclD `x (← inferType t) fun x => do mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
     assignProof g (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
     return true
+  -- array states (`arrRel`): read with a default, write in place
+  let isArr := (RF.headBeta.getAppFn.isLambda && (RF.bindingBody!.getAppFn.isConstOf ``ConPastel.Translator.arrRel))
+  if isArr && (cn == ``ConPastel.Translator.getsD || cn == ``ConPastel.Translator.setM) then
+    let (``arrRel, #[_, Ael, _]) := RF.bindingBody!.getAppFnArgs | throwError "array state: relation {RF}"
+    let hname ← freshCName "h"
+    let ixname ← freshCName "i"
+    let xvname ← freshCName "y"
+    let ne (a b : String) : GoalM Expr := do
+      let goal := mkNot (← mkEq (mlString a) (mlString b))
+      closeWith goal (← `(tactic| decide))
+    let ci ← mkFreshExprMVar (mkConst ``Exp)
+    let ce₂ ← mkFreshExprMVar (mkConst ``Exp)
+    let pf ← withHandle env hname fun env' b loc => do
+      let hv ← mkAppM ``Value.loc #[b, loc]
+      let hl ← proveLookupG env' hname hv
+      let gi ← mkFreshExprMVar (← mkAppM ``Eval #[env', ci, mkApp (mkConst ``NAT) args[2]!])
+      solve gi.mvarId!
+      let h₂ ← withLocalDeclD `v (mkConst ``Value) fun v => do
+        let env'' ← mkAppM ``SemEnv.mk #[← mkAppM ``nsOptBind #[← mkAppM ``Option.some #[mlString ixname], v,
+          ← mkAppM ``SemEnv.v #[env']], ← mkAppM ``SemEnv.c #[env']]
+        let g₂ ← mkFreshExprMVar (← mkAppM ``Eval #[env'', ce₂, mkApp Ael args[3]!])
+        solve g₂.mvarId!
+        mkLambdaFVars #[v] (← instantiateMVars g₂)
+      if cn == ``ConPastel.Translator.getsD then
+        mkAppOptM ``EvalM_getsD #[none, none, Ael, B, env', mlString hname, mlString ixname, ← instantiateMVars ci,
+          ← instantiateMVars ce₂, args[2]!, args[3]!, b, loc, hl, ← ne ixname hname, ← instantiateMVars gi, h₂]
+      else
+        mkAppOptM ``EvalM_setM #[none, none, Ael, B, env', mlString hname, mlString ixname, mlString xvname,
+          ← instantiateMVars ci, ← instantiateMVars ce₂, args[2]!, args[3]!, b, loc, hl, ← ne ixname hname,
+          ← ne xvname hname, ← ne xvname ixname, ← instantiateMVars gi, h₂]
+    let hId := mkApp (mkConst ``Exp.var) (shortIdent hname)
+    let ixId := mkApp (mkConst ``Exp.var) (shortIdent ixname)
+    let lt ← mkAppM ``ltLen #[shortIdent ixname, shortIdent hname]
+    let body ← if cn == ``ConPastel.Translator.getsD then
+        mkAppM ``Exp.let_ #[← mkAppM ``Option.some #[mlString ixname], ← instantiateMVars ci,
+          ← mkAppM ``Exp.if_ #[lt, ← mkAppM ``Exp.app #[mkConst ``Op.asub, ← mkListLit (mkConst ``Exp) [hId, ixId]],
+            ← instantiateMVars ce₂]]
+      else do
+        let xId := mkApp (mkConst ``Exp.var) (shortIdent xvname)
+        let unitE := mkConst ``unitExp
+        mkAppM ``Exp.let_ #[← mkAppM ``Option.some #[mlString ixname], ← instantiateMVars ci,
+          ← mkAppM ``Exp.let_ #[← mkAppM ``Option.some #[mlString xvname], ← instantiateMVars ce₂,
+            ← mkAppM ``Exp.if_ #[lt, ← mkAppM ``Exp.app #[mkConst ``Op.aupdate, ← mkListLit (mkConst ``Exp) [hId, ixId, xId]],
+              unitE]]]
+    return ← finish hname body pf
   if cn == ``modify && args.size == 4 then
     return ← rewriteBy (← mkAppOptM ``modify_eq_bind #[σ, ε, args[3]!])
   if cn == ``modifyGet && args.size == 5 then
@@ -1087,6 +1134,77 @@ partial def solveRunRef (g : MVarId) (env inv : Expr) (args : Array Expr) : Goal
   let pty ← inferType pf
   let some (_, ceP, _) := (← whnfR pty).getAppFnArgs.2.toList.toArray[1]? |>.map (fun c => ((), c, ())) | throwError "runRef: proof"
   unless ← isDefEq ce ceP do throwError "runRef: code mismatch"
+  assignProof g pf
+
+/-- `runArr n x m` at a registered array state: `m` on a fresh CakeML array
+`Array.array n x` (`Eval_runArr`). -/
+partial def solveRunArr (g : MVarId) (env inv : Expr) (args : Array Expr) : GoalM Unit := do
+  let #[el, ε, α, nE, x₀, m] := args | throwError "runArr: arguments"
+  let S ← invOf el
+  let σ ← mkAppM ``Array #[el]
+  let A ← invOf α
+  let B ← invOf ε
+  let hname ← freshCName "h"
+  let xname ← freshCName "x"
+  let yname ← freshCName "y"
+  let ce ← evalGoalCe g
+  let cn ← mkFreshExprMVar (mkConst ``Exp)
+  let gn ← mkFreshExprMVar (← mkAppM ``Eval #[env, cn, mkApp (mkConst ``NAT) nE])
+  solve gn.mvarId!
+  let ci ← mkFreshExprMVar (mkConst ``Exp)
+  let gi ← mkFreshExprMVar (← mkAppM ``Eval #[env, ci, mkApp S x₀])
+  solve gi.mvarId!
+  let envH (b loc : Expr) : GoalM Expr := do
+    mkAppM ``SemEnv.mk #[← mkAppM ``nsOptBind #[← mkAppM ``Option.some #[mlString hname],
+      ← mkAppM ``Value.loc #[b, loc], ← mkAppM ``SemEnv.v #[env]], ← mkAppM ``SemEnv.c #[env]]
+  let rf ← withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+    mkLambdaFVars #[loc] (← mkAppM ``ConPastel.Translator.arrRel #[S, loc])
+  let invM ← mkAppOptM ``MRET #[σ, ε, α, rf, A, B]
+  let cm ← mkFreshExprMVar (mkConst ``Exp)
+  let hm ← withLocalDeclD `b (mkConst ``Bool) fun b => do
+    withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+      let env' ← envH b loc
+      let gm ← mkFreshExprMVar (← mkAppM ``Eval #[env', cm, mkApp invM m])
+      solve gm.mvarId!
+      mkLambdaFVars #[b, loc] (← instantiateMVars gm)
+  let okF ← mkAppOptM ``Except.ok #[ε, α]
+  let errF ← mkAppOptM ``Except.error #[ε, α]
+  let cok ← mkFreshExprMVar (mkConst ``Exp)
+  let hok ← withLocalDeclD `b (mkConst ``Bool) fun b => do
+    withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+    withLocalDeclD `a α fun a => do
+    withLocalDeclD `av (mkConst ``Value) fun av => do
+    withLocalDeclD `hA (mkApp2 A a av) fun hA => do
+      let env' ← envH b loc
+      let env'' ← mkAppM ``SemEnv.mk #[← mkAppM ``nsOptBind #[← mkAppM ``Option.some #[mlString xname], av,
+        ← mkAppM ``SemEnv.v #[env']], ← mkAppM ``SemEnv.c #[env]]
+      modify fun s => { s with locals := s.locals.push { fvar := a, cname := xname, value := av, rel := hA } }
+      let gk ← mkFreshExprMVar (← mkAppM ``Eval #[env'', cok, mkApp inv (mkApp okF a)])
+      solve gk.mvarId!
+      modify fun s => { s with locals := s.locals.pop }
+      mkLambdaFVars #[b, loc, a, av, hA] (← instantiateMVars gk)
+  let cerr ← mkFreshExprMVar (mkConst ``Exp)
+  let herr ← withLocalDeclD `b (mkConst ``Bool) fun b => do
+    withLocalDeclD `loc (mkConst ``Nat) fun loc => do
+    withLocalDeclD `e ε fun e => do
+    withLocalDeclD `ev (mkConst ``Value) fun ev => do
+    withLocalDeclD `hB (mkApp2 B e ev) fun hB => do
+      let env' ← envH b loc
+      let pty ← mkAppM ``Prod #[mkConst ``VarN, mkConst ``Value]
+      let al ← mkListLit pty [← mkAppM ``Prod.mk #[mlString yname, ev]]
+      let env'' ← mkAppM ``SemEnv.mk #[← mkAppM ``nsAppend #[← mkAppOptM ``alistToNs #[mkConst ``ModN, none, none, al],
+        ← mkAppM ``SemEnv.v #[env']], ← mkAppM ``SemEnv.c #[env]]
+      modify fun s => { s with locals := s.locals.push { fvar := e, cname := yname, value := ev, rel := hB } }
+      let gk ← mkFreshExprMVar (← mkAppM ``Eval #[env'', cerr, mkApp inv (mkApp errF e)])
+      solve gk.mvarId!
+      modify fun s => { s with locals := s.locals.pop }
+      mkLambdaFVars #[b, loc, e, ev, hB] (← instantiateMVars gk)
+  let pf ← mkAppOptM ``Eval_runArr #[el, ε, α, none, S, A, B, inv, env, ← instantiateMVars cn, ← instantiateMVars ci,
+    ← instantiateMVars cm, ← instantiateMVars cok, ← instantiateMVars cerr, mlString hname, mlString xname,
+    mlString yname, nE, x₀, m, okF, errF, ← instantiateMVars gn, ← instantiateMVars gi, hm, hok, herr]
+  let pty ← inferType pf
+  let some (_, ceP, _) := (← whnfR pty).getAppFnArgs.2.toList.toArray[1]? |>.map (fun c => ((), c, ())) | throwError "runArr: proof"
+  unless ← isDefEq ce ceP do throwError "runArr: code mismatch"
   assignProof g pf
 
 /-- `a.toList` of a Braun-tree array (`treeArrayElem?`): the list of its tree,
@@ -1585,6 +1703,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       return
   -- running a computation on a fresh reference
   if let .const cn _ := fn then
+    if cn == ``ConPastel.Translator.runArr && args.size == 6 then
+      if (← stateArrMonad? (← inferType args[5]!)).isSome then
+        return ← solveRunArr g env inv args
     if cn == ``ConPastel.Translator.runRef && args.size == 5 then
       if (← stateRefMonad? (← inferType args[4]!)).isSome then
         return ← solveRunRef g env inv args
