@@ -842,4 +842,343 @@ theorem swap_leave {st st₂ st₃ : σ} {r r₃ r₄ : Store Value} {vals valsX
 
 end
 
+/-! ## The swap -/
+
+theorem wlookup_map_get {ι : Type} (l : List ι) (f : ι → Nat) (g : ι → Src) (hnd : (l.map f).Nodup) :
+    ∀ k (hk : k < l.length), wlookup (l.map fun i => (f i, g i)) (f l[k]) = some (g l[k]) := by
+  induction l with
+  | nil => intro k hk; simp at hk
+  | cons x xs ih =>
+    intro k hk
+    rw [List.map_cons] at hnd
+    have hnd' := List.nodup_cons.mp hnd
+    cases k with
+    | zero => simp [wlookup]
+    | succ k =>
+      have hk' : k < xs.length := by simpa using hk
+      have hne : f xs[k] ≠ f x := fun he => hnd'.1 (by rw [← he]; exact List.mem_map_of_mem (List.getElem_mem hk'))
+      simp only [List.map_cons, wlookup, List.getElem_cons_succ, hne, if_false]
+      exact ih hnd'.2 k hk'
+
+/-- The swap's code. -/
+def swapExp (h a r : VarN) (ps : List (Nat × Nat)) (snames fnames : List VarN) (enils : List Exp)
+    (ex : Exp) : Exp :=
+  readsExp h (snames.zip (ps.map (·.1))) <|
+  freshExp a (fnames.zip enils) <|
+  writesExp h (ps.map fun p => (p.1, Src.rd p.2)) <|
+  writesExp h ((ps.zip fnames).map fun q => (q.1.2, Src.var q.2)) <|
+  .let_ (some r) ex <|
+  writesExp h (ps.map fun p => (p.2, Src.rd p.1)) <|
+  writesExp h ((ps.zip snames).map fun q => (q.1.1, Src.var q.2)) <|
+  .var (.short r)
+
+/-- A computation run between `enter` and `leave` (`leave` sees the state the
+computation started from). -/
+def swapRun {σ ε α : Type} (enter : σ → σ) (leave : σ → σ → σ) (x : StateT σ (Except ε) α) :
+    StateT σ (Except ε) α :=
+  fun st => match x (enter st) with
+    | .ok (a, st₂) => .ok (a, leave st₂ st)
+    | .error e => .error e
+
+theorem zip_map_fst {α β : Type} : ∀ (l₁ : List α) (l₂ : List β), l₁.length = l₂.length → (l₁.zip l₂).map (·.1) = l₁
+  | [], [], _ => rfl
+  | _ :: xs, _ :: ys, h => by simp [zip_map_fst xs ys (by simpa using h)]
+
+theorem zip_map_snd {α β : Type} : ∀ (l₁ : List α) (l₂ : List β), l₁.length = l₂.length → (l₁.zip l₂).map (·.2) = l₂
+  | [], [], _ => rfl
+  | _ :: xs, _ :: ys, h => by simp [zip_map_snd xs ys (by simpa using h)]
+
+/-- **A computation run on swapped tables** (`withEagerMemos`'s shape). -/
+theorem EvalM_swap {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Value → Prop} {loc : Nat}
+    {env : SemEnv Value} {h a r : VarN} {b₀ : Bool} {N : Nat} {ps : List (Nat × Nat)}
+    {snames fnames : List VarN} {enils : List Exp} {ex : Exp} {A : RefInv α} {B : RefInv ε}
+    {BIs : List (Σ K V : Type, RefInv (Bkt K V))}
+    {enter : σ → σ} {leave : σ → σ → σ} {x : StateT σ (Except ε) α}
+    (hh : nsLookup env.v (.short h) = some (.loc b₀ loc))
+    (hN : ∀ st, (tabs st).length = N)
+    (hps : ∀ p ∈ ps, p.1 < N ∧ p.2 < N) (hnd : (ps.map (·.1) ++ ps.map (·.2)).Nodup)
+    (hls : snames.length = ps.length) (hlf : fnames.length = ps.length) (hle : enils.length = ps.length)
+    (hlB : BIs.length = ps.length)
+    (hnames : (h :: r :: (snames ++ fnames)).Nodup)
+    (hnil : ∀ k (hk : k < ps.length) ns,
+      Eval { env with v := ns } (enils[k]'(by omega)) ((BIs[k]'(by omega)).2.2 .nil))
+    (E1 : ∀ st j, j ∉ ps.map (·.1) → j ∉ ps.map (·.2) → (tabs (enter st))[j]? = (tabs st)[j]?)
+    (E2 : ∀ st k (hk : k < ps.length) e e', (tabs st)[(ps[k]).2]? = some e →
+      (tabs (enter st))[(ps[k]).1]? = some e' →
+      ∀ r tl, (tblRel e.BI tl).rel e.raw r → (tblRel e'.BI tl).rel e'.raw r)
+    (E3 : ∀ st k (hk : k < ps.length) e, (tabs (enter st))[(ps[k]).2]? = some e → ∀ r tl,
+      (∀ raw : TRaw (BIs[k]'(by omega)).1 (BIs[k]'(by omega)).2.1, EmptyRaw raw →
+        (tblRel (BIs[k]'(by omega)).2.2 tl).rel raw r) → (tblRel e.BI tl).rel e.raw r)
+    (P1 : ∀ st v, P (enter st) v ↔ P st v)
+    (L1 : ∀ st st₂ j, j ∉ ps.map (·.1) → j ∉ ps.map (·.2) → (tabs (leave st₂ st))[j]? = (tabs st₂)[j]?)
+    (L2 : ∀ st st₂ k (hk : k < ps.length), (tabs (leave st₂ st))[(ps[k]).1]? = (tabs st)[(ps[k]).1]?)
+    (L3 : ∀ st st₂ k (hk : k < ps.length) e e', (tabs st₂)[(ps[k]).1]? = some e →
+      (tabs (leave st₂ st))[(ps[k]).2]? = some e' →
+      ∀ r tl, (tblRel e.BI tl).rel e.raw r → (tblRel e'.BI tl).rel e'.raw r)
+    (P2 : ∀ st st₂ v, P (leave st₂ st) v ↔ P st₂ v)
+    (hx : ∀ vs, vs.length = ps.length → ∀ ws, ws.length = ps.length →
+      EvalM (recRel tabs P loc) (bindAll (bindAll env snames vs) fnames ws) ex A B x) :
+    EvalM (recRel tabs P loc) env (swapExp h a r ps snames fnames enils ex) A B (swapRun enter leave x) := by
+  intro τ s st hst
+  obtain ⟨vals, hk⟩ := hst
+  have hvl : vals.length = N + 1 := by rw [hk.len, hN]
+  have hp1 : ∀ k (h : k < ps.length), (ps[k]).1 < N := fun k h => (hps _ (List.getElem_mem h)).1
+  have hp2 : ∀ k (h : k < ps.length), (ps[k]).2 < N := fun k h => (hps _ (List.getElem_mem h)).2
+  have hnd1 : (ps.map (·.1)).Nodup := (List.nodup_append.mp hnd).1
+  have hnd2 : (ps.map (·.2)).Nodup := (List.nodup_append.mp hnd).2.1
+  have h12 : ∀ j ∈ ps.map (·.1), j ∉ ps.map (·.2) := fun j h₁ h₂ =>
+    (List.nodup_append.mp hnd).2.2 j h₁ j h₂ rfl
+  have h12' : ∀ q ∈ ps, q.2 ∉ ps.map (·.1) := fun q hq hm =>
+    h12 q.2 hm (List.mem_map_of_mem (f := (·.2)) hq)
+  have h21' : ∀ q ∈ ps, q.1 ∉ ps.map (·.2) := fun q hq hm =>
+    h12 q.1 (List.mem_map_of_mem (f := (·.1)) hq) hm
+  -- names
+  have hn' := List.nodup_cons.mp hnames
+  have hn'' := List.nodup_cons.mp hn'.2
+  have hsf := List.nodup_append.mp hn''.2
+  have hhs : h ∉ snames := fun hm => hn'.1 (List.mem_cons_of_mem _ (List.mem_append_left _ hm))
+  have hhf : h ∉ fnames := fun hm => hn'.1 (List.mem_cons_of_mem _ (List.mem_append_right _ hm))
+  have hrh : r ≠ h := fun he => hn'.1 (by rw [he]; exact List.mem_cons_self ..)
+  have hrs : r ∉ snames := fun hm => hn''.1 (List.mem_append_left _ hm)
+  have hrf : r ∉ fnames := fun hm => hn''.1 (List.mem_append_right _ hm)
+  -- 1. the saved handles
+  let rs := snames.zip (ps.map (·.1))
+  let svs := rs.map fun p => vals.getD p.2 (.conv none [])
+  have hrs1 : rs.map (·.1) = snames := zip_map_fst _ _ (by simp [hls])
+  have hsvs_len : svs.length = snames.length := by simp [svs, rs, hls]
+  let env₁ := bindAll env snames svs
+  have henv₁ : readsEnv env vals rs = env₁ := by rw [readsEnv_eq, hrs1]
+  have hc₁ : env₁.c = env.c := bindAll_c _ _ _
+  -- 2. the fresh tables
+  have hfl₀ : (fnames.zip enils).length = BIs.length := by simp [hlf, hle, hlB]
+  obtain ⟨r₂, fvs, hfr, hcont⟩ := Runs_fresh (a := a) (fnames.zip enils) BIs env₁ s hfl₀
+    (fun k hk ns => by
+      have hk' : k < ps.length := by simp at hk; omega
+      have := hnil k hk' ns
+      simp only [List.getElem_zip]
+      rw [hc₁]; exact this)
+  have hzf : (fnames.zip enils).map (·.1) = fnames := zip_map_fst _ _ (by omega)
+  have hfvl : fvs.length = ps.length := by rw [hfr.len, hlB]
+  let env₂ := bindAll env₁ fnames fvs
+  have henv₂ : freshEnv env₁ ((fnames.zip enils).map (·.1)) fvs = env₂ := by rw [hzf, freshEnv_eq]
+  obtain ⟨extra₂, hr₂⟩ := hfr.pre
+  have hlocr : loc < s.refs.length := (List.getElem?_eq_some_iff.mp hk.cell).1
+  have hc₂ : r₂[loc]? = some (.varray vals) := by rw [hr₂, List.getElem?_append_left hlocr, hk.cell]
+  have hh₂ : nsLookup env₂.v (.short h) = some (.loc b₀ loc) := by
+    rw [bindAll_ne _ _ _ _ hhf, bindAll_ne _ _ _ _ hhs, hh]
+  -- 3. the writes into the state
+  let ws1 := ps.map fun p => (p.1, Src.rd p.2)
+  let ws1b := (ps.zip fnames).map fun q => (q.1.2, Src.var q.2)
+  let vals₁ := writesVals env₂ vals ws1
+  let vals₂ := writesVals env₂ vals₁ ws1b
+  have hl₁ : vals₁.length = vals.length := writesVals_length _ _ _
+  have hl₂ : vals₂.length = vals.length := by rw [writesVals_length, hl₁]
+  have hws1t : ws1.map (·.1) = ps.map (·.1) := by simp [ws1]
+  have hws1bt : ws1b.map (·.1) = ps.map (·.2) := by
+    simp only [ws1b, List.map_map]
+    exact (by
+      have := zip_map_fst ps fnames (by omega)
+      calc ((ps.zip fnames).map ((·.1) ∘ fun q => (q.1.2, Src.var q.2))) = ((ps.zip fnames).map (·.1)).map (·.2) := by
+            simp [List.map_map, Function.comp_def]
+        _ = ps.map (·.2) := by rw [this])
+  have hzip_get : ∀ k (hk : k < ps.length), (ps.zip fnames)[k]'(by simp; omega) = (ps[k], fnames[k]'(by omega)) := by
+    intro k hk; simp
+  have hlookf : ∀ k (hk : k < ps.length), nsLookup env₂.v (.short (fnames[k]'(by omega))) = some (fvs[k]'(by omega)) :=
+    fun k hk => bindAll_get env₁ fnames fvs hsf.2.1 (by omega) k (by omega)
+  have hv1 : ∀ t, vals₁[t]? = match wlookup ws1 t with
+      | some src => some (srcVal env₂ vals src) | none => vals[t]? :=
+    fun t => writesVals_get env₂ ws1 vals t (by rw [hws1t]; exact hnd1)
+      (by
+        intro p hp j hj
+        obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+        simp only [Src.rd.injEq] at hj; subst hj
+        rw [hws1t]; exact h12' q hq)
+      (by intro p hp; obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; have := (hps q hq).1; omega)
+  have hv2 : ∀ t, vals₂[t]? = match wlookup ws1b t with
+      | some src => some (srcVal env₂ vals₁ src) | none => vals₁[t]? :=
+    fun t => writesVals_get env₂ ws1b vals₁ t (by rw [hws1bt]; exact hnd2)
+      (by
+        intro p hp j hj
+        obtain ⟨q, _, rfl⟩ := List.mem_map.mp hp
+        simp at hj)
+      (by
+        intro p hp
+        obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+        have := (hps q.1 (List.of_mem_zip hq).1).2
+        simp only; omega)
+  have hw1 : ∀ k (hk : k < ps.length), wlookup ws1 (ps[k]).1 = some (.rd (ps[k]).2) :=
+    fun k hk => wlookup_map_get ps (·.1) (fun p => Src.rd p.2) hnd1 k hk
+  have hw1b : ∀ k (hk : k < ps.length), wlookup ws1b (ps[k]).2 = some (.var (fnames[k]'(by omega))) := by
+    intro k hk
+    have := wlookup_map_get (ps.zip fnames) (fun q => q.1.2) (fun q => Src.var q.2)
+      (by
+        have e : (ps.zip fnames).map (fun q => q.1.2) = ps.map (·.2) := by
+          have := zip_map_fst ps fnames (by omega)
+          calc (ps.zip fnames).map (fun q => q.1.2) = ((ps.zip fnames).map (·.1)).map (·.2) := by
+                simp [List.map_map, Function.comp_def]
+            _ = ps.map (·.2) := by rw [this]
+        rw [e]; exact hnd2) k (by simp; omega)
+    simpa using this
+  have hw1n : ∀ j, j ∉ ps.map (·.1) → wlookup ws1 j = none := fun j hj => wlookup_none _ _ (by rw [hws1t]; exact hj)
+  have hw1bn : ∀ j, j ∉ ps.map (·.2) → wlookup ws1b j = none := fun j hj => wlookup_none _ _ (by rw [hws1bt]; exact hj)
+  have d1 : ∀ k (hk : k < ps.length), vals₂[(ps[k]).1]? = vals[(ps[k]).2]? := by
+    intro k hk
+    rw [hv2, hw1bn _ (h21' _ (List.getElem_mem hk)), hv1, hw1 k hk]
+    simp [srcVal, List.getD, List.getElem?_eq_getElem (show (ps[k]).2 < vals.length by have := hp2 k hk; omega)]
+  have d2 : ∀ k (hk : k < ps.length), vals₂[(ps[k]).2]? = fvs[k]? := by
+    intro k hk
+    rw [hv2, hw1b k hk]
+    simp [srcVal, hlookf k hk, List.getElem?_eq_getElem (show k < fvs.length by omega)]
+  have d3 : ∀ j, j ∉ ps.map (·.1) → j ∉ ps.map (·.2) → vals₂[j]? = vals[j]? := by
+    intro j h1 h2
+    rw [hv2, hw1bn j h2, hv1, hw1n j h1]
+  let r₃ := r₂.set loc (.varray vals₂)
+  obtain ⟨hk₃, hfr₃, hsaved, hsame₃⟩ := swap_enter (st₁ := enter st) (N := N) hk (hN st) (hN _) hps hnd hfr hlB
+    hl₂ d1 d2 d3 (E1 st) (E2 st) (E3 st) (P1 st)
+  -- the runs of the writes so far
+  have hwr1 : ∀ (k : Exp) (s₂ : State τ) res, Runs { s with refs := r₃ } env₂ [k] s₂ res →
+      res ≠ .err (.abort .timeoutError) →
+      Runs { s with refs := r₂ } env₂ [writesExp h ws1 (writesExp h ws1b k)] s₂ res := by
+    intro k s₂ res hk' hr
+    refine Runs_writes hh₂ ws1 vals { s with refs := r₂ } s₂ _ res hc₂ ?_ ?_ hr
+    · intro p hp
+      obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+      have := hps q hq
+      exact ⟨by simp only; omega, by simp only; omega⟩
+    · have hc₂' : (r₂.set loc (.varray vals₁))[loc]? = some (.varray vals₁) :=
+        List.getElem?_set_self (by rw [hr₂]; simp; omega)
+      refine Runs_writes hh₂ ws1b vals₁ _ s₂ k res hc₂' ?_ ?_ hr
+      · intro p hp
+        obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+        obtain ⟨hq1, hq2⟩ := List.of_mem_zip hq
+        refine ⟨by have := (hps q.1 hq1).2; simp only; omega, ?_⟩
+        obtain ⟨k₀, hk₀, hqe⟩ := List.getElem_of_mem hq2
+        simp only
+        rw [← hqe, hlookf k₀ (by omega)]; rfl
+      · simpa [List.set_set, r₃] using hk'
+  have hpre : ∀ (k : Exp) (s₂ : State τ) res, Runs { s with refs := r₃ } env₂ [k] s₂ res →
+      res ≠ .err (.abort .timeoutError) →
+      Runs s env [readsExp h rs (freshExp a (fnames.zip enils) (writesExp h ws1 (writesExp h ws1b k)))] s₂ res := by
+    intro k s₂ res hk' hr
+    refine Runs_reads rs env s s₂ _ res hh hk.cell ?_ ?_ hr
+    · intro p hp
+      obtain ⟨hp1', hp2'⟩ := List.of_mem_zip hp
+      refine ⟨fun he => hhs (he ▸ hp1'), ?_⟩
+      obtain ⟨q, hq, hqe⟩ := List.mem_map.mp hp2'
+      have := (hps q hq).1; omega
+    · rw [henv₁]
+      refine hcont _ s₂ res ?_ hr
+      rw [henv₂]
+      exact hwr1 k s₂ res hk' hr
+  -- 4. the run
+  obtain ⟨r₄, res₄, hrun₄, hfr₄, hm₄⟩ := hx svs (by rw [hsvs_len, hls]) fvs hfvl τ { s with refs := r₃ } (enter st)
+    ⟨vals₂, hk₃⟩
+  simp only [swapRun]
+  revert hm₄
+  cases hxe : x (enter st) with
+  | error e =>
+    intro hm₄
+    obtain ⟨v, rfl, hB⟩ := hm₄
+    refine ⟨r₄, _, ?_, hfr₃.trans hfr₄, v, rfl, hB⟩
+    exact hpre _ _ _ (Runs.let_err (n := some r) hrun₄) (by simp)
+  | ok p =>
+    obtain ⟨a', st₂⟩ := p
+    intro hm₄
+    obtain ⟨⟨valsX, hkX⟩, v, rfl, hA⟩ := hm₄
+    let envR : SemEnv Value := { env₂ with v := nsOptBind (some r) v env₂.v }
+    have hhR : nsLookup envR.v (.short h) = some (.loc b₀ loc) := nsl_ne hrh hh₂
+    have hvXl : valsX.length = N + 1 := by rw [hkX.len, hN]
+    have hsnf : ∀ k (hk : k < ps.length), snames[k]'(by omega) ∉ fnames := fun k hk hm =>
+      hsf.2.2 _ (List.getElem_mem (by omega)) _ hm rfl
+    have hsvs_get : ∀ k (hk : k < ps.length), svs[k]'(by omega) = vals.getD (ps[k]).1 (.conv none []) := by
+      intro k hk; simp [svs, rs]
+    have hlooks : ∀ k (hk : k < ps.length), nsLookup envR.v (.short (snames[k]'(by omega))) =
+        some (vals.getD (ps[k]).1 (.conv none [])) := by
+      intro k hk
+      have hne : snames[k]'(by omega) ≠ r := fun he => hrs (by rw [← he]; exact List.getElem_mem _)
+      exact nsl_ne (Ne.symm hne) (by
+        rw [bindAll_ne _ _ _ _ (hsnf k hk), bindAll_get env snames svs hsf.1 (by omega) k (by omega), hsvs_get k hk])
+    let ws2 := ps.map fun p => (p.2, Src.rd p.1)
+    let ws2b := (ps.zip snames).map fun q => (q.1.1, Src.var q.2)
+    let valsY := writesVals envR valsX ws2
+    let valsZ := writesVals envR valsY ws2b
+    have hlY : valsY.length = valsX.length := writesVals_length _ _ _
+    have hlZ : valsZ.length = valsX.length := by rw [writesVals_length, hlY]
+    have hws2t : ws2.map (·.1) = ps.map (·.2) := by simp [ws2]
+    have hws2bt : ws2b.map (·.1) = ps.map (·.1) := by
+      have := zip_map_fst ps snames (by omega)
+      calc ws2b.map (·.1) = ((ps.zip snames).map (·.1)).map (·.1) := by simp [ws2b, List.map_map, Function.comp_def]
+        _ = ps.map (·.1) := by rw [this]
+    have hvY : ∀ t, valsY[t]? = match wlookup ws2 t with
+        | some src => some (srcVal envR valsX src) | none => valsX[t]? :=
+      fun t => writesVals_get envR ws2 valsX t (by rw [hws2t]; exact hnd2)
+        (by
+          intro p hp j hj
+          obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+          simp only [Src.rd.injEq] at hj; subst hj
+          rw [hws2t]; exact h21' q hq)
+        (by intro p hp; obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; have := (hps q hq).2; simp only; omega)
+    have hvZ : ∀ t, valsZ[t]? = match wlookup ws2b t with
+        | some src => some (srcVal envR valsY src) | none => valsY[t]? :=
+      fun t => writesVals_get envR ws2b valsY t (by rw [hws2bt]; exact hnd1)
+        (by intro p hp j hj; obtain ⟨q, _, rfl⟩ := List.mem_map.mp hp; simp at hj)
+        (by
+          intro p hp
+          obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+          have := (hps q.1 (List.of_mem_zip hq).1).1
+          simp only; omega)
+    have hw2 : ∀ k (hk : k < ps.length), wlookup ws2 (ps[k]).2 = some (.rd (ps[k]).1) :=
+      fun k hk => wlookup_map_get ps (·.2) (fun p => Src.rd p.1) hnd2 k hk
+    have hw2b : ∀ k (hk : k < ps.length), wlookup ws2b (ps[k]).1 = some (.var (snames[k]'(by omega))) := by
+      intro k hk
+      have := wlookup_map_get (ps.zip snames) (fun q => q.1.1) (fun q => Src.var q.2)
+        (by
+          have e : (ps.zip snames).map (fun q => q.1.1) = ps.map (·.1) := by
+            have := zip_map_fst ps snames (by omega)
+            calc (ps.zip snames).map (fun q => q.1.1) = ((ps.zip snames).map (·.1)).map (·.1) := by
+                  simp [List.map_map, Function.comp_def]
+              _ = ps.map (·.1) := by rw [this]
+          rw [e]; exact hnd1) k (by simp; omega)
+      simpa using this
+    have hw2n : ∀ j, j ∉ ps.map (·.2) → wlookup ws2 j = none := fun j hj => wlookup_none _ _ (by rw [hws2t]; exact hj)
+    have hw2bn : ∀ j, j ∉ ps.map (·.1) → wlookup ws2b j = none := fun j hj => wlookup_none _ _ (by rw [hws2bt]; exact hj)
+    have z1 : ∀ k (hk : k < ps.length), valsZ[(ps[k]).1]? = vals[(ps[k]).1]? := by
+      intro k hk
+      rw [hvZ, hw2b k hk]
+      simp only [srcVal, hlooks k hk, Option.getD_some, List.getD]
+      rw [List.getElem?_eq_getElem (show (ps[k]).1 < vals.length by have := hp1 k hk; omega)]; rfl
+    have z2 : ∀ k (hk : k < ps.length), valsZ[(ps[k]).2]? = valsX[(ps[k]).1]? := by
+      intro k hk
+      rw [hvZ, hw2bn _ (h12' _ (List.getElem_mem hk)), hvY, hw2 k hk]
+      simp [srcVal, List.getD, List.getElem?_eq_getElem (show (ps[k]).1 < valsX.length by have := hp1 k hk; omega)]
+    have z3 : ∀ j, j ∉ ps.map (·.1) → j ∉ ps.map (·.2) → valsZ[j]? = valsX[j]? := by
+      intro j h1 h2
+      rw [hvZ, hw2bn j h1, hvY, hw2n j h2]
+    obtain ⟨hk₅, hfr₅⟩ := swap_leave (st₃ := leave st₂ st) hk hkX (hN st) (hN st₂) (hN _) hps hnd hfr₃ hfr₄
+      hsaved hsame₃ hlZ z1 z2 z3 (L1 st st₂) (L2 st st₂) (L3 st st₂) (P2 st st₂)
+    -- the runs of the last writes
+    have hc₄ : r₄[loc]? = some (.varray valsX) := hkX.cell
+    have hfin : Runs { s with refs := r₄ } envR [writesExp h ws2 (writesExp h ws2b (.var (.short r)))]
+        { s with refs := r₄.set loc (.varray valsZ) } (.val [v]) := by
+      refine Runs_writes hhR ws2 valsX { s with refs := r₄ } _ _ _ hc₄ ?_ ?_ (by simp)
+      · intro p hp
+        obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+        have := hps q hq
+        exact ⟨by simp only; omega, by simp only; omega⟩
+      · have hc₄' : (r₄.set loc (.varray valsY))[loc]? = some (.varray valsY) :=
+          List.getElem?_set_self (List.getElem?_eq_some_iff.mp hc₄).1
+        refine Runs_writes hhR ws2b valsY _ _ _ _ hc₄' ?_ ?_ (by simp)
+        · intro p hp
+          obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp
+          obtain ⟨hq1, hq2⟩ := List.of_mem_zip hq
+          refine ⟨by have := (hps q.1 hq1).1; simp only; omega, ?_⟩
+          obtain ⟨k₀, hk₀, hqe⟩ := List.getElem_of_mem hq2
+          simp only
+          rw [← hqe, hlooks k₀ (by omega)]; rfl
+        · refine ⟨0, 0, ?_⟩
+          simp [evaluate, envR, nsl_self, List.set_set] <;> rfl
+    refine ⟨r₄.set loc (.varray valsZ), .val [v], ?_, hfr₅, ⟨valsZ, hk₅⟩, v, rfl, hA⟩
+    have hlet := Runs.let_ (n := some r) (env := env₂) hrun₄ hfin (by simp)
+    exact hpre _ _ _ hlet (by simp)
+
 end ConPastel.Translator
