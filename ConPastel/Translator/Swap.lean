@@ -21,6 +21,7 @@ state does not own them, so the computation cannot change them (`Frame`).
 -/
 
 namespace ConPastel.Translator
+universe u v
 open Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.EvaluateHOL
 open Flapjack.NamespaceHOL
 
@@ -78,19 +79,19 @@ theorem freshEnv_c (env : SemEnv Value) : ∀ fs vs, (freshEnv env fs vs).c = en
   | _ :: _, [] => rfl
 
 /-- What allocating the fresh tables produces. -/
-structure FreshOk (r r' : Store Value) (BIs : List (Σ K V : Type, RefInv (Bkt K V))) (hs : List Value) : Prop where
+structure FreshOk (r r' : Store Value) (BIs : List TEntry) (hs : List Value) : Prop where
   pre : ∃ extra, r' = r ++ extra
   len : hs.length = BIs.length
   tbl : ∀ k (hk : k < BIs.length), ∃ tl, hs[k]'(by omega) = .loc true tl ∧
-    ∀ raw : TRaw (BIs[k]).1 (BIs[k]).2.1, EmptyRaw raw → (tblRel (BIs[k]).2.2 tl).rel raw r'
+    ∀ raw : TRaw (BIs[k]).K (BIs[k]).V, EmptyRaw raw → (tblRel (BIs[k]).BI tl).rel raw r'
   fresh : ∀ k (hk : k < BIs.length) l, tblOwns r' (hs[k]'(by omega)) l → r.length ≤ l
   disj : ∀ k₁ k₂ (h₁ : k₁ < BIs.length) (h₂ : k₂ < BIs.length), k₁ ≠ k₂ → ∀ l,
     tblOwns r' (hs[k₁]'(by omega)) l → ¬ tblOwns r' (hs[k₂]'(by omega)) l
 
 theorem Runs_fresh {τ : Type} {a : VarN} :
-    ∀ (fs : List (VarN × Exp)) (BIs : List (Σ K V : Type, RefInv (Bkt K V))) (env : SemEnv Value) (s : State τ)
+    ∀ (fs : List (VarN × Exp)) (BIs : List TEntry) (env : SemEnv Value) (s : State τ)
     (_ : fs.length = BIs.length)
-    (_ : ∀ k (hk : k < fs.length) ns, Eval { env with v := ns } (fs[k]).2 ((BIs[k]'(by omega)).2.2 .nil)),
+    (_ : ∀ k (hk : k < fs.length) ns, Eval { env with v := ns } (fs[k]).2 ((BIs[k]'(by omega)).BI .nil)),
     ∃ r' hs, FreshOk s.refs r' BIs hs ∧ ∀ (k : Exp) (s₂ : State τ) (res : Result (List Value) Value),
       Runs { s with refs := r' } (freshEnv env (fs.map (·.1)) hs) [k] s₂ res → res ≠ .err (.abort .timeoutError) →
       Runs s env [freshExp a fs k] s₂ res
@@ -104,7 +105,7 @@ theorem Runs_fresh {τ : Type} {a : VarN} :
       fun k _ hk => by simp at hk⟩, fun k s₂ res hk _ => ?_⟩
     simpa [freshExp, freshEnv] using hk
   | (f, e) :: fs, BIs, env, s, hl, hnil => by
-    obtain ⟨⟨K, V, BI⟩, BIs', rfl⟩ : ∃ x xs, BIs = x :: xs := by
+    obtain ⟨⟨K, V, BI, _⟩, BIs', rfl⟩ : ∃ x xs, BIs = x :: xs := by
       cases BIs with
       | nil => simp at hl
       | cons x xs => exact ⟨x, xs, rfl⟩
@@ -410,7 +411,7 @@ theorem getElem_of_getElem? {α : Type u} {l : List α} {i : Nat} {x : α} (hi :
 /-- **Entering the swap**: `vals₂` holds the old tables of the fields `ps·.2`
 in the fields `ps·.1`, fresh tables in the fields `ps·.2`, the rest unchanged. -/
 theorem swap_enter {st st₁ : σ} {r r₂ : Store Value} {vals vals₂ : List Value} {N : Nat}
-    {ps : List (Nat × Nat)} {BIs : List (Σ K V : Type, RefInv (Bkt K V))} {fvs : List Value}
+    {ps : List (Nat × Nat)} {BIs : List TEntry} {fvs : List Value}
     (hk : RecOk tabs P loc st r vals) (hN : (tabs st).length = N) (hN₁ : (tabs st₁).length = N)
     (hps : ∀ p ∈ ps, p.1 < N ∧ p.2 < N) (hnd : (ps.map (·.1) ++ ps.map (·.2)).Nodup)
     (hfr : FreshOk r r₂ BIs fvs) (hBIs : BIs.length = ps.length)
@@ -422,8 +423,8 @@ theorem swap_enter {st st₁ : σ} {r r₂ : Store Value} {vals vals₂ : List V
     (E2 : ∀ k (hk : k < ps.length) e e', (tabs st)[(ps[k]).2]? = some e → (tabs st₁)[(ps[k]).1]? = some e' →
       ∀ r tl, (tblRel e.BI tl).rel e.raw r → (tblRel e'.BI tl).rel e'.raw r)
     (E3 : ∀ k (hk : k < ps.length) e, (tabs st₁)[(ps[k]).2]? = some e → ∀ r tl,
-      (∀ raw : TRaw (BIs[k]'(by omega)).1 (BIs[k]'(by omega)).2.1, EmptyRaw raw →
-        (tblRel (BIs[k]'(by omega)).2.2 tl).rel raw r) → (tblRel e.BI tl).rel e.raw r)
+      (∀ raw : TRaw (BIs[k]'(by omega)).K (BIs[k]'(by omega)).V, EmptyRaw raw →
+        (tblRel (BIs[k]'(by omega)).BI tl).rel raw r) → (tblRel e.BI tl).rel e.raw r)
     (P1 : ∀ v, P st₁ v ↔ P st v) :
     RecOk tabs P loc st₁ (r₂.set loc (.varray vals₂)) vals₂ ∧
       Frame (recRel tabs P loc) r (r₂.set loc (.varray vals₂)) ∧
@@ -470,8 +471,8 @@ theorem swap_enter {st st₁ : σ} {r r₂ : Store Value} {vals vals₂ : List V
     intro l; have := hown l; rwa [hv] at this
   -- a fresh table
   have freshOk : ∀ k (hk : k < ps.length), ∃ tl, fvs[k]? = some (.loc true tl) ∧
-      (∀ raw : TRaw (BIs[k]'(by omega)).1 (BIs[k]'(by omega)).2.1, EmptyRaw raw →
-        (tblRel (BIs[k]'(by omega)).2.2 tl).rel raw r₃) ∧
+      (∀ raw : TRaw (BIs[k]'(by omega)).K (BIs[k]'(by omega)).V, EmptyRaw raw →
+        (tblRel (BIs[k]'(by omega)).BI tl).rel raw r₃) ∧
       (∀ l, tblOwns r₃ (.loc true tl) l → r.length ≤ l) ∧
       ∀ l, tblOwns r₃ (.loc true tl) l ↔ tblOwns r₂ (fvs[k]'(by omega)) l := by
     intro k hk'
@@ -880,11 +881,11 @@ def swapRun {σ ε α : Type} (enter : σ → σ) (leave : σ → σ → σ) (x 
     | .ok (a, st₂) => .ok (a, leave st₂ st)
     | .error e => .error e
 
-theorem zip_map_fst {α β : Type} : ∀ (l₁ : List α) (l₂ : List β), l₁.length = l₂.length → (l₁.zip l₂).map (·.1) = l₁
+theorem zip_map_fst {α : Type u} {β : Type v} : ∀ (l₁ : List α) (l₂ : List β), l₁.length = l₂.length → (l₁.zip l₂).map (·.1) = l₁
   | [], [], _ => rfl
   | _ :: xs, _ :: ys, h => by simp [zip_map_fst xs ys (by simpa using h)]
 
-theorem zip_map_snd {α β : Type} : ∀ (l₁ : List α) (l₂ : List β), l₁.length = l₂.length → (l₁.zip l₂).map (·.2) = l₂
+theorem zip_map_snd {α : Type u} {β : Type v} : ∀ (l₁ : List α) (l₂ : List β), l₁.length = l₂.length → (l₁.zip l₂).map (·.2) = l₂
   | [], [], _ => rfl
   | _ :: xs, _ :: ys, h => by simp [zip_map_snd xs ys (by simpa using h)]
 
@@ -892,7 +893,7 @@ theorem zip_map_snd {α β : Type} : ∀ (l₁ : List α) (l₂ : List β), l₁
 theorem EvalM_swap {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Value → Prop} {loc : Nat}
     {env : SemEnv Value} {h a r : VarN} {b₀ : Bool} {N : Nat} {ps : List (Nat × Nat)}
     {snames fnames : List VarN} {enils : List Exp} {ex : Exp} {A : RefInv α} {B : RefInv ε}
-    {BIs : List (Σ K V : Type, RefInv (Bkt K V))}
+    {BIs : List TEntry}
     {enter : σ → σ} {leave : σ → σ → σ} {x : StateT σ (Except ε) α}
     (hh : nsLookup env.v (.short h) = some (.loc b₀ loc))
     (hN : ∀ st, (tabs st).length = N)
@@ -901,14 +902,14 @@ theorem EvalM_swap {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Val
     (hlB : BIs.length = ps.length)
     (hnames : (h :: r :: (snames ++ fnames)).Nodup)
     (hnil : ∀ k (hk : k < ps.length) ns,
-      Eval { env with v := ns } (enils[k]'(by omega)) ((BIs[k]'(by omega)).2.2 .nil))
+      Eval { env with v := ns } (enils[k]'(by omega)) ((BIs[k]'(by omega)).BI .nil))
     (E1 : ∀ st j, j ∉ ps.map (·.1) → j ∉ ps.map (·.2) → (tabs (enter st))[j]? = (tabs st)[j]?)
     (E2 : ∀ st k (hk : k < ps.length) e e', (tabs st)[(ps[k]).2]? = some e →
       (tabs (enter st))[(ps[k]).1]? = some e' →
       ∀ r tl, (tblRel e.BI tl).rel e.raw r → (tblRel e'.BI tl).rel e'.raw r)
     (E3 : ∀ st k (hk : k < ps.length) e, (tabs (enter st))[(ps[k]).2]? = some e → ∀ r tl,
-      (∀ raw : TRaw (BIs[k]'(by omega)).1 (BIs[k]'(by omega)).2.1, EmptyRaw raw →
-        (tblRel (BIs[k]'(by omega)).2.2 tl).rel raw r) → (tblRel e.BI tl).rel e.raw r)
+      (∀ raw : TRaw (BIs[k]'(by omega)).K (BIs[k]'(by omega)).V, EmptyRaw raw →
+        (tblRel (BIs[k]'(by omega)).BI tl).rel raw r) → (tblRel e.BI tl).rel e.raw r)
     (P1 : ∀ st v, P (enter st) v ↔ P st v)
     (L1 : ∀ st st₂ j, j ∉ ps.map (·.1) → j ∉ ps.map (·.2) → (tabs (leave st₂ st))[j]? = (tabs st₂)[j]?)
     (L2 : ∀ st st₂ k (hk : k < ps.length), (tabs (leave st₂ st))[(ps[k]).1]? = (tabs st)[(ps[k]).1]?)
@@ -1180,5 +1181,231 @@ theorem EvalM_swap {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Val
     refine ⟨r₄.set loc (.varray valsZ), .val [v], ?_, hfr₅, ⟨valsZ, hk₅⟩, v, rfl, hA⟩
     have hlet := Runs.let_ (n := some r) (env := env₂) hrun₄ hfin (by simp)
     exact hpre _ _ _ hlet (by simp)
+
+/-! ## The swap, its state changes given as list equations -/
+
+instance : Inhabited TEntry := ⟨⟨Unit, Unit, fun _ _ => True, ⟨0, #[]⟩⟩⟩
+
+/-- Set the listed positions. -/
+def setPairs : List TEntry → List (Nat × TEntry) → List TEntry
+  | l, [] => l
+  | l, (i, e) :: ws => setPairs (l.set i e) ws
+
+/-- The entry set at `t`, if any. -/
+def plookup : List (Nat × TEntry) → Nat → Option TEntry
+  | [], _ => none
+  | (i, e) :: ws, t => if t = i then some e else plookup ws t
+
+theorem plookup_none (ws : List (Nat × TEntry)) (t : Nat) (h : t ∉ ws.map (·.1)) : plookup ws t = none := by
+  induction ws with
+  | nil => rfl
+  | cons p ws ih =>
+    simp only [List.map_cons, List.mem_cons, not_or] at h
+    simp [plookup, h.1, ih h.2]
+
+theorem setPairs_get : ∀ (ws : List (Nat × TEntry)) (l : List TEntry) (t : Nat),
+    (ws.map (·.1)).Nodup → (∀ p ∈ ws, p.1 < l.length) →
+    (setPairs l ws)[t]? = match plookup ws t with
+      | some e => some e
+      | none => l[t]?
+  | [], l, t, _, _ => by simp [setPairs, plookup]
+  | (i, e) :: ws, l, t, hnd, hlt => by
+    simp only [setPairs, plookup]
+    rw [List.map_cons] at hnd
+    have hnd' := List.nodup_cons.mp hnd
+    rw [setPairs_get ws (l.set i e) t hnd'.2 (fun p hp => by simpa using hlt p (List.mem_cons_of_mem _ hp))]
+    have hi : i < l.length := hlt _ (List.mem_cons_self ..)
+    by_cases hti : t = i
+    · subst hti
+      have : plookup ws t = none := plookup_none ws t hnd'.1
+      simp [this, List.getElem?_set_self hi]
+    · simp only [hti, if_false]
+      cases plookup ws t <;> simp [List.getElem?_set_ne (Ne.symm hti)]
+
+theorem plookup_map_get {ι : Type u} (l : List ι) (f : ι → Nat) (g : ι → TEntry) (hnd : (l.map f).Nodup) :
+    ∀ k (hk : k < l.length), plookup (l.map fun i => (f i, g i)) (f l[k]) = some (g l[k]) := by
+  induction l with
+  | nil => intro k hk; simp at hk
+  | cons x xs ih =>
+    intro k hk
+    rw [List.map_cons] at hnd
+    have hnd' := List.nodup_cons.mp hnd
+    cases k with
+    | zero => simp [plookup]
+    | succ k =>
+      have hk' : k < xs.length := by simpa using hk
+      have hne : f xs[k] ≠ f x := fun he => hnd'.1 (by rw [← he]; exact List.mem_map_of_mem (List.getElem_mem hk'))
+      simp only [List.map_cons, plookup, List.getElem_cons_succ, hne, if_false]
+      exact ih hnd'.2 k hk'
+
+theorem plookup_append_left (ws₁ ws₂ : List (Nat × TEntry)) (t : Nat) (e : TEntry) (h : plookup ws₁ t = some e) :
+    plookup (ws₁ ++ ws₂) t = some e := by
+  induction ws₁ with
+  | nil => simp [plookup] at h
+  | cons p ws ih =>
+    simp only [List.cons_append, plookup] at h ⊢
+    split at h
+    · simp [*] at *
+    · simp [*]
+
+theorem plookup_append_right (ws₁ ws₂ : List (Nat × TEntry)) (t : Nat) (h : t ∉ ws₁.map (·.1)) :
+    plookup (ws₁ ++ ws₂) t = plookup ws₂ t := by
+  induction ws₁ with
+  | nil => rfl
+  | cons p ws ih =>
+    simp only [List.map_cons, List.mem_cons, not_or] at h
+    simp [plookup, h.1, ih h.2]
+
+/-- The tables when the swap starts: field `p.1` takes field `p.2`'s table, field `p.2` an empty one. -/
+def enterL (ps : List (Nat × Nat)) (emp : List TEntry) (l : List TEntry) : List TEntry :=
+  setPairs l ((ps.map fun p => (p.1, l.getD p.2 default)) ++ (ps.zip emp).map fun q => (q.1.2, q.2))
+
+/-- The tables when it ends: field `p.2` takes field `p.1`'s table, field `p.1` the saved one. -/
+def leaveL (ps : List (Nat × Nat)) (sav : List TEntry) (l : List TEntry) : List TEntry :=
+  setPairs l ((ps.map fun p => (p.2, l.getD p.1 default)) ++ (ps.zip sav).map fun q => (q.1.1, q.2))
+
+/-- **The swap**, with the tables of `enter st` and `leave st₂ st` given as
+list equations (which hold by computation for a concrete record). -/
+theorem EvalM_swapL {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Value → Prop} {loc : Nat}
+    {env : SemEnv Value} {h a r : VarN} {b₀ : Bool} {N : Nat} {ps : List (Nat × Nat)}
+    {snames fnames : List VarN} {enils : List Exp} {ex : Exp} {A : RefInv α} {B : RefInv ε}
+    {emp : List TEntry} {enter : σ → σ} {leave : σ → σ → σ} {x : StateT σ (Except ε) α}
+    (hh : nsLookup env.v (.short h) = some (.loc b₀ loc))
+    (hN : ∀ st, (tabs st).length = N)
+    (hps : ∀ p ∈ ps, p.1 < N ∧ p.2 < N) (hnd : (ps.map (·.1) ++ ps.map (·.2)).Nodup)
+    (hls : snames.length = ps.length) (hlf : fnames.length = ps.length) (hle : enils.length = ps.length)
+    (hlemp : emp.length = ps.length)
+    (hnames : (h :: r :: (snames ++ fnames)).Nodup)
+    (hemp : ∀ e ∈ emp, EmptyRaw e.raw)
+    (hnil : ∀ k (hk : k < ps.length) ns,
+      Eval { env with v := ns } (enils[k]'(by omega)) ((emp[k]'(by omega)).BI .nil))
+    (hE : ∀ st, tabs (enter st) = enterL ps emp (tabs st))
+    (hL : ∀ st st₂, tabs (leave st₂ st) = leaveL ps (ps.map fun p => (tabs st).getD p.1 default) (tabs st₂))
+    (P1 : ∀ st v, P (enter st) v ↔ P st v)
+    (P2 : ∀ st st₂ v, P (leave st₂ st) v ↔ P st₂ v)
+    (hx : ∀ vs, vs.length = ps.length → ∀ ws, ws.length = ps.length →
+      EvalM (recRel tabs P loc) (bindAll (bindAll env snames vs) fnames ws) ex A B x) :
+    EvalM (recRel tabs P loc) env (swapExp h a r ps snames fnames enils ex) A B (swapRun enter leave x) := by
+  have hnd1 : (ps.map (·.1)).Nodup := (List.nodup_append.mp hnd).1
+  have hnd2 : (ps.map (·.2)).Nodup := (List.nodup_append.mp hnd).2.1
+  have h12 : ∀ j ∈ ps.map (·.1), j ∉ ps.map (·.2) := fun j h₁ h₂ =>
+    (List.nodup_append.mp hnd).2.2 j h₁ j h₂ rfl
+  have hp1 : ∀ k (h : k < ps.length), (ps[k]).1 < N := fun k h => (hps _ (List.getElem_mem h)).1
+  have hp2 : ∀ k (h : k < ps.length), (ps[k]).2 < N := fun k h => (hps _ (List.getElem_mem h)).2
+  have hzipfst : ∀ (l : List TEntry), l.length = ps.length →
+      ((ps.zip l).map fun q => (q.1.2, q.2)).map (·.1) = ps.map (·.2) := by
+    intro l hl
+    have := zip_map_fst ps l (by omega)
+    calc ((ps.zip l).map fun q => (q.1.2, q.2)).map (·.1) = ((ps.zip l).map (·.1)).map (·.2) := by
+          simp [List.map_map, Function.comp_def]
+      _ = ps.map (·.2) := by rw [this]
+  have hzipfst' : ∀ (l : List TEntry), l.length = ps.length →
+      ((ps.zip l).map fun q => (q.1.1, q.2)).map (·.1) = ps.map (·.1) := by
+    intro l hl
+    have := zip_map_fst ps l (by omega)
+    calc ((ps.zip l).map fun q => (q.1.1, q.2)).map (·.1) = ((ps.zip l).map (·.1)).map (·.1) := by
+          simp [List.map_map, Function.comp_def]
+      _ = ps.map (·.1) := by rw [this]
+  -- the entries of `enterL`/`leaveL`
+  have enterGet : ∀ st t, (tabs (enter st))[t]? =
+      match plookup ((ps.map fun p => (p.1, (tabs st).getD p.2 default)) ++
+        (ps.zip emp).map fun q => (q.1.2, q.2)) t with
+      | some e => some e | none => (tabs st)[t]? := by
+    intro st t
+    rw [hE, enterL, setPairs_get]
+    · simp only [List.map_append, List.map_map]
+      rw [show ((ps.zip emp).map ((·.1) ∘ fun q => (q.1.2, q.2))) = ps.map (·.2) from by
+        rw [← List.map_map]; exact hzipfst emp hlemp]
+      simpa [Function.comp_def] using hnd
+    · intro p hp
+      rcases List.mem_append.mp hp with hp | hp
+      · obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; rw [hN]; exact (hps q hq).1
+      · obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; rw [hN]; exact (hps q.1 (List.of_mem_zip hq).1).2
+  have leaveGet : ∀ st st₂ t, (tabs (leave st₂ st))[t]? =
+      match plookup ((ps.map fun p => (p.2, (tabs st₂).getD p.1 default)) ++
+        (ps.zip (ps.map fun p => (tabs st).getD p.1 default)).map fun q => (q.1.1, q.2)) t with
+      | some e => some e | none => (tabs st₂)[t]? := by
+    intro st st₂ t
+    rw [hL, leaveL, setPairs_get]
+    · simp only [List.map_append, List.map_map]
+      rw [show ((ps.zip (ps.map fun p => (tabs st).getD p.1 default)).map ((·.1) ∘ fun q => (q.1.1, q.2))) =
+          ps.map (·.1) from by rw [← List.map_map]; exact hzipfst' _ (by simp)]
+      have : (ps.map (·.2) ++ ps.map (·.1)).Nodup := by
+        rw [List.nodup_append] at hnd ⊢
+        exact ⟨hnd.2.1, hnd.1, fun a ha b hb hab => hnd.2.2 b hb a ha hab.symm⟩
+      simpa [Function.comp_def] using this
+    · intro p hp
+      rcases List.mem_append.mp hp with hp | hp
+      · obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; rw [hN]; exact (hps q hq).2
+      · obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; rw [hN]; exact (hps q.1 (List.of_mem_zip hq).1).1
+  refine EvalM_swap (BIs := emp) hh hN hps hnd hls hlf hle hlemp hnames hnil ?_ ?_ ?_ P1 ?_ ?_ ?_ P2 hx
+  · -- the fields that do not move
+    intro st j h1 h2
+    rw [enterGet, plookup_none]
+    simp only [List.map_append, List.map_map, List.mem_append, not_or]
+    refine ⟨by simpa [Function.comp_def] using h1, ?_⟩
+    rw [show ((ps.zip emp).map ((·.1) ∘ fun q => (q.1.2, q.2))) = ps.map (·.2) from by
+      rw [← List.map_map]; exact hzipfst emp hlemp]
+    exact h2
+  · -- field `p.1` takes field `p.2`'s table
+    intro st k hk e e' he he' r tl ht
+    rw [enterGet, plookup_append_left _ _ _ _ (plookup_map_get ps (·.1) (fun p => (tabs st).getD p.2 default) hnd1 k hk)] at he'
+    simp only [Option.some.injEq] at he'
+    rw [List.getD_eq_getElem?_getD, he] at he'
+    simp only [Option.getD_some] at he'
+    subst he'; exact ht
+  · -- field `p.2` takes an empty table
+    intro st k hk e he r tl hfresh
+    have hnot : (ps[k]).2 ∉ (ps.map fun p => (p.1, (tabs st).getD p.2 default)).map (·.1) := by
+      simp only [List.map_map]
+      intro hm
+      exact h12 _ (by simpa [Function.comp_def] using hm) (List.mem_map_of_mem (f := (·.2)) (List.getElem_mem hk))
+    rw [enterGet, plookup_append_right _ _ _ hnot] at he
+    have hz := plookup_map_get (ps.zip emp) (fun q => q.1.2) (fun q => q.2)
+      (by rw [show (ps.zip emp).map (fun q => q.1.2) = ps.map (·.2) from by
+        have := hzipfst emp hlemp; simpa [List.map_map, Function.comp_def] using this]; exact hnd2) k (by simp; omega)
+    simp only [List.getElem_zip] at hz
+    rw [hz] at he
+    simp only [Option.some.injEq] at he
+    subst he
+    exact hfresh _ (hemp _ (List.getElem_mem _))
+  · intro st st₂ j h1 h2
+    rw [leaveGet, plookup_none]
+    simp only [List.map_append, List.map_map, List.mem_append, not_or]
+    refine ⟨by simpa [Function.comp_def] using h2, ?_⟩
+    rw [show ((ps.zip (ps.map fun p => (tabs st).getD p.1 default)).map ((·.1) ∘ fun q => (q.1.1, q.2))) =
+        ps.map (·.1) from by rw [← List.map_map]; exact hzipfst' _ (by simp)]
+    exact h1
+  · -- field `p.1` takes back the saved table
+    intro st st₂ k hk
+    have hnot : (ps[k]).1 ∉ (ps.map fun p => (p.2, (tabs st₂).getD p.1 default)).map (·.1) := by
+      simp only [List.map_map]
+      intro hm
+      exact h12 _ (List.mem_map_of_mem (f := (·.1)) (List.getElem_mem hk)) (by simpa [Function.comp_def] using hm)
+    rw [leaveGet, plookup_append_right _ _ _ hnot]
+    have hz := plookup_map_get (ps.zip (ps.map fun p => (tabs st).getD p.1 default)) (fun q => q.1.1) (fun q => q.2)
+      (by rw [show (ps.zip (ps.map fun p => (tabs st).getD p.1 default)).map (fun q => q.1.1) = ps.map (·.1) from by
+        have := hzipfst' (ps.map fun p => (tabs st).getD p.1 default) (by simp)
+        simpa [List.map_map, Function.comp_def] using this]; exact hnd1) k (by simp; exact hk)
+    simp only [List.getElem_zip, List.getElem_map] at hz
+    rw [hz]
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem (by rw [hN]; exact hp1 k hk)]
+    rfl
+  · -- field `p.2` takes field `p.1`'s table
+    intro st st₂ k hk e e' he he' r tl ht
+    rw [leaveGet, plookup_append_left _ _ _ _ (plookup_map_get ps (·.2) (fun p => (tabs st₂).getD p.1 default) hnd2 k hk)] at he'
+    simp only [Option.some.injEq] at he'
+    rw [List.getD_eq_getElem?_getD, he] at he'
+    simp only [Option.getD_some] at he'
+    subst he'; exact ht
+
+/-! ## Quantifying over lists of a given length, element by element -/
+
+theorem len_nil {α : Type} {p : List α → Prop} (h : p []) : ∀ vs, vs.length = 0 → p vs
+  | [], _ => h
+
+theorem len_cons {α : Type} {p : List α → Prop} {n : Nat} (h : ∀ v vs, vs.length = n → p (v :: vs)) :
+    ∀ vs, vs.length = n + 1 → p vs
+  | v :: vs, hl => h v vs (by simpa using hl)
 
 end ConPastel.Translator
