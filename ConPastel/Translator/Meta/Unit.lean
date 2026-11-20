@@ -1020,7 +1020,9 @@ partial def blockCandidates (ms : Array Name) : MetaM (Array Expr) := do
             seenInst.modify (·.push e')
             visit e'
       if let .const c _ := e.getAppFn then
-        if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) && !nativeHeads.contains c then
+        -- a replaced constant is never translated itself (its replacement is)
+        if !ms.contains c && !(isAuxRecursor env c) && !(← Meta.isMatcher c) && !nativeHeads.contains c &&
+            !(replaceExt.getState env).contains c then
           if let some (.defnInfo _) := env.find? c then
             if let some (k, _) ← splitKey e then
               if !k.hasFVar && !k.hasMVar && !(← found.get).contains k then

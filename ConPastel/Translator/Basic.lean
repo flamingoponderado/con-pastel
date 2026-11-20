@@ -17,6 +17,8 @@ abbrev RefInv (α : Type) := α → Value → Prop
 def INT : RefInv Int := fun i v => v = .litv (.intLit i)
 def NAT : RefInv Nat := fun n v => v = .litv (.intLit n)
 def BOOL : RefInv Bool := fun b v => v = boolValue b
+/-- `UInt64` as a CakeML 64-bit word (not as the `Nat` inside its `BitVec`). -/
+def UINT64 : RefInv UInt64 := fun x v => v = .litv (.word64 x.toBitVec)
 
 /-- Functions: applying the value to a representation of `x` returns a
 representation of `f x`. -/

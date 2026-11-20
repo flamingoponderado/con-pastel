@@ -1,5 +1,6 @@
 import ConPastel.Translator.Prims
 import ConPastel.Translator.Word
+import ConPastel.Translator.Word64
 import ConPastel.Spec
 
 /-! # Replacements for library functions whose definitions do not translate -/
