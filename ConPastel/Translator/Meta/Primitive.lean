@@ -97,6 +97,19 @@ elab "cake_replace " k:ident r:ident thm:ident : command => do
     unless ok do throwError "{tc} must state ∀ xs, {kc} xs = {rc} xs (same universe parameters, in order)"
   modifyEnv fun env => replaceExt.addEntry env (kc, rc, tc)
 
+/-- `cake_state_ref T`: computations `StateT T (Except ε) α` are translated as
+functions of a reference holding the state (`MRET`, `ConPastel.Translator.EvalM`). -/
+elab "cake_state_ref " t:ident : command => do
+  let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+  modifyEnv fun env => stateRefExt.addEntry env c
+
+/-- `cake_state_array T`: computations `StateT (Array T) (Except ε) α` are
+translated over a CakeML `Array.array` holding the state (read with `getsD`,
+written in place with `setM`). -/
+elab "cake_state_array " t:ident : command => do
+  let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+  modifyEnv fun env => stateArrExt.addEntry env c
+
 /-- `cake_ghost T`: the closed type `T` becomes a ghost type (`GHOST T`). -/
 elab "cake_ghost " t:ident : command => do
   let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
