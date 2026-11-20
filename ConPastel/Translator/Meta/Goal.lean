@@ -1804,14 +1804,17 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       let rus := if thmMono then rcLevels.map fun _ => levelZero else us
       if !skip then
         let n ← forallTelescope (← inferType (mkConst thm tus)) fun xs _ => pure xs.size
-        if args.size == n then
-          let heq := mkAppN (mkConst thm tus) args
-          let t' := mkAppN (mkConst rc rus) args
+        -- a theorem between partial applications (`K xs = K' xs`) also rewrites
+        -- longer applications `K xs ys`
+        if args.size ≥ n then
+          let heq := mkAppN (mkConst thm tus) (args.extract 0 n)
+          let rest := args.extract n args.size
+          let t' := mkAppN (mkAppN (mkConst rc rus) (args.extract 0 n)) rest
           let ce ← evalGoalCe g
           let gb ← mkFreshExprMVar (← mkAppM ``Eval #[env, ce, mkApp inv t'])
           solve gb.mvarId!
-          let motive ← withLocalDeclD `x (← inferType t) fun x => do
-            mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
+          let motive ← withLocalDeclD `x (← inferType (mkAppN fn (args.extract 0 n))) fun x => do
+            mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv (mkAppN x rest)])
           g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
           return
   -- matchers and sparse casesOn auxiliaries

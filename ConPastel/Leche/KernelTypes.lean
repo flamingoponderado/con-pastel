@@ -47,6 +47,9 @@ cake_datatype (Std.DHashMap.Internal.AssocList (ConLeche.Expr × List ConLeche.E
 cake_datatype (Std.DHashMap.Raw (ConLeche.Expr × List ConLeche.Expr × Nat) fun (x : ConLeche.Expr × List ConLeche.Expr × Nat) => ConLeche.Expr)
 cake_datatype (ConLeche.Cached.ModeMemos)
 cake_datatype (ConLeche.Cached.CState)
+-- the kernel's state is held in a CakeML reference: `CheckCM` computations are
+-- translated as code updating it (`EvalM`), run by `declStep` on a fresh one
+cake_state_ref ConLeche.Cached.CState
 cake_datatype (Except ConLeche.CheckError (Option ConLeche.Expr × ConLeche.Cached.CState))
 cake_datatype (Except ConLeche.CheckError (ConLeche.Name × ConLeche.Cached.CState))
 cake_datatype (Option UInt8)
@@ -143,4 +146,27 @@ cake_datatype (Std.DHashMap.Raw ConLeche.Expr fun (x : ConLeche.Expr) => PUnit.{
 cake_datatype (Option PUnit.{1})
 cake_datatype (Option (Std.DHashMap.Internal.AssocList ConLeche.Expr fun (x : ConLeche.Expr) => PUnit.{1}))
 
+
+open ConLeche ConLeche.Cached in
+/-- `declStep`, the record's check run on a fresh reference (`runRef`). -/
+def declStepR (mode : CheckMode) (pins : List NatOpPinSet) (maxNatSize : Nat) (p : Nat × FEnv)
+    (pd : Declaration) : Except (CheckError × Nat) (Nat × FEnv) :=
+  if andPinOk pd then
+    match ConPastel.Translator.runRef ({ maxNatSize := maxNatSize } : CState)
+        (checkDeclStepC mode pins p.2 pd) with
+    | .ok fe' => .ok (p.1 + 1, fe')
+    | .error e => .error (e, p.1)
+  else .error (.invalid "`And` must be the standard `And`", p.1)
+
+open ConLeche ConLeche.Cached in
+theorem declStep_eq (mode : CheckMode) (pins : List NatOpPinSet) (maxNatSize : Nat) :
+    declStep mode pins maxNatSize = declStepR mode pins maxNatSize := by
+  funext p pd
+  unfold declStep declStepR ConPastel.Translator.runRef
+  split
+  · cases checkDeclStepC mode pins p.2 pd { maxNatSize := maxNatSize } <;> rfl
+  · rfl
+
 end ConPastel.Leche
+
+cake_replace ConLeche.Cached.declStep ConPastel.Leche.declStepR ConPastel.Leche.declStep_eq
