@@ -298,5 +298,6 @@ cake_datatype (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool ⊕ ConL
 cake_datatype (Except String (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool ⊕ ConLeche.Frontend.RecordVerdict))
 cake_datatype (Except String (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool))
 cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool × Nat × USize))
+cake_datatype (Except (ConLeche.CheckError × Nat) (ConLeche.Frontend.StateD × ConPastel.Impl.ExprMemo Bool × Nat × List UInt8))
 
 end ConPastel.Leche

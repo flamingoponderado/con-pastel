@@ -289,7 +289,7 @@ def key (e : Expr) : Nat := (e.data.toNat / 4294967296) % 65536
 
 def findL (e : Expr) : List (Expr × α) → Option α
   | [] => none
-  | (x, v) :: t => if x.data == e.data && exprEqB x e then some v else findL e t
+  | (x, v) :: t => if exprEqD x e then some v else findL e t
 
 /-- The value stored for (a node equal to) `e`: the data words first, then
 CakeML's `=` (at once on the same pointer). -/
@@ -319,7 +319,7 @@ theorem findL_sound {P : Expr → α → Prop} {e : Expr} :
   | (x, w) :: t, v, hl, h => by
     simp only [findL] at h
     split at h
-    · rename_i hx; cases h; have := exprEqB_sound (Bool.and_eq_true _ _ ▸ hx).2; subst this
+    · rename_i hx; cases h; have := (exprEqD_iff x e).mp hx; subst this
       exact hl (x, _) (by simp)
     · exact findL_sound (fun p hp => hl p (by simp [hp])) h
 
@@ -973,7 +973,7 @@ abbrev RMemo := ExprMemo (Nat × Expr)
 
 def findC (e : Expr) (c : Nat) : List (Expr × Nat × Expr) → Option Expr
   | [] => none
-  | (x, c', r) :: t => if x.data == e.data && c' == c && exprEqB x e then some r else findC e c t
+  | (x, c', r) :: t => if c' == c && exprEqD x e then some r else findC e c t
 
 def RMemo.find? (e : Expr) (c : Nat) : RMemo → Nat → Option Expr
   | .leaf l, _ => findC e c l
@@ -987,8 +987,8 @@ theorem findC_sound {P : Expr → Nat × Expr → Prop} {e : Expr} {c : Nat} :
     split at h
     · rename_i hx; cases h
       simp only [Bool.and_eq_true, beq_iff_eq] at hx
-      obtain ⟨⟨_, hc⟩, he⟩ := hx
-      have := exprEqB_sound he; subst this; subst hc
+      obtain ⟨hc, he⟩ := hx
+      have := (exprEqD_iff x e).mp he; subst this; subst hc
       exact hl (x, c', _) (by simp)
     · exact findC_sound (fun p hp => hl p (by simp [hp])) h
 
@@ -1435,3 +1435,228 @@ cake_replace ConLeche.Expr.instLevelParamsP ConPastel.Impl.instLevelParamsM ConP
 cake_replace ConLeche.Expr.targetAbsP ConPastel.Impl.targetAbsM ConPastel.Impl.targetAbsP_eq_M
 cake_replace ConLeche.Expr.instantiateListP ConPastel.Impl.instantiateListM ConPastel.Impl.instantiateListP_eq_M
 cake_replace ConLeche.Expr.instantiateRevP ConPastel.Impl.instantiateRevM ConPastel.Impl.instantiateRevP_eq_M
+
+/-! ## The loose-variable searches, memoised
+
+`Expr.hasLooseBVarB` and `hasLooseBVarInP` stop at a node whose loose-variable
+bound is at or below the cursor, and otherwise descend: on a shared DAG with
+loose variables throughout, that is the whole tree. Both are instances of one
+search, memoised on (node, cursor). -/
+
+namespace ConPastel.Impl
+open ConLeche
+
+/-- The search: below the cut-off `cut`, a variable answers by `bv`, the
+other leaves `false`; the cursor moves up by one under a binder. -/
+def anyP (cut : Expr → Nat → Bool) (bv : Nat → Nat → Bool) (e : Expr) (c : Nat) : Bool :=
+  if cut e c then false else
+  match e with
+  | .bvar j => bv j c
+  | .fvar .. | .sort _ | .const .. | .lit _ => false
+  | .app f a => anyP cut bv f c || anyP cut bv a c
+  | .lam ty b => anyP cut bv ty c || anyP cut bv b (c + 1)
+  | .forallE ty b => anyP cut bv ty c || anyP cut bv b (c + 1)
+  | .letE t v b => anyP cut bv t c || anyP cut bv v c || anyP cut bv b (c + 1)
+  | .proj _ _ s => anyP cut bv s c
+
+/-- Memo entries `(node, cursor, answer)`. -/
+abbrev BMemo := ExprMemo (Nat × Bool)
+
+def findCB (e : Expr) (c : Nat) : List (Expr × Nat × Bool) → Option Bool
+  | [] => none
+  | (x, c', r) :: t => if c' == c && exprEqD x e then some r else findCB e c t
+
+def BMemo.find? (e : Expr) (c : Nat) : BMemo → Nat → Option Bool
+  | .leaf l, _ => findCB e c l
+  | .node a b, k => if k % 2 = 0 then BMemo.find? e c a (k / 2) else BMemo.find? e c b (k / 2)
+
+theorem findCB_sound {P : Expr → Nat × Bool → Prop} {e : Expr} {c : Nat} :
+    ∀ {l : List (Expr × Nat × Bool)} {r : Bool}, (∀ p ∈ l, P p.1 p.2) → findCB e c l = some r → P e (c, r)
+  | [], _, _, h => by simp [findCB] at h
+  | (x, c', w) :: t, r, hl, h => by
+    simp only [findCB] at h
+    split at h
+    · rename_i hx; cases h
+      simp only [Bool.and_eq_true, beq_iff_eq] at hx
+      obtain ⟨hc, he⟩ := hx
+      have := (exprEqD_iff x e).mp he; subst this; subst hc
+      exact hl (x, c', _) (by simp)
+    · exact findCB_sound (fun p hp => hl p (by simp [hp])) h
+
+theorem BMemo.find?_sound {P : Expr → Nat × Bool → Prop} {e : Expr} {c : Nat} :
+    ∀ {t : BMemo} {k : Nat} {r : Bool}, t.All P → BMemo.find? e c t k = some r → P e (c, r)
+  | .leaf l, _, _, ht, h => findCB_sound ht h
+  | .node a b, k, r, ht, h => by
+    simp only [BMemo.find?] at h
+    split at h
+    · exact BMemo.find?_sound ht.1 h
+    · exact BMemo.find?_sound ht.2 h
+
+/-- `anyP`, memoised on (node, cursor) for the compound nodes. -/
+def anyM (cut : Expr → Nat → Bool) (bv : Nat → Nat → Bool) (t : BMemo) (e : Expr) (c : Nat) :
+    Bool × BMemo :=
+  if cut e c then (false, t) else
+  match e with
+  | .bvar j => (bv j c, t)
+  | .fvar .. | .sort _ | .const .. | .lit _ => (false, t)
+  | .app f a =>
+    match BMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := anyM cut bv t f c
+      let r2 := if r1.1 then (true, r1.2) else anyM cut bv r1.2 a c
+      (r2.1, ExprMemo.insert e (c, r2.1) 16 r2.2 (ExprMemo.key e))
+  | .lam ty b =>
+    match BMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := anyM cut bv t ty c
+      let r2 := if r1.1 then (true, r1.2) else anyM cut bv r1.2 b (c + 1)
+      (r2.1, ExprMemo.insert e (c, r2.1) 16 r2.2 (ExprMemo.key e))
+  | .forallE ty b =>
+    match BMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := anyM cut bv t ty c
+      let r2 := if r1.1 then (true, r1.2) else anyM cut bv r1.2 b (c + 1)
+      (r2.1, ExprMemo.insert e (c, r2.1) 16 r2.2 (ExprMemo.key e))
+  | .letE ty v b =>
+    match BMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := anyM cut bv t ty c
+      let r2 := if r1.1 then (true, r1.2) else anyM cut bv r1.2 v c
+      let r3 := if r2.1 then (true, r2.2) else anyM cut bv r2.2 b (c + 1)
+      (r3.1, ExprMemo.insert e (c, r3.1) 16 r3.2 (ExprMemo.key e))
+  | .proj _ _ s =>
+    match BMemo.find? e c t (ExprMemo.key e) with
+    | some r => (r, t)
+    | none =>
+      let r1 := anyM cut bv t s c
+      (r1.1, ExprMemo.insert e (c, r1.1) 16 r1.2 (ExprMemo.key e))
+
+section
+variable (cut : Expr → Nat → Bool) (bv : Nat → Nat → Bool)
+
+abbrev BGood (t : BMemo) : Prop := t.All (fun x p => p.2 = anyP cut bv x p.1)
+
+theorem anyM_spec : ∀ (e : Expr) (c : Nat) (t : BMemo), BGood cut bv t →
+    (anyM cut bv t e c).1 = anyP cut bv e c ∧ BGood cut bv (anyM cut bv t e c).2 := by
+  intro e
+  induction e with
+  | bvar | fvar | sort | const | lit =>
+    intro c t ht; rw [anyM]
+    split
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+  | app f a ihf iha =>
+    intro c t ht; rw [anyM]
+    split
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨BMemo.find?_sound (P := fun x p => p.2 = anyP cut bv x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := ihf c t ht
+        by_cases hb : (anyM cut bv t f c).1 = true
+        · have hp : anyP cut bv f c = true := h1 ▸ hb
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, if_true] <;>
+            first | exact h2 | (rw [anyP]; simp [hcut, hp])
+        · have hp : anyP cut bv f c = false := by rw [← h1]; simpa using hb
+          obtain ⟨h3, h4⟩ := iha c _ h2
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, Bool.false_eq_true, if_false] <;>
+            first | exact h4 | (rw [anyP]; simp [hcut, hp, h3])
+  | lam ty b iht ihb =>
+    intro c t ht; rw [anyM]
+    split
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨BMemo.find?_sound (P := fun x p => p.2 = anyP cut bv x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := iht c t ht
+        by_cases hb : (anyM cut bv t ty c).1 = true
+        · have hp : anyP cut bv ty c = true := h1 ▸ hb
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, if_true] <;>
+            first | exact h2 | (rw [anyP]; simp [hcut, hp])
+        · have hp : anyP cut bv ty c = false := by rw [← h1]; simpa using hb
+          obtain ⟨h3, h4⟩ := ihb (c + 1) _ h2
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, Bool.false_eq_true, if_false] <;>
+            first | exact h4 | (rw [anyP]; simp [hcut, hp, h3])
+  | forallE ty b iht ihb =>
+    intro c t ht; rw [anyM]
+    split
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨BMemo.find?_sound (P := fun x p => p.2 = anyP cut bv x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := iht c t ht
+        by_cases hb : (anyM cut bv t ty c).1 = true
+        · have hp : anyP cut bv ty c = true := h1 ▸ hb
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, if_true] <;>
+            first | exact h2 | (rw [anyP]; simp [hcut, hp])
+        · have hp : anyP cut bv ty c = false := by rw [← h1]; simpa using hb
+          obtain ⟨h3, h4⟩ := ihb (c + 1) _ h2
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, Bool.false_eq_true, if_false] <;>
+            first | exact h4 | (rw [anyP]; simp [hcut, hp, h3])
+  | letE ty v b iht ihv ihb =>
+    intro c t ht; rw [anyM]
+    split
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨BMemo.find?_sound (P := fun x p => p.2 = anyP cut bv x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := iht c t ht
+        by_cases hb : (anyM cut bv t ty c).1 = true
+        · have hp : anyP cut bv ty c = true := h1 ▸ hb
+          refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, if_true] <;>
+            first | exact h2 | (rw [anyP]; simp [hcut, hp])
+        · have hp : anyP cut bv ty c = false := by rw [← h1]; simpa using hb
+          obtain ⟨h3, h4⟩ := ihv c _ h2
+          by_cases hb2 : (anyM cut bv (anyM cut bv t ty c).2 v c).1 = true
+          · have hp2 : anyP cut bv v c = true := h3 ▸ hb2
+            refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, hb2, Bool.false_eq_true, if_false, if_true] <;>
+              first | exact h4 | (rw [anyP]; simp [hcut, hp, hp2])
+          · have hp2 : anyP cut bv v c = false := by rw [← h3]; simpa using hb2
+            obtain ⟨h5, h6⟩ := ihb (c + 1) _ h4
+            refine ⟨?_, ExprMemo.insert_all ?_ ?_⟩ <;> simp only [hb, hb2, Bool.false_eq_true, if_false] <;>
+              first | exact h6 | (rw [anyP]; simp [hcut, hp, hp2, h5])
+  | proj sn i x ih =>
+    intro c t ht; rw [anyM]
+    split
+    · rename_i hcut; exact ⟨by rw [anyP]; simp [hcut], ht⟩
+    · rename_i hcut
+      split
+      · rename_i r hr; exact ⟨BMemo.find?_sound (P := fun x p => p.2 = anyP cut bv x p.1) ht hr, ht⟩
+      · obtain ⟨h1, h2⟩ := ih c t ht
+        refine ⟨?_, ExprMemo.insert_all ?_ h2⟩ <;> (dsimp only; rw [anyP]; simp [hcut, h1])
+
+theorem anyM_eq (e : Expr) (c : Nat) : (anyM cut bv (.leaf []) e c).1 = anyP cut bv e c :=
+  (anyM_spec cut bv e c (.leaf []) (by simp [ExprMemo.All])).1
+end
+
+def lbCut (e : Expr) (c : Nat) : Bool := decide (e.bvarB ≤ c)
+
+theorem hasLooseBVarB_anyP : ∀ (e : Expr) (i : Nat),
+    Expr.hasLooseBVarB i e = anyP lbCut (fun j c => c == j) e i := by
+  intro e; induction e <;> intro i <;> rw [Expr.hasLooseBVarB, anyP] <;> simp_all [lbCut]
+
+theorem hasLooseBVarInP_anyP (w : Nat) : ∀ (e : Expr) (d : Nat),
+    Expr.hasLooseBVarInP w e d = anyP lbCut (fun j c => decide (c ≤ j) && decide (j < c + w)) e d := by
+  intro e; induction e <;> intro d <;> rw [Expr.hasLooseBVarInP, anyP] <;> simp_all [lbCut]
+
+def hasLooseBVarBM (i : Nat) (e : Expr) : Bool := (anyM lbCut (fun j c => c == j) (.leaf []) e i).1
+def hasLooseBVarInM (w : Nat) (e : Expr) (d : Nat) : Bool :=
+  (anyM lbCut (fun j c => decide (c ≤ j) && decide (j < c + w)) (.leaf []) e d).1
+
+theorem hasLooseBVarB_eq_M (i : Nat) (e : Expr) : Expr.hasLooseBVarB i e = hasLooseBVarBM i e := by
+  rw [hasLooseBVarB_anyP, hasLooseBVarBM, anyM_eq]
+theorem hasLooseBVarInP_eq_M (w : Nat) (e : Expr) (d : Nat) :
+    Expr.hasLooseBVarInP w e d = hasLooseBVarInM w e d := by
+  rw [hasLooseBVarInP_anyP, hasLooseBVarInM, anyM_eq]
+end ConPastel.Impl
+
+namespace ConPastel.Leche
+cake_datatype (ConPastel.Impl.ExprMemo (Nat × Bool))
+end ConPastel.Leche
+
+cake_replace ConLeche.Expr.hasLooseBVarB ConPastel.Impl.hasLooseBVarBM ConPastel.Impl.hasLooseBVarB_eq_M
+cake_replace ConLeche.Expr.hasLooseBVarInP ConPastel.Impl.hasLooseBVarInM ConPastel.Impl.hasLooseBVarInP_eq_M
