@@ -411,6 +411,26 @@ theorem shiftRight_eq_F (a b : UInt64) : a.shiftRight b = shiftRightF a b := by
     apply UInt64.toBitVec_inj.mp; simp [shr16, UInt64.shiftRight]; rfl
   · exact shiftRight_eq_B a b
 
+theorem pow2_mul_eq (a : UInt64) (k : Nat) (hk : k < 64) : (⟨a.toBitVec <<< k⟩ : UInt64) = a * UInt64.ofNat (2 ^ k) := by
+  apply UInt64.toNat_inj.mp
+  show (a.toBitVec <<< k).toNat = (a * UInt64.ofNat (2 ^ k)).toNat
+  rw [BitVec.toNat_shiftLeft, UInt64.toNat_mul, UInt64.toNat_ofNat', Nat.shiftLeft_eq]
+  have : 2 ^ k < 2 ^ 64 := Nat.pow_lt_pow_right (by decide) hk
+  rw [Nat.mod_eq_of_lt this]; rfl
+
+theorem pow2_div_eq (a : UInt64) (k : Nat) (hk : k < 64) : (⟨a.toBitVec >>> k⟩ : UInt64) = a / UInt64.ofNat (2 ^ k) := by
+  apply UInt64.toNat_inj.mp
+  show (a.toBitVec >>> k).toNat = (a / UInt64.ofNat (2 ^ k)).toNat
+  rw [BitVec.toNat_ushiftRight, UInt64.toNat_div, UInt64.toNat_ofNat', Nat.shiftRight_eq_div_pow]
+  have : 2 ^ k < 2 ^ 64 := Nat.pow_lt_pow_right (by decide) hk
+  rw [Nat.mod_eq_of_lt this]; rfl
+
+theorem pow2_mod_eq (a : UInt64) (k : Nat) (hk : k < 64) : a &&& UInt64.ofNat (2 ^ k - 1) = a % UInt64.ofNat (2 ^ k) := by
+  apply UInt64.toNat_inj.mp
+  have : 2 ^ k < 2 ^ 64 := Nat.pow_lt_pow_right (by decide) hk
+  rw [UInt64.toNat_and, UInt64.toNat_mod, UInt64.toNat_ofNat', UInt64.toNat_ofNat', Nat.mod_eq_of_lt this,
+    Nat.mod_eq_of_lt (by omega), Nat.and_two_pow_sub_one_eq_mod]
+
 /-- Unreplaced copies of the arithmetic primitives (the fallbacks below). -/
 def u64mulP (a b : UInt64) : UInt64 := a * b
 def u64divP (a b : UInt64) : UInt64 := a / b
@@ -435,48 +455,39 @@ theorem mul_eq_F (a b : UInt64) : UInt64.mul a b = mulF a b := by
   unfold mulF
   split
   · rename_i h; cases u64EqB_true h
-    show a * _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [shl1, UInt64.toBitVec_mul]; bv_decide
+    exact (pow2_mul_eq a 1 (by decide)).symm
   split
   · rename_i h; cases u64EqB_true h
-    show a * _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [shl16, UInt64.toBitVec_mul]; bv_decide
+    exact (pow2_mul_eq a 16 (by decide)).symm
   split
   · rename_i h; cases u64EqB_true h
-    show a * _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [shl32, UInt64.toBitVec_mul]; bv_decide
+    exact (pow2_mul_eq a 32 (by decide)).symm
   · rfl
 
 theorem div_eq_F (a b : UInt64) : UInt64.div a b = divF a b := by
   unfold divF
   split
   · rename_i h; cases u64EqB_true h
-    show a / _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [shr1, UInt64.toBitVec_div]; bv_decide
+    exact (pow2_div_eq a 1 (by decide)).symm
   split
   · rename_i h; cases u64EqB_true h
-    show a / _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [shr16, UInt64.toBitVec_div]; bv_decide
+    exact (pow2_div_eq a 16 (by decide)).symm
   split
   · rename_i h; cases u64EqB_true h
-    show a / _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [shr32, UInt64.toBitVec_div]; bv_decide
+    exact (pow2_div_eq a 32 (by decide)).symm
   · rfl
 
 theorem mod_eq_F (a b : UInt64) : UInt64.mod a b = modF a b := by
   unfold modF
   split
   · rename_i h; cases u64EqB_true h
-    show a % _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [UInt64.toBitVec_mod, UInt64.toBitVec_and]; bv_decide
+    exact (pow2_mod_eq a 1 (by decide)).symm
   split
   · rename_i h; cases u64EqB_true h
-    show a % _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [UInt64.toBitVec_mod, UInt64.toBitVec_and]; bv_decide
+    exact (pow2_mod_eq a 15 (by decide)).symm
   split
   · rename_i h; cases u64EqB_true h
-    show a % _ = _
-    apply UInt64.toBitVec_inj.mp; simp only [UInt64.toBitVec_mod, UInt64.toBitVec_and]; bv_decide
+    exact (pow2_mod_eq a 32 (by decide)).symm
   · rfl
 
 /-- `DecidableEq UInt64` as CakeML's `=` (the instance is passed unapplied, e.g. to `bne`). -/
