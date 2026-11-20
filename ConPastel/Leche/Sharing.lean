@@ -100,23 +100,33 @@ theorem withPtrEq_expr (a b : Expr) (k : Unit → Bool) (h : a = b → k () = tr
   · rw [h ((exprEqD_iff a b).mp he)]; simp
   · simp [he]
 
-/-- `probeHit` with the stored pair verified by CakeML's `=`. -/
-def probeHitD (m : Expr.BeqMap) (key : Nat) (pa pb : USize) (a b : Expr) :
-    { h : Bool // h = true → a = b } :=
-  let p := m.getD key Expr.EqPair.dflt
-  if p.pa == pa && p.pb == pb then
-    if h1 : exprEqB p.fst a = true then
-      if h2 : exprEqB p.snd b = true then
-        ⟨true, fun _ => (exprEqB_sound h1).symm.trans (p.eq.trans (exprEqB_sound h2))⟩
+/-- The memo key of a pair of data words, with native word operations only
+(con-leche's `beqKey` packs the addresses with `USize` arithmetic, which is
+bignum arithmetic here); below `2 ^ 60`, a CakeML small integer. Any key is
+sound: a probe verifies the stored pair. -/
+def beqKeyD (x y : UInt64) : Nat :=
+  ((x ^^^ shr16 y ^^^ shl16 y ^^^ shl1 y) &&& 0x0FFFFFFFFFFFFFFF).toNat
+
+/-- `probeHit` with the stored pair verified by its data words, then CakeML's
+`=`. -/
+def probeHitD (m : Expr.BeqMap) (key : Nat) (a b : Expr) : { h : Bool // h = true → a = b } :=
+  match m[key]? with
+  | none => ⟨false, fun h => Bool.noConfusion h⟩
+  | some p =>
+    if p.fst.data == a.data && p.snd.data == b.data then
+      if h1 : exprEqB p.fst a = true then
+        if h2 : exprEqB p.snd b = true then
+          ⟨true, fun _ => (exprEqB_sound h1).symm.trans (p.eq.trans (exprEqB_sound h2))⟩
+        else ⟨false, fun h => Bool.noConfusion h⟩
       else ⟨false, fun h => Bool.noConfusion h⟩
     else ⟨false, fun h => Bool.noConfusion h⟩
-  else ⟨false, fun h => Bool.noConfusion h⟩
 
 /-- The child step of con-leche's memoised descent (`Expr.enterBeq`), with
 identity read as above: the cached words, `=` on a shallow pair, and on a deep
 one the memo probe and the descent.  (con-leche's own step reads an address
 match as identity; here an address is the hash, so that would be `=` on every
-equal pair.) -/
+equal pair.) The memo is keyed on the data words (`beqKeyD`); the entries'
+address fields are unused. -/
 def enterBeqD (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
     Expr.BeqOutX a b :=
   if h : a.data != b.data then .no (fun e => by subst e; simp at h)
@@ -125,16 +135,16 @@ def enterBeqD (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX 
          else isFalse (fun e => h (by subst e; exact decide_eq_true rfl))) st
   else if !Expr.beqRecursive a then rec st
   else
-    let pa := a.data.toUSize
-    let pb := b.data.toUSize
+    let key := beqKeyD a.data b.data
     let hit : { h : Bool // h = true → a = b } :=
       match st.1 with
-      | .table m => probeHitD m (Expr.beqKey pa pb) pa pb a b
+      | .table m => probeHitD m key a b
       | _ => ⟨false, fun h => Bool.noConfusion h⟩
     if hh : hit.1 then .yes st (hit.2 hh)
     else Squash.lift (rec st) fun r =>
       if h : r.1.ok then
-        .yes ⟨r.1.recordEq a b pa pb (r.2.mp h), Expr.BeqSt.record_ok ..⟩ (r.2.mp h)
+        .yes ⟨r.1.record key ⟨a, b, USize.ofNatLT 0 USize.size_pos, USize.ofNatLT 0 USize.size_pos,
+          r.2.mp h⟩, Expr.BeqSt.record_ok ..⟩ (r.2.mp h)
       else Quot.mk _ r
 
 theorem enterBeq_eq_D (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
@@ -256,6 +266,7 @@ cake_datatype (ConLeche.Expr.EqPair)
 cake_datatype (Std.DHashMap.Internal.AssocList Nat fun (x : Nat) => ConLeche.Expr.EqPair)
 cake_datatype (Std.DHashMap.Raw Nat fun (x : Nat) => ConLeche.Expr.EqPair)
 cake_datatype (ConLeche.Expr.BeqSt)
+cake_datatype (Option ConLeche.Expr.EqPair)
 cake_datatype (Option (Std.DHashMap.Internal.AssocList Nat fun (x : Nat) => ConLeche.Expr.EqPair))
 end ConPastel.Leche
 

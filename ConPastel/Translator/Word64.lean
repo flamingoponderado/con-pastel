@@ -381,7 +381,170 @@ cake_primitive ConPastel.Impl.shr32 (.app (.shift .w64 .lsr 32) [V "p"]) by
   exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 32 (Eval_u64_w ha)) rfl
 
 cake_replace UInt64.shiftLeft ConPastel.Impl.shiftLeftW ConPastel.Impl.shiftLeft_eq_B
-cake_replace UInt64.shiftRight ConPastel.Impl.shiftRightW ConPastel.Impl.shiftRight_eq_B
 cake_replace UInt64.decEq ConPastel.Impl.u64DecEq ConPastel.Impl.u64_decEq_eq
 cake_replace UInt64.toBitVec ConPastel.Impl.u64toBV ConPastel.Impl.u64_toBitVec_eq
 cake_replace UInt8.toUInt64 ConPastel.Impl.u8toU64 ConPastel.Impl.u8_toUInt64_eq
+
+/-! ## Fast paths: constant shift amounts, and the powers of two of con-leche's data words
+
+`scrambleHash` shifts by 32 and 16; con-leche packs and reads its data words
+with multiplication, division and remainder by powers of two, which on
+integers are bignum operations for words above `2 ^ 62`. Each is checked for
+first and done as a native shift or mask; otherwise the operation runs as
+before (an unreplaced copy of the primitive). -/
+
+namespace ConPastel.Impl
+
+theorem u64EqB_true {a b : UInt64} (h : u64EqB a b = true) : a = b := of_decide_eq_true h
+
+/-- `UInt64.shiftRight`, the amounts `scrambleHash` uses as one native shift. -/
+def shiftRightF (a b : UInt64) : UInt64 :=
+  if u64EqB b 32 then shr32 a else if u64EqB b 16 then shr16 a else shiftRightW a b
+
+theorem shiftRight_eq_F (a b : UInt64) : a.shiftRight b = shiftRightF a b := by
+  unfold shiftRightF
+  split
+  · rename_i h; cases u64EqB_true h
+    apply UInt64.toBitVec_inj.mp; simp [shr32, UInt64.shiftRight]; rfl
+  split
+  · rename_i h; cases u64EqB_true h
+    apply UInt64.toBitVec_inj.mp; simp [shr16, UInt64.shiftRight]; rfl
+  · exact shiftRight_eq_B a b
+
+/-- Unreplaced copies of the arithmetic primitives (the fallbacks below). -/
+def u64mulP (a b : UInt64) : UInt64 := a * b
+def u64divP (a b : UInt64) : UInt64 := a / b
+def u64modP (a b : UInt64) : UInt64 := a % b
+
+/-- Multiplication: by the powers of two con-leche packs data words with, a shift. -/
+def mulF (a b : UInt64) : UInt64 :=
+  if u64EqB b 2 then shl1 a else if u64EqB b 65536 then shl16 a
+  else if u64EqB b 4294967296 then shl32 a else u64mulP a b
+
+/-- Division: by those powers of two, a shift. -/
+def divF (a b : UInt64) : UInt64 :=
+  if u64EqB b 2 then shr1 a else if u64EqB b 65536 then shr16 a
+  else if u64EqB b 4294967296 then shr32 a else u64divP a b
+
+/-- Remainder: by the powers of two con-leche reads fields with, a mask. -/
+def modF (a b : UInt64) : UInt64 :=
+  if u64EqB b 2 then a &&& 1 else if u64EqB b 32768 then a &&& 32767
+  else if u64EqB b 4294967296 then a &&& 4294967295 else u64modP a b
+
+theorem mul_eq_F (a b : UInt64) : UInt64.mul a b = mulF a b := by
+  unfold mulF
+  split
+  · rename_i h; cases u64EqB_true h
+    show a * _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [shl1, UInt64.toBitVec_mul]; bv_decide
+  split
+  · rename_i h; cases u64EqB_true h
+    show a * _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [shl16, UInt64.toBitVec_mul]; bv_decide
+  split
+  · rename_i h; cases u64EqB_true h
+    show a * _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [shl32, UInt64.toBitVec_mul]; bv_decide
+  · rfl
+
+theorem div_eq_F (a b : UInt64) : UInt64.div a b = divF a b := by
+  unfold divF
+  split
+  · rename_i h; cases u64EqB_true h
+    show a / _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [shr1, UInt64.toBitVec_div]; bv_decide
+  split
+  · rename_i h; cases u64EqB_true h
+    show a / _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [shr16, UInt64.toBitVec_div]; bv_decide
+  split
+  · rename_i h; cases u64EqB_true h
+    show a / _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [shr32, UInt64.toBitVec_div]; bv_decide
+  · rfl
+
+theorem mod_eq_F (a b : UInt64) : UInt64.mod a b = modF a b := by
+  unfold modF
+  split
+  · rename_i h; cases u64EqB_true h
+    show a % _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [UInt64.toBitVec_mod, UInt64.toBitVec_and]; bv_decide
+  split
+  · rename_i h; cases u64EqB_true h
+    show a % _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [UInt64.toBitVec_mod, UInt64.toBitVec_and]; bv_decide
+  split
+  · rename_i h; cases u64EqB_true h
+    show a % _ = _
+    apply UInt64.toBitVec_inj.mp; simp only [UInt64.toBitVec_mod, UInt64.toBitVec_and]; bv_decide
+  · rfl
+
+/-- `DecidableEq UInt64` as CakeML's `=` (the instance is passed unapplied, e.g. to `bne`). -/
+def u64DecEqI : DecidableEq UInt64 := fun a b => u64DecEq a b
+
+theorem instDecidableEqUInt64_eq : instDecidableEqUInt64 = u64DecEqI :=
+  funext fun _ => funext fun _ => Subsingleton.elim _ _
+
+end ConPastel.Impl
+
+cake_primitive ConPastel.Impl.u64mulP
+  (Exp.fn (ofString "b") (i2w (.app (.arith .mul .intT) [w2i (V "p"), w2i (V "b")]))) by
+  intro envC funs hnodup hfind _ _ _
+  refine prim2g_cert envC funs _ hnodup hfind fun x xv y yv ha hb => ?_
+  refine Eval_w_u64 (Eval_int_to_w64 (Eval_int_mul (Eval_w64_to_int (Eval_u64_w ha))
+    (Eval_w64_to_int (Eval_u64_w hb)))) ?_
+  show BitVec.ofInt 64 (↑(x.toBitVec.toNat) * ↑(y.toBitVec.toNat)) = x.toBitVec * y.toBitVec
+  rw [← Int.natCast_mul, BitVec.ofInt_natCast]
+  apply BitVec.eq_of_toNat_eq; simp [BitVec.toNat_mul]
+
+cake_primitive ConPastel.Impl.u64divP
+  (Exp.fn (ofString "b") (.if_ (.app .equality [w2i (V "b"), .lit (.intLit 0)]) (.lit (.word64 0))
+    (i2w (.app (.arith .div .intT) [w2i (V "p"), w2i (V "b")])))) by
+  intro envC funs hnodup hfind _ _ _
+  refine prim2g_cert envC funs _ hnodup hfind fun x xv y yv ha hb => ?_
+  have hbi := Eval_w64_to_int (Eval_u64_w hb)
+  have hai := Eval_w64_to_int (Eval_u64_w ha)
+  refine Eval_if (Eval_int_eq hbi (Eval_lit _ (.intLit 0) (INT 0) rfl)) (fun h => ?_) (fun h => ?_)
+  · have hy : y = 0 := UInt64.toNat_inj.mp (by simpa using h)
+    subst hy
+    exact Eval_lit _ _ _ (by
+      show _ = Value.litv (.word64 (x.toBitVec.udiv (0 : UInt64).toBitVec)); simp)
+  · have h0 : y.toBitVec.toNat ≠ 0 := by simpa using h
+    refine Eval_w_u64 (Eval_int_to_w64 (Eval_int_div (by exact_mod_cast h0) hai hbi)) ?_
+    have hfd : ((x.toBitVec.toNat : Int)).fdiv (y.toBitVec.toNat : Int) =
+        ((x.toBitVec.toNat / y.toBitVec.toNat : Nat) : Int) := by
+      rw [Int.fdiv_eq_ediv]; simp
+    rw [hfd, BitVec.ofInt_natCast]
+    show _ = x.toBitVec.udiv y.toBitVec
+    apply BitVec.eq_of_toNat_eq
+    simp [BitVec.toNat_udiv]
+    exact Nat.lt_of_le_of_lt (Nat.div_le_self _ _) x.toNat_lt
+
+cake_primitive ConPastel.Impl.u64modP
+  (Exp.fn (ofString "b") (.if_ (.app .equality [w2i (V "b"), .lit (.intLit 0)]) (V "p")
+    (i2w (.app (.arith .mod .intT) [w2i (V "p"), w2i (V "b")])))) by
+  intro envC funs hnodup hfind _ _ _
+  refine prim2g_cert envC funs _ hnodup hfind fun x xv y yv ha hb => ?_
+  have hbi := Eval_w64_to_int (Eval_u64_w hb)
+  have hai := Eval_w64_to_int (Eval_u64_w ha)
+  refine Eval_if (Eval_int_eq hbi (Eval_lit _ (.intLit 0) (INT 0) rfl)) (fun h => ?_) (fun h => ?_)
+  · have hy : y = 0 := UInt64.toNat_inj.mp (by simpa using h)
+    subst hy
+    exact Eval_w_u64 (Eval_u64_w ha) (by
+      show x.toBitVec = x.toBitVec.umod (0 : UInt64).toBitVec; simp)
+  · have h0 : y.toBitVec.toNat ≠ 0 := by simpa using h
+    refine Eval_w_u64 (Eval_int_to_w64 (Eval_int_mod (by exact_mod_cast h0) hai hbi)) ?_
+    have hfm : ((x.toBitVec.toNat : Int)).fmod (y.toBitVec.toNat : Int) =
+        ((x.toBitVec.toNat % y.toBitVec.toNat : Nat) : Int) := by
+      rw [Int.fmod_eq_emod]; simp
+    rw [hfm, BitVec.ofInt_natCast]
+    show _ = x.toBitVec.umod y.toBitVec
+    apply BitVec.eq_of_toNat_eq
+    simp [BitVec.toNat_umod]
+    exact Nat.lt_of_le_of_lt (Nat.mod_le _ _) x.toNat_lt
+
+cake_replace UInt64.shiftRight ConPastel.Impl.shiftRightF ConPastel.Impl.shiftRight_eq_F
+cake_replace UInt64.mul ConPastel.Impl.mulF ConPastel.Impl.mul_eq_F
+cake_replace UInt64.div ConPastel.Impl.divF ConPastel.Impl.div_eq_F
+cake_replace UInt64.mod ConPastel.Impl.modF ConPastel.Impl.mod_eq_F
+cake_replace instDecidableEqUInt64 ConPastel.Impl.u64DecEqI ConPastel.Impl.instDecidableEqUInt64_eq
