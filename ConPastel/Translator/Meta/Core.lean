@@ -5,6 +5,7 @@ import ConPastel.Translator.Meta.Ext
 import ConPastel.Translator.List
 import ConPastel.Translator.Braun
 import ConPastel.Translator.EvalM
+import ConPastel.Translator.Push
 
 /-!
 # The proof-producing translator: expressions
@@ -112,7 +113,8 @@ def findDatatype? (ty : Expr) : MetaM (Option DatatypeInfo) := do
 /-- `StateT σ (Except ε) α` with `σ` a registered state type (`cake_state_ref`):
 `(σ, ε, α)`. -/
 def stateRefMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
-  let ty ← instantiateMVars ty
+  -- monad abbreviations (`CheckCM α`) unfold to `StateT` (itself not reducible)
+  let ty ← whnfR (← instantiateMVars ty)
   unless ty.isAppOfArity ``StateT 3 do return none
   let #[σ, m, α] := ty.getAppArgs | return none
   let .const sc _ := (← whnfR σ).getAppFn | return none
@@ -124,7 +126,8 @@ def stateRefMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
 /-- `StateT (Array T) (Except ε) α` with `T` a registered array-state element
 type (`cake_state_array`): `(T, ε, α)`. -/
 def stateArrMonad? (ty : Expr) : MetaM (Option (Expr × Expr × Expr)) := do
-  let ty ← instantiateMVars ty
+  -- monad abbreviations (`CheckCM α`) unfold to `StateT` (itself not reducible)
+  let ty ← whnfR (← instantiateMVars ty)
   unless ty.isAppOfArity ``StateT 3 do return none
   let #[σ, m, α] := ty.getAppArgs | return none
   let σ ← whnfR σ

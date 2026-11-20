@@ -98,6 +98,9 @@ structure GSt where
   /-- Lean's own decreasing proof for the recursive call being translated
   (per solve, so that member solves can run in parallel threads). -/
   decHint : Option Expr := none
+  /-- The next monadic goal is solved as a plain value (the inside of a
+  pushed application, `solveMonadic`). -/
+  skipMonadic : Bool := false
 
 abbrev GoalM := StateRefT GSt (ReaderT GCtx MetaM)
 
@@ -500,7 +503,8 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     return
   -- monadic computations at a registered state (`MRET`)
   if invW.isAppOf ``MRET then
-    if ← solveMonadic g env invW t then return
+    if (← get).skipMonadic then modify fun s => { s with skipMonadic := false }
+    else if ← solveMonadic g env invW t then return
   let st ← get
   let ctx ← read
   -- a cached field (`cake_cached`): a projection of the stored value
@@ -884,6 +888,64 @@ partial def solveDecSplit (g : MVarId) (env inv t : Expr) (pos : Nat) : GoalM Bo
   g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
   return true
 
+
+/-- A list, its spine put in weak head normal form (`conClauses cases`, `xs.map Pat.pvar`). -/
+partial def listLitW? (e : Expr) : MetaM (Option (List Expr)) := do
+  let e ← whnf (← instantiateMVars e)
+  match e.consumeMData.getAppFnArgs with
+  | (``List.nil, _) => return some []
+  | (``List.cons, #[_, a, rest]) => return (← listLitW? rest).map (a :: ·)
+  | _ => return none
+
+/-- The names a pattern binds (`patBindings`), on the translator's pattern terms. -/
+partial def patNamesMeta (p : Expr) : MetaM (Option (List String)) := do
+  let p ← whnf (← instantiateMVars p)
+  match p.consumeMData.getAppFnArgs with
+  | (``Pat.pany, _) => return some []
+  | (``Pat.plit, _) => return some []
+  | (``Pat.pvar, #[n]) => return (mlStringLit? n).map ([·])
+  | (``Pat.pref, #[q]) => patNamesMeta q
+  | (``Pat.ptannot, #[q, _]) => patNamesMeta q
+  | (``Pat.pas, #[q, n]) => do
+    let some l ← patNamesMeta q | return none
+    return (mlStringLit? n).map (l ++ [·])
+  | (``Pat.pcon, #[_, ps]) => do
+    let some ps ← listLitW? ps | return none
+    let mut acc : List String := []
+    for q in ps do
+      let some l ← patNamesMeta q | return none
+      acc := acc ++ l
+    return some acc
+  | _ => return none
+
+/-- `pushH h e`, computed (the same code, normalized). -/
+partial def pushHMeta (h : String) (e : Expr) : MetaM Expr := do
+  let e ← instantiateMVars e
+  let hv ← mkAppM ``Exp.var #[shortIdent h]
+  let app := mkApp2 (mkConst ``Exp.app) (mkConst ``Op.opapp) (← mkListLit (mkConst ``Exp) [e, hv])
+  match e.consumeMData.getAppFnArgs with
+  | (``Exp.fn, #[x, b]) =>
+    return mkApp3 (mkConst ``Exp.let_) (← mkAppOptM ``Option.some #[mkConst ``VarN, x]) hv b
+  | (``Exp.let_, #[n, e₁, e₂]) =>
+    match n.consumeMData.getAppFnArgs with
+    | (``Option.none, _) => return mkApp3 (mkConst ``Exp.let_) n e₁ (← pushHMeta h e₂)
+    | (``Option.some, #[_, x]) =>
+      match mlStringLit? x with
+      | some xs => if xs == h then return app else return mkApp3 (mkConst ``Exp.let_) n e₁ (← pushHMeta h e₂)
+      | none => throwError "pushH: let name {x}"
+    | _ => throwError "pushH: let binder {n}"
+  | (``Exp.if_, #[c, a, b]) => return mkApp3 (mkConst ``Exp.if_) c (← pushHMeta h a) (← pushHMeta h b)
+  | (``Exp.mat, #[d, pes]) =>
+    let some cls ← listLitW? pes | throwError "pushH: clauses {pes}"
+    let mut out : Array Expr := #[]
+    for cl in cls do
+      let (``Prod.mk, #[_, _, p, b]) := (← whnf cl).consumeMData.getAppFnArgs | throwError "pushH: clause {cl}"
+      let some names ← patNamesMeta p | throwError "pushH: pattern {p}"
+      if names.contains h then return app
+      out := out.push (← mkAppM ``Prod.mk #[p, ← pushHMeta h b])
+    return mkApp2 (mkConst ``Exp.mat) d (← mkListLit (← mkAppM ``Prod #[mkConst ``Pat, mkConst ``Exp]) out.toList)
+  | _ => return app
+
 /-- Run `k` with the state's handle: fresh `b`, `loc`, the environment binding
 `hname` to `.loc b loc`, and the handle as a pseudo-local (so that later
 lookups through it are proved). Returns `fun b loc => k …`. -/
@@ -999,8 +1061,8 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
       solve gx
       let pfx ← instantiateMVars (mkMVar gx)
       let hl₁ ← hlook env' hname hv
-      let runX ← mkAppOptM ``EvalM_run #[none, none, none, RF, invA', B, env', cex,
-        shortIdent hname, b, loc, x, hl₁, pfx]
+      let runX ← mkAppOptM ``EvalM_runPush #[none, none, none, RF, invA', B, env', cex,
+        mlString hname, b, loc, x, hl₁, pfx]
       let cef ← mkFreshExprMVar (mkConst ``Exp)
       let cont ← withLocalDeclD `a α fun a => do
         withLocalDeclD `av (mkConst ``Value) fun av => do
@@ -1013,12 +1075,11 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
           solve gf.mvarId!
           modify fun s => { s with locals := s.locals.pop }
           let hl₂ ← hlook env'' hname hv
-          let runF ← mkAppOptM ``EvalM_run #[none, none, none, RF, A, B, env'', cef,
-            shortIdent hname, b, loc, fa, hl₂, ← instantiateMVars gf]
+          let runF ← mkAppOptM ``EvalM_runPush #[none, none, none, RF, A, B, env'', cef,
+            mlString hname, b, loc, fa, hl₂, ← instantiateMVars gf]
           mkLambdaFVars #[a, av, hA] runF
       let body ← mkAppM ``Exp.let_ #[← mkAppM ``Option.some #[mlString aname],
-        ← mkAppM ``Exp.app #[mkConst ``Op.opapp, ← mkListLit (mkConst ``Exp) [cex, ← mkAppM ``Exp.var #[shortIdent hname]]],
-        ← mkAppM ``Exp.app #[mkConst ``Op.opapp, ← mkListLit (mkConst ``Exp) [← instantiateMVars cef, ← mkAppM ``Exp.var #[shortIdent hname]]]]
+        ← pushHMeta hname cex, ← pushHMeta hname (← instantiateMVars cef)]
       unless ← isDefEq ceBody body do throwError "solveMonadic: bind body"
       mkAppOptM ``EvalM_bind #[none, none, none, none, none, env', mlString aname, none, none, invA', A, B,
         x, f, runX, cont]
@@ -1067,6 +1128,25 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
       mkAppOptM ``EvalM_throw #[none, none, none, (mkApp RF loc).headBeta, env', ceE, A, B, e,
         ← instantiateMVars ge]
     return ← finish hname (← mkAppM ``Exp.raise #[← instantiateMVars ceE]) pf
+  -- control (`match`, `if`, `let`, recursor): solved as a plain value, the
+  -- application to the handle pushed into its branches (`EvalM_runPush`)
+  let isControl : GoalM Bool := do
+    if t.isLet then return true
+    let .const c _ := t.getAppFn | return false
+    return c == ``ite || c == ``dite || c == ``cond || (← Meta.isMatcher c) ||
+      isCasesOnRecursor (← getEnv) c || isRecCore (← getEnv) c
+  if ← isControl then
+    let hname ← freshCName "h"
+    let ce' ← mkFreshExprMVar (mkConst ``Exp)
+    let pf ← withHandle env hname fun env' b loc => do
+      let hv ← mkAppM ``Value.loc #[b, loc]
+      let hl ← hlook env' hname hv
+      let gp ← mkFreshExprMVar (← mkAppM ``Eval #[env', ce', mkApp inv t])
+      modify fun s => { s with skipMonadic := true }
+      solve gp.mvarId!
+      mkAppOptM ``EvalM_runPush #[none, none, none, RF, A, B, env', ce', mlString hname, b, loc, t, hl,
+        ← instantiateMVars gp]
+    return ← finish hname (← pushHMeta hname (← instantiateMVars ce')) pf
   return false
 
 /-- `runRef init m` at a registered state: `m` on a fresh reference holding
