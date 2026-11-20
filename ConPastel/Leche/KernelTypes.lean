@@ -177,16 +177,17 @@ end ConPastel.Leche
 
 cake_replace ConLeche.Cached.declStep ConPastel.Leche.declStepR ConPastel.Leche.declStep_eq
 
--- con-leche's state operations, as operations on the record's fields
+-- con-leche's state operations, as operations on the record's fields: the memo
+-- wrapper inlined at its call sites (its field is a closure argument), the rest replaced
 cake_rewrite ConPastel.Leche.StateRw.memoEI_eq
-cake_rewrite ConPastel.Leche.StateRw.memoBI_eq
-cake_rewrite ConPastel.Leche.StateRw.whnfCoreLookupI_eq
-cake_rewrite ConPastel.Leche.StateRw.storeChainI_eq
-cake_rewrite ConPastel.Leche.StateRw.instListM_eq
-cake_rewrite ConPastel.Leche.StateRw.isEquivLM_eq
-cake_rewrite ConPastel.Leche.StateRw.constTyAtM_eq
-cake_rewrite ConPastel.Leche.StateRw.constValAtM_eq
-cake_rewrite ConPastel.Leche.StateRw.ruleRhsAtM_eq
-cake_rewrite ConPastel.Leche.StateRw.maxNatSizeM_eq
-cake_rewrite ConPastel.Leche.StateRw.flushC_eq
-cake_rewrite ConPastel.Leche.StateRw.withEagerMemos_eq
+cake_replace ConLeche.Cached.memoBI ConPastel.Leche.StateRw.memoBIR ConPastel.Leche.StateRw.memoBI_eqR
+cake_replace ConLeche.Cached.whnfCoreLookupI ConPastel.Leche.StateRw.whnfCoreLookupIR ConPastel.Leche.StateRw.whnfCoreLookupI_eqR
+cake_replace ConLeche.Cached.storeChainI ConPastel.Leche.StateRw.storeChainIR ConPastel.Leche.StateRw.storeChainI_eqR
+cake_replace ConLeche.Cached.instListM ConPastel.Leche.StateRw.instListMR ConPastel.Leche.StateRw.instListM_eqR
+cake_replace ConLeche.Cached.isEquivLM ConPastel.Leche.StateRw.isEquivLMR ConPastel.Leche.StateRw.isEquivLM_eqR
+cake_replace ConLeche.Cached.constTyAtM ConPastel.Leche.StateRw.constTyAtMR ConPastel.Leche.StateRw.constTyAtM_eqR
+cake_replace ConLeche.Cached.constValAtM ConPastel.Leche.StateRw.constValAtMR ConPastel.Leche.StateRw.constValAtM_eqR
+cake_replace ConLeche.Cached.ruleRhsAtM ConPastel.Leche.StateRw.ruleRhsAtMR ConPastel.Leche.StateRw.ruleRhsAtM_eqR
+cake_replace ConLeche.Cached.maxNatSizeM ConPastel.Leche.StateRw.maxNatSizeMR ConPastel.Leche.StateRw.maxNatSizeM_eqR
+cake_replace ConLeche.Cached.flushC ConPastel.Leche.StateRw.flushCR ConPastel.Leche.StateRw.flushC_eqR
+cake_replace ConLeche.Cached.withEagerMemos ConPastel.Leche.StateRw.withEagerMemosR ConPastel.Leche.StateRw.withEagerMemos_eqR

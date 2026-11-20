@@ -283,4 +283,151 @@ theorem withEagerMemos_eq {α : Type} (eager : Bool) (x : CheckCM α) :
       Except.bind, pure, StateT.pure, Except.pure, swapRun, enterE, leaveE, Bool.false_eq_true, ite_false]
     cases x (CState.enterEager false st).2 <;> rfl
 
+/-! ## As replacements -/
+
+/-- `memoBI`, its state operations on the record's fields. -/
+def memoBIR (f : Nat → Expr → Expr → CheckCM Bool) (d : Nat) (a b : Expr) : CheckCM Bool :=
+  (do
+      match ← hmFind (·.defeqC) (a, b) with
+      | some r => pure r
+      | none => do
+        let r ← f d a b
+        hmInsertD (·.defeqC) (fun st mp => { st with defeqC := mp }) (a, b) r
+        pure r)
+
+theorem memoBI_eqR (f : Nat → Expr → Expr → CheckCM Bool) (d : Nat) (a b : Expr) : memoBI f d a b = memoBIR f d a b := memoBI_eq f d a b
+
+/-- `whnfCoreLookupI`, its state operations on the record's fields. -/
+def whnfCoreLookupIR (cheap : Bool) (e : Expr) : CheckCM (Option Expr) :=
+  (if cheap then hmFind (·.whnfCoreCheapC) e else hmFind (·.whnfCoreC) e)
+
+theorem whnfCoreLookupI_eqR (cheap : Bool) (e : Expr) : whnfCoreLookupI cheap e = whnfCoreLookupIR cheap e := whnfCoreLookupI_eq cheap e
+
+/-- `storeChainI`, its state operations on the record's fields. -/
+def storeChainIR (cheap : Bool) (pend pendC : List Expr) (v : Expr) : CheckCM Unit :=
+  (if cheap || pend.isEmpty then pure () else do storeAllW v pend; storeAllWC v pendC)
+
+theorem storeChainI_eqR (cheap : Bool) (pend pendC : List Expr) (v : Expr) : storeChainI cheap pend pendC v = storeChainIR cheap pend pendC v := storeChainI_eq cheap pend pendC v
+
+/-- `instListM`, its state operations on the record's fields. -/
+def instListMR (e : Expr) (vs : List Expr) (d : Nat) : CheckCM Expr :=
+  (if e.bvarB ≤ d then pure e else do
+      match ← hmFind (·.instC) (e, vs, d) with
+      | some r => pure r
+      | none => do
+        let sz ← hmSize (·.instC)
+        if sz < instCCapC then pure () else hmClear (·.instC) (fun st mp => { st with instC := mp })
+        let r := Expr.instantiateListC e vs d
+        hmInsertD (·.instC) (fun st mp => { st with instC := mp }) (e, vs, d) r
+        pure r)
+
+theorem instListM_eqR (e : Expr) (vs : List Expr) (d : Nat) : instListM e vs d = instListMR e vs d := instListM_eq e vs d
+
+/-- `isEquivLM`, its state operations on the record's fields. -/
+def isEquivLMR (l r : Level) : CheckCM (Option Bool) :=
+  (if l == r then pure (some true) else do
+      match ← hmFind (·.eqvC) (l, r) with
+      | some b => pure (some b)
+      | none => do
+        let ls ← simpLM l
+        let rs ← simpLM r
+        if ls == rs then do
+          hmInsertD (·.eqvC) (fun st mp => { st with eqvC := mp }) (l, r) true
+          pure (some true)
+        else
+          match Level.leqCore Level.defaultFuel ls rs 0 with
+          | some false => do
+            hmInsertD (·.eqvC) (fun st mp => { st with eqvC := mp }) (l, r) false
+            pure (some false)
+          | some true =>
+            match Level.leqCore Level.defaultFuel rs ls 0 with
+            | some b => do
+              hmInsertD (·.eqvC) (fun st mp => { st with eqvC := mp }) (l, r) b
+              pure (some b)
+            | none => pure none
+          | none => pure none)
+
+theorem isEquivLM_eqR (l r : Level) : isEquivLM l r = isEquivLMR l r := isEquivLM_eq l r
+
+/-- `constTyAtM`, its state operations on the record's fields. -/
+def constTyAtMR (fe : FEnv) (nI n : Name) (us : List Level) : CheckCM Expr :=
+  (do
+      let hit? ← hmFind (·.constTyAt) (n, us)
+      match hit? with
+      | some i => pure i
+      | none =>
+        match fe.find? n with
+        | some ci =>
+          let cv := ci.toConstantVal
+          let i ← instLevelParamsM cv.levelParams us cv.type
+          hmInsertD (·.constTyAt) (fun st mp => { st with constTyAt := mp }) (n, us) i
+          pure i
+        | none => throw (.internal "constTyAtM: unknown constant"))
+
+theorem constTyAtM_eqR (fe : FEnv) (nI n : Name) (us : List Level) : constTyAtM fe nI n us = constTyAtMR fe nI n us := constTyAtM_eq fe nI n us
+
+/-- `constValAtM`, its state operations on the record's fields. -/
+def constValAtMR (fe : FEnv) (nI n : Name) (us : List Level) : CheckCM Expr :=
+  (do
+      let hit? ← hmFind (·.constValAt) (n, us)
+      match hit? with
+      | some i => pure i
+      | none =>
+        match fe.find? n with
+        | some (.defnInfo cv v _) =>
+          let i ← instLevelParamsM cv.levelParams us v
+          hmInsertD (·.constValAt) (fun st mp => { st with constValAt := mp }) (n, us) i
+          pure i
+        | _ => throw (.internal "constValAtM: not a stored definition"))
+
+theorem constValAtM_eqR (fe : FEnv) (nI n : Name) (us : List Level) : constValAtM fe nI n us = constValAtMR fe nI n us := constValAtM_eq fe nI n us
+
+/-- `ruleRhsAtM`, its state operations on the record's fields. -/
+def ruleRhsAtMR (fe : FEnv) (cI jI c j : Name) (us : List Level) : CheckCM Expr :=
+  (do
+      let hit? ← hmFind (·.ruleRhsAt) (c, j, us)
+      match hit? with
+      | some i => pure i
+      | none =>
+        match fe.find? c with
+        | some (.recInfo cv _ _ _ rules) =>
+          match rules.find? (fun r' => r'.ctor == j) with
+          | some rl =>
+            let i ← instLevelParamsM cv.levelParams us rl.rhs
+            hmInsertD (·.ruleRhsAt) (fun st mp => { st with ruleRhsAt := mp }) (c, j, us) i
+            pure i
+          | none => throw (.internal "ruleRhsAtM: no rule for constructor")
+        | _ => throw (.internal "ruleRhsAtM: not a stored recursor"))
+
+theorem ruleRhsAtM_eqR (fe : FEnv) (cI jI c j : Name) (us : List Level) : ruleRhsAtM fe cI jI c j us = ruleRhsAtMR fe cI jI c j us := ruleRhsAtM_eq fe cI jI c j us
+
+def maxNatSizeMR : CheckCM Nat := stRead (·.maxNatSize)
+theorem maxNatSizeM_eqR : maxNatSizeM = maxNatSizeMR := maxNatSizeM_eq
+
+def withEagerMemosR {α : Type} (eager : Bool) (x : CheckCM α) : CheckCM α :=
+  if eager then x else swapRun enterE leaveE x
+theorem withEagerMemos_eqR {α : Type} (eager : Bool) (x : CheckCM α) :
+    withEagerMemos eager x = withEagerMemosR eager x := withEagerMemos_eq eager x
+
+def flushCR : CheckCM Unit := (do
+    hmClear (·.constTyAt) (fun st mp => { st with constTyAt := mp })
+    hmClear (·.constValAt) (fun st mp => { st with constValAt := mp })
+    hmClear (·.ruleRhsAt) (fun st mp => { st with ruleRhsAt := mp })
+    hmClear (·.whnfCoreC) (fun st mp => { st with whnfCoreC := mp })
+    hmClear (·.whnfCoreCheapC) (fun st mp => { st with whnfCoreCheapC := mp })
+    hmClear (·.whnfC) (fun st mp => { st with whnfC := mp })
+    hmClear (·.inferC) (fun st mp => { st with inferC := mp })
+    hmClear (·.inferIOC) (fun st mp => { st with inferIOC := mp })
+    hmClear (·.defeqC) (fun st mp => { st with defeqC := mp })
+    hmClear (·.instC) (fun st mp => { st with instC := mp })
+    hmClear (·.eagerMemos.whnfCoreC) (fun st mp => { st with eagerMemos := { st.eagerMemos with whnfCoreC := mp } })
+    hmClear (·.eagerMemos.whnfCoreCheapC)
+      (fun st mp => { st with eagerMemos := { st.eagerMemos with whnfCoreCheapC := mp } })
+    hmClear (·.eagerMemos.whnfC) (fun st mp => { st with eagerMemos := { st.eagerMemos with whnfC := mp } })
+    hmClear (·.eagerMemos.inferC) (fun st mp => { st with eagerMemos := { st.eagerMemos with inferC := mp } })
+    hmClear (·.eagerMemos.inferIOC) (fun st mp => { st with eagerMemos := { st.eagerMemos with inferIOC := mp } })
+    hmClear (·.eagerMemos.defeqC) (fun st mp => { st with eagerMemos := { st.eagerMemos with defeqC := mp } }) :
+    CheckCM Unit)
+theorem flushC_eqR : flushC = flushCR := flushC_eq
+
 end ConPastel.Leche.StateRw

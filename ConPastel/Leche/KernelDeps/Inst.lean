@@ -15,5 +15,5 @@ set_option linter.all false
 
 namespace ConPastel.Leche
 cake_module "KernelDepsInst"
-cake_unit ConLeche.Cached.betaPeelI @ConLeche.Cached.instListM ConLeche.Cached.instSpineM
+cake_unit ConLeche.Cached.betaPeelI ConPastel.Leche.StateRw.instListMR ConLeche.Cached.instSpineM
 end ConPastel.Leche
