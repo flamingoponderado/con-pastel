@@ -51,6 +51,14 @@ initialize tokenExt : SimplePersistentEnvExtension Name NameSet ←
 
 def hasToken (env : Environment) (I : Name) : Bool := (tokenExt.getState env).contains I
 
+/-- `EqSound inv` theorems by invariant (`cake_eqsound_reg thm`): the pointer
+test `ptrSel` at that invariant's type is CakeML's `=`. -/
+initialize eqSoundExt : SimplePersistentEnvExtension (Name × Name) (NameMap Name) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, t) => m.insert k t
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, t) => m.insert k t) m) {}
+  }
+
 def getCached (env : Environment) (I : Name) : Array Name :=
   ((cachedExt.getState env).find? I).getD #[]
 

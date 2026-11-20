@@ -2196,6 +2196,29 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         return ← solveRunRec g env inv args info
       if (← stateRefMonad? (← inferType args[4]!)).isSome then
         return ← solveRunRef g env inv args
+  -- the pointer test `ptrSel a b t e h`: CakeML's `=` on `a` and `b` (sound at a
+  -- type registered with `cake_eqsound_reg`), then `t` or `e`
+  if fn.isConstOf ``ptrSel && args.size == 7 then
+    let a := args[2]!; let b := args[3]!; let tf := args[4]!; let ev := args[5]!
+    let invA ← invOf args[0]!
+    let envS := eqSoundExt.getState (← getEnv)
+    let some thm := (match invA.getAppFn with | .const n _ => envS.find? n | _ => none)
+      | throwError "ptrSel: no EqSound theorem for {invA} (cake_eqsound_reg)"
+    let (_, ga) ← newEvalGoal env (mkApp invA a)
+    solve ga
+    let (_, gb) ← newEvalGoal env (mkApp invA b)
+    solve gb
+    let ht ← withLocalDeclD `p (← mkEq a b) fun p => do
+      let (_, gt) ← newEvalGoal env (mkApp inv (mkApp tf p).headBeta)
+      solve gt
+      mkLambdaFVars #[p] (← instantiateMVars (mkMVar gt))
+    let (_, ge) ← newEvalGoal env (mkApp inv ev)
+    solve ge
+    let pf ← mkAppOptM ``Eval_ptrSel #[none, none, none, none, some (mkConst thm), none, none, none, none, none,
+      some a, some b, some tf, some ev, some args[6]!, some (← instantiateMVars (mkMVar ga)), some (← instantiateMVars (mkMVar gb)),
+      some ht, some (← instantiateMVars (mkMVar ge))]
+    assignProof g pf
+    return
   -- registered replacements `K xs = K' xs`
   if let .const c us := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
