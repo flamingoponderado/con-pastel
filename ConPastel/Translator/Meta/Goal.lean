@@ -946,6 +946,49 @@ partial def pushHMeta (h : String) (e : Expr) : MetaM Expr := do
     return mkApp2 (mkConst ``Exp.mat) d (← mkListLit (← mkAppM ``Prod #[mkConst ``Pat, mkConst ``Exp]) out.toList)
   | _ => return app
 
+
+/-- Close `g` with the `EvalM` lemma `thm`: its variable names fresh, then its
+lookups, name disequalities and sub-translations (`Eval` goals, under any
+binders of values). -/
+partial def applyEvalM (g : MVarId) (thm : Name) (hname : String) : GoalM Unit := do
+  let lem ← mkConstWithFreshMVarLevels thm
+  let lty ← inferType lem
+  let names ← forallTelescope lty fun xs _ => xs.mapM fun x => do return (← x.fvarId!.getDecl).userName
+  let (xs, _, concl) ← forallMetaTelescope lty
+  -- the state's handle is `h`
+  -- and its other variable names are fresh (before unifying: the code goal
+  -- lives in a smaller context)
+  for (x, n) in xs.zip names do
+    if n == `h then x.mvarId!.assign (mlString hname)
+    else if (← whnfR (← x.mvarId!.getType)).isConstOf ``Flapjack.Basis.Pure.MlString.MlString then
+      x.mvarId!.assign (mlString (← freshCName "t"))
+  unless ← isDefEq concl (← g.getType) do
+    throwError "applyEvalM: {thm} does not apply: {← instantiateMVars concl}  VS  {← g.getType}"
+  let gs := xs.map (·.mvarId!)
+  -- lookups next (they fix the handle's value)
+  for g' in gs do
+    if ← g'.isAssigned then continue
+    let ty ← instantiateMVars (← g'.getType)
+    if let some (_, lhs, _) := ty.eq? then
+      let (``nsLookup, #[_, _, _, _, _, ns, id]) := lhs.getAppFnArgs | throwError "applyEvalM: side goal {ty}"
+      let (``Ident.short, #[_, _, n]) := id.getAppFnArgs | throwError "applyEvalM: lookup {id}"
+      let some n := mlStringLit? (← instantiateMVars n) | throwError "applyEvalM: name {n}"
+      let (_, pf) ← lookupNs ns n
+      unless ← isDefEq (← inferType pf) ty do throwError "applyEvalM: lookup of {n}: {← inferType pf} vs {ty}"
+      g'.assign pf
+  for g' in gs do
+    if ← g'.isAssigned then continue
+    let ty ← instantiateMVars (← g'.getType)
+    if ty.isAppOf ``Not || ty.isAppOf ``Ne then
+      g'.assign (← closeWith ty (← `(tactic| decide)))
+    else
+      let pf ← forallTelescope ty fun xs body => do
+        let gb ← mkFreshExprMVar body
+        solve gb.mvarId!
+        mkLambdaFVars xs (← instantiateMVars gb)
+      g'.assign pf
+  g.assign (← instantiateMVars (mkAppN lem xs))
+
 /-- Run `k` with the state's handle: fresh `b`, `loc`, the environment binding
 `hname` to `.loc b loc`, and the handle as a pseudo-local (so that later
 lookups through it are proved). Returns `fun b loc => k …`. -/
@@ -998,6 +1041,24 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
     assignProof g (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
     return true
   -- array states (`arrRel`): read with a default, write in place
+  -- hash-table states (`tblRel`): the table primitives, each by its `EvalM` lemma
+  let isTbl := RF.isLambda && RF.bindingBody!.getAppFn.isConstOf ``ConPastel.Translator.tblRel
+  let tblPrims := [(``ConPastel.Translator.tNB, ``ConPastel.Translator.EvalM_tNB),
+    (``ConPastel.Translator.tSize, ``ConPastel.Translator.EvalM_tSize),
+    (``ConPastel.Translator.tGetB, ``ConPastel.Translator.EvalM_tGetB),
+    (``ConPastel.Translator.tSetB, ``ConPastel.Translator.EvalM_tSetB),
+    (``ConPastel.Translator.tSetSize, ``ConPastel.Translator.EvalM_tSetSize),
+    (``ConPastel.Translator.tRealloc, ``ConPastel.Translator.EvalM_tRealloc)]
+  if isTbl then
+    if let some (_, thm) := tblPrims.find? (·.1 == cn) then
+      let hname ← freshCName "h"
+      let ceBody ← mkFreshExprMVar (mkConst ``Exp)
+      let pf ← withHandle env hname fun env' _ loc => do
+        let goal ← mkAppM ``EvalM #[(mkApp RF loc).headBeta, env', ceBody, A, B, t]
+        let gm ← mkFreshExprMVar goal
+        applyEvalM gm.mvarId! thm hname
+        instantiateMVars gm
+      return ← finish hname (← instantiateMVars ceBody) pf
   let isArr := (RF.headBeta.getAppFn.isLambda && (RF.bindingBody!.getAppFn.isConstOf ``ConPastel.Translator.arrRel))
   if isArr && (cn == ``ConPastel.Translator.getsD || cn == ``ConPastel.Translator.setM) then
     let (``arrRel, #[_, Ael, _]) := RF.bindingBody!.getAppFnArgs | throwError "array state: relation {RF}"
