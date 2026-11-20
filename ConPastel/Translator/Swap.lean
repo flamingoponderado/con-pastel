@@ -1264,6 +1264,12 @@ def enterL (ps : List (Nat × Nat)) (emp : List TEntry) (l : List TEntry) : List
 def leaveL (ps : List (Nat × Nat)) (sav : List TEntry) (l : List TEntry) : List TEntry :=
   setPairs l ((ps.map fun p => (p.2, l.getD p.1 default)) ++ (ps.zip sav).map fun q => (q.1.1, q.2))
 
+theorem ofFn_getElem' {α : Type} {n : Nat} (vs : List α) (h : vs.length = n) :
+    List.ofFn (fun i : Fin n => vs[i.1]'(by omega)) = vs := by
+  apply List.ext_getElem (by simp [h])
+  intro i h₁ h₂
+  simp
+
 /-- **The swap**, with the tables of `enter st` and `leave st₂ st` given as
 list equations (which hold by computation for a concrete record). -/
 theorem EvalM_swapL {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Value → Prop} {loc : Nat}
@@ -1277,15 +1283,19 @@ theorem EvalM_swapL {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Va
     (hlemp : emp.length = ps.length)
     (hnames : (h :: r :: (snames ++ fnames)).Nodup)
     (hemp : ∀ e ∈ emp, EmptyRaw e.raw)
-    (hnil : ∀ k (hk : k < ps.length) ns,
-      Eval { env with v := ns } (enils[k]'(by omega)) ((emp[k]'(by omega)).BI .nil))
+    (hnil : List.Forall₂ (fun e t => ∀ ns, Eval { env with v := ns } e (t.BI .nil)) enils emp)
     (hE : ∀ st, tabs (enter st) = enterL ps emp (tabs st))
     (hL : ∀ st st₂, tabs (leave st₂ st) = leaveL ps (ps.map fun p => (tabs st).getD p.1 default) (tabs st₂))
     (P1 : ∀ st v, P (enter st) v ↔ P st v)
     (P2 : ∀ st st₂ v, P (leave st₂ st) v ↔ P st₂ v)
-    (hx : ∀ vs, vs.length = ps.length → ∀ ws, ws.length = ps.length →
-      EvalM (recRel tabs P loc) (bindAll (bindAll env snames vs) fnames ws) ex A B x) :
+    (hx : ∀ vs ws : Fin ps.length → Value,
+      EvalM (recRel tabs P loc) (bindAll (bindAll env snames (List.ofFn vs)) fnames (List.ofFn ws)) ex A B x) :
     EvalM (recRel tabs P loc) env (swapExp h a r ps snames fnames enils ex) A B (swapRun enter leave x) := by
+  have hx' : ∀ vs, vs.length = ps.length → ∀ ws, ws.length = ps.length →
+      EvalM (recRel tabs P loc) (bindAll (bindAll env snames vs) fnames ws) ex A B x := by
+    intro vs hvs ws hws
+    have := hx (fun i => vs[i.1]'(by omega)) (fun i => ws[i.1]'(by omega))
+    rwa [ofFn_getElem' vs hvs, ofFn_getElem' ws hws] at this
   have hnd1 : (ps.map (·.1)).Nodup := (List.nodup_append.mp hnd).1
   have hnd2 : (ps.map (·.2)).Nodup := (List.nodup_append.mp hnd).2.1
   have h12 : ∀ j ∈ ps.map (·.1), j ∉ ps.map (·.2) := fun j h₁ h₂ =>
@@ -1338,7 +1348,8 @@ theorem EvalM_swapL {σ ε α : Type} {tabs : σ → List TEntry} {P : σ → Va
       rcases List.mem_append.mp hp with hp | hp
       · obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; rw [hN]; exact (hps q hq).2
       · obtain ⟨q, hq, rfl⟩ := List.mem_map.mp hp; rw [hN]; exact (hps q.1 (List.of_mem_zip hq).1).1
-  refine EvalM_swap (BIs := emp) hh hN hps hnd hls hlf hle hlemp hnames hnil ?_ ?_ ?_ P1 ?_ ?_ ?_ P2 hx
+  refine EvalM_swap (BIs := emp) hh hN hps hnd hls hlf hle hlemp hnames
+    (fun k hk ns => f2_get hnil k (by omega) (by omega) ns) ?_ ?_ ?_ P1 ?_ ?_ ?_ P2 hx'
   · -- the fields that do not move
     intro st j h1 h2
     rw [enterGet, plookup_none]

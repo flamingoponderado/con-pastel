@@ -172,6 +172,22 @@ elab_rules : command
       pure ({ tabs := tnm, plain := plnm, accs := accNames, plainAcc := pnm } : StateRecInfo)
     modifyEnv fun env => stateRecExt.addEntry env (c, info)
 
+/-- `cake_state_swap T [i₁, …] [j₁, …]`: on the state record `T`, `swapRun enter
+leave x` runs `x` with field `iₖ` holding field `jₖ`'s table and field `jₖ` a
+fresh empty one, and moves them back afterwards (`EvalM_swapL`; `enter` and
+`leave` must change the tables exactly so, which is checked by computation). -/
+syntax "cake_state_swap " ident "[" num,* "]" "[" num,* "]" : command
+
+elab_rules : command
+  | `(cake_state_swap $t:ident [$is,*] [$js,*]) => do
+    let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+    let some info := (stateRecExt.getState (← getEnv)).find? c
+      | throwError "cake_state_swap: {c} is not a state record"
+    let is := is.getElems.map (·.getNat)
+    let js := js.getElems.map (·.getNat)
+    unless is.size == js.size do throwError "cake_state_swap: lists of different lengths"
+    modifyEnv fun env => stateRecExt.addEntry env (c, { info with swap := is.zip js })
+
 /-- `cake_ghost T`: the closed type `T` becomes a ghost type (`GHOST T`). -/
 elab "cake_ghost " t:ident : command => do
   let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t

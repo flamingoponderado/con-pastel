@@ -111,6 +111,9 @@ structure StateRecInfo where
   plain : Name
   accs : Array Name
   plainAcc : Name
+  /-- The fields swapped by `swapRun` (`cake_state_swap`): `(i, j)`, field `i`
+  taking field `j`'s table while the computation runs. -/
+  swap : Array (Nat × Nat) := #[]
   deriving Inhabited
 
 initialize stateRecExt : SimplePersistentEnvExtension (Name × StateRecInfo) (NameMap StateRecInfo) ←

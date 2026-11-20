@@ -8,6 +8,7 @@ import ConPastel.Translator.EvalM
 import ConPastel.Translator.Push
 import ConPastel.Translator.HashMapM
 import ConPastel.Translator.StateOps
+import ConPastel.Translator.Swap
 
 /-!
 # The proof-producing translator: expressions

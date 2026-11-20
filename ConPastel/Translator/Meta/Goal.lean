@@ -986,7 +986,9 @@ partial def applyEvalM (g : MVarId) (thm : Name) (hname : String) (named : List 
     let ty ← instantiateMVars (← g'.getType)
     -- data (code, values) is fixed by the proofs that mention it
     unless ← isProp ty do continue
-    if ty.isAppOf ``Not || ty.isAppOf ``Ne then
+    let isEvalGoal ← forallTelescope ty fun _ b => do return (← whnfR b).isAppOf ``Eval
+    if !isEvalGoal then
+      -- side conditions on literals (disequalities, bounds, distinctness)
       g'.assign (← closeWith ty (← `(tactic| decide)))
     else
       let pf ← forallTelescope ty fun xs body => do
@@ -1054,7 +1056,8 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
   -- the field's table (`EvalM_lens`); the plain part is read (`EvalM_plain`)
   let isRec := RF.isLambda && RF.bindingBody!.getAppFn.isConstOf ``ConPastel.Translator.recRel
   let recOps := [``ConPastel.Translator.hmFind, ``ConPastel.Translator.hmInsertD,
-    ``ConPastel.Translator.hmSize, ``ConPastel.Translator.hmClear, ``ConPastel.Translator.stRead]
+    ``ConPastel.Translator.hmSize, ``ConPastel.Translator.hmClear, ``ConPastel.Translator.stRead,
+    ``ConPastel.Translator.swapRun]
   if isRec && recOps.contains cn then
     let (``ConPastel.Translator.recRel, #[σr, tabsE, plainE, _]) := RF.bindingBody!.getAppFnArgs
       | throwError "record state: {RF}"
@@ -1068,6 +1071,115 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
         let body ← whnfR body
         unless body.isAppOf ``EvalM do throwError "record state: proof {body}"
         instantiateMVars (body.getArg! 5)
+    if cn == ``ConPastel.Translator.swapRun then
+      let ps := info.swap
+      if ps.isEmpty then throwError "record state: no swap registered for {σr}"
+      let m := ps.size
+      let enter := args[3]!
+      let leave := args[4]!
+      let x := args[5]!
+      let snames ← (List.range m).mapM fun _ => freshCName "s"
+      let fnames ← (List.range m).mapM fun _ => freshCName "f"
+      -- the entries of the swapped-in empty tables
+      let entKVB ← withLocalDeclD `st σr fun st => do
+        let some tl ← unfoldDefinition? (mkApp tabsE st) | throwError "swap: tables"
+        let some es := listLit? tl.headBeta | throwError "swap: tables {tl}"
+        es.toArray.mapM fun e => do
+          let (``ConPastel.Translator.TEntry.mk, #[K, V, BI, _]) := e.getAppFnArgs | throwError "swap: entry {e}"
+          pure (K, V, BI)
+      let entTy := mkConst ``ConPastel.Translator.TEntry
+      let nsTy ← mkAppM ``Namespace #[mkConst ``ModN, mkConst ``VarN, mkConst ``Value]
+      let mut emps : Array Expr := #[]
+      let mut raws : Array Expr := #[]
+      let mut nils : Array (Expr × Expr) := #[]
+      for (_, j) in ps do
+        let (K, V, BI) := entKVB[j]!
+        let instB ← synthInstance (← mkAppM ``BEq #[K])
+        let instH ← synthInstance (← mkAppM ``Hashable #[K])
+        let hmTy := mkAppN (mkConst ``Std.HashMap [levelZero, levelZero]) #[K, V, instB, instH]
+        let emp ← mkAppOptM ``EmptyCollection.emptyCollection #[hmTy, none]
+        let raw ← mkAppM ``Std.DHashMap.inner #[← mkAppM ``Std.HashMap.inner #[emp]]
+        emps := emps.push (mkAppN (mkConst ``ConPastel.Translator.TEntry.mk) #[K, V, BI, raw])
+        raws := raws.push (← mkAppOptM ``ConPastel.Translator.emptyRaw_empty #[K, V, instB, instH])
+        let nil := mkApp2 (mkConst ``Std.DHashMap.Internal.AssocList.nil [levelZero, levelZero]) K
+          (← withLocalDeclD `x K fun x => mkLambdaFVars #[x] V)
+        let cn ← mkFreshExprMVar (mkConst ``Exp)
+        let pn ← withLocalDeclD `ns nsTy fun ns => do
+          let env' ← mkAppM ``SemEnv.mk #[ns, ← mkAppM ``SemEnv.c #[env]]
+          let gn ← mkFreshExprMVar (← mkAppM ``Eval #[env', cn, mkApp BI nil])
+          solve gn.mvarId!
+          mkLambdaFVars #[ns] (← instantiateMVars gn)
+        nils := nils.push (← instantiateMVars cn, pn)
+      let empE ← mkListLit entTy emps.toList
+      let mut hemp ← mkAppOptM ``ConPastel.Translator.emptyRaws_nil #[]
+      for (e, pr) in (emps.toList.zip raws.toList).reverse do
+        hemp ← mkAppOptM ``ConPastel.Translator.emptyRaws_cons #[e, none, pr, hemp]
+      let hname ← freshCName "h"
+      let psE ← mkListLit (← mkAppM ``Prod #[mkConst ``Nat, mkConst ``Nat])
+        (← ps.toList.mapM fun (i, j) => mkAppM ``Prod.mk #[toExpr i, toExpr j])
+      let snamesE ← mkListLit (mkConst ``VarN) (snames.map mlString)
+      let fnamesE ← mkListLit (mkConst ``VarN) (fnames.map mlString)
+      let enilsE ← mkListLit (mkConst ``Exp) (nils.toList.map (·.1))
+      let pf ← withHandle env hname fun env' b loc => do
+        let R := (mkApp RF loc).headBeta
+        let hv ← mkAppM ``Value.loc #[b, loc]
+        -- the nil codes, as `Forall₂`
+        let Rn ← withLocalDeclD `e (mkConst ``Exp) fun e => withLocalDeclD `t entTy fun t => do
+          let body ← withLocalDeclD `ns nsTy fun ns => do
+            let env'' ← mkAppM ``SemEnv.mk #[ns, ← mkAppM ``SemEnv.c #[env']]
+            let tK ← mkAppM ``ConPastel.Translator.TEntry.K #[t]
+            let tV ← mkAppM ``ConPastel.Translator.TEntry.V #[t]
+            let nil := mkApp2 (mkConst ``Std.DHashMap.Internal.AssocList.nil [levelZero, levelZero]) tK
+              (← withLocalDeclD `x tK fun x => mkLambdaFVars #[x] tV)
+            mkForallFVars #[ns] (← mkAppM ``Eval #[env'', e, mkApp (← mkAppM ``ConPastel.Translator.TEntry.BI #[t]) nil])
+          mkLambdaFVars #[e, t] body
+        let mut hnil ← mkAppOptM ``List.Forall₂.nil #[mkConst ``Exp, entTy, Rn]
+        let mut esL : List Expr := []
+        let mut tsL : List Expr := []
+        for ((cn, pn), e) in (nils.toList.zip emps.toList).reverse do
+          hnil ← mkAppOptM ``List.Forall₂.cons #[mkConst ``Exp, entTy, Rn, cn, e, ← mkListLit (mkConst ``Exp) esL,
+            ← mkListLit entTy tsL, pn, hnil]
+          esL := cn :: esL
+          tsL := e :: tsL
+        -- the computation, under the swap's variables
+        let finTy ← mkArrow (mkApp (mkConst ``Fin) (toExpr m)) (mkConst ``Value)
+        let cx ← mkFreshExprMVar (mkConst ``Exp)
+        let hx ← withLocalDeclD `vs finTy fun vs => withLocalDeclD `ws finTy fun ws => do
+          let mut envX := env'
+          for k in [0:m] do
+            let fk ← mkAppM ``Fin.mk #[toExpr k, ← mkDecideProof (← mkLt (toExpr k) (toExpr m))]
+            envX ← mkAppM ``SemEnv.mk #[← mkAppM ``nsOptBind #[← mkAppM ``Option.some #[mlString snames[k]!],
+              mkApp vs fk, ← mkAppM ``SemEnv.v #[envX]], ← mkAppM ``SemEnv.c #[envX]]
+          for k in [0:m] do
+            let fk ← mkAppM ``Fin.mk #[toExpr k, ← mkDecideProof (← mkLt (toExpr k) (toExpr m))]
+            envX ← mkAppM ``SemEnv.mk #[← mkAppM ``nsOptBind #[← mkAppM ``Option.some #[mlString fnames[k]!],
+              mkApp ws fk, ← mkAppM ``SemEnv.v #[envX]], ← mkAppM ``SemEnv.c #[envX]]
+          let gx ← mkFreshExprMVar (← mkAppM ``Eval #[envX, cx, mkApp inv x])
+          solve gx.mvarId!
+          let hlx ← proveLookupG envX hname hv
+          let run ← mkAppOptM ``EvalM_runPush #[none, none, none, RF, A, B, envX, ← instantiateMVars cx,
+            mlString hname, b, loc, x, hlx, ← instantiateMVars gx]
+          mkLambdaFVars #[vs, ws] run
+        let goal ← mkAppM ``EvalM #[R, env', ← mkFreshExprMVar (mkConst ``Exp), A, B, t]
+        let gm ← mkFreshExprMVar goal
+        let hN ← withLocalDeclD `st σr fun st => do mkLambdaFVars #[st] (← mkEqRefl (toExpr N))
+        let hE ← withLocalDeclD `st σr fun st => do mkLambdaFVars #[st] (← mkEqRefl (mkApp tabsE (mkApp enter st)))
+        let hL ← withLocalDeclD `st σr fun st => withLocalDeclD `st₂ σr fun st₂ => do
+          mkLambdaFVars #[st, st₂] (← mkEqRefl (mkApp tabsE (mkApp2 leave st₂ st)))
+        let P1 ← withLocalDeclD `st σr fun st => withLocalDeclD `v (mkConst ``Value) fun v => do
+          mkLambdaFVars #[st, v] (← mkAppM ``Iff.refl #[mkApp2 plainE (mkApp enter st) v])
+        let P2 ← withLocalDeclD `st σr fun st => withLocalDeclD `st₂ σr fun st₂ =>
+          withLocalDeclD `v (mkConst ``Value) fun v => do
+            mkLambdaFVars #[st, st₂, v] (← mkAppM ``Iff.refl #[mkApp2 plainE (mkApp2 leave st₂ st) v])
+        let mlen (l : Expr) : GoalM Expr := do mkEqRefl (← mkAppM ``List.length #[l])
+        applyEvalM gm.mvarId! ``ConPastel.Translator.EvalM_swapL hname
+          [(`N, toExpr N), (`ps, psE), (`snames, snamesE), (`fnames, fnamesE), (`enils, enilsE),
+           (`emp, empE), (`enter, enter), (`leave, leave), (`x, x),
+           (`hN, hN), (`hls, ← mlen snamesE), (`hlf, ← mlen fnamesE), (`hle, ← mlen enilsE),
+           (`hlemp, ← mlen empE), (`hemp, hemp), (`hnil, hnil), (`hE, hE), (`hL, hL), (`P1, P1), (`P2, P2),
+           (`hx, hx)]
+        instantiateMVars gm
+      return ← finish hname (← codeOf pf) pf
     if cn == ``ConPastel.Translator.stRead then
       let f := args.back!
       unless ← isDefEq f (mkConst info.plainAcc) do throwError "record state: {f} is not the plain part"
