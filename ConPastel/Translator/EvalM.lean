@@ -563,7 +563,22 @@ theorem Runs.handle_raise {τ : Type} {s s₁ s₂ : State τ} {env : SemEnv Val
   rw [Nat.add_comm a₂ b₁]
   exact hb'
 
+/-! ## Derived state operations, as `bind`, `get`, `set` and `pure` -/
+
+theorem modify_eq_bind {σ ε : Type} (f : σ → σ) :
+    (modify f : StateT σ (Except ε) PUnit) = (get >>= fun s => set (f s)) := rfl
+
+theorem modifyGet_eq_bind {σ ε α : Type} (f : σ → α × σ) :
+    (modifyGet f : StateT σ (Except ε) α) = (get >>= fun s => set (f s).2 >>= fun _ => pure (f s).1) := rfl
+
 /-! ## Running a computation on a fresh reference -/
+
+/-- Run a state-exception computation from `init`, keeping its result. The
+translation runs it on a fresh reference (`Eval_runRef`). -/
+def runRef {σ ε α : Type} (init : σ) (m : StateT σ (Except ε) α) : Except ε α :=
+  match m init with
+  | .ok (a, _) => .ok a
+  | .error e => .error e
 
 theorem Runs.opref {τ : Type} {s s₁ : State τ} {env : SemEnv Value} {e : Exp} {v : Value}
     (h : Runs s env [e] s₁ (.val [v])) :

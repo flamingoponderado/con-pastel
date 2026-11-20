@@ -88,6 +88,14 @@ initialize ghostExt : SimplePersistentEnvExtension Name NameSet ←
     addImportedFn := fun as => as.foldl (fun acc a => a.foldl (·.insert ·) acc) {}
   }
 
+/-- State types held in a reference (`cake_state_ref T`): `StateT T (Except ε) α`
+is refined by `MRET (refRel (invOf T)) …`, a function of the state's handle. -/
+initialize stateRefExt : SimplePersistentEnvExtension Name NameSet ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun s n => s.insert n
+    addImportedFn := fun as => as.foldl (fun acc a => a.foldl (·.insert ·) acc) {}
+  }
+
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 
