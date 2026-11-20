@@ -104,6 +104,21 @@ initialize stateArrExt : SimplePersistentEnvExtension Name NameSet ←
     addImportedFn := fun as => as.foldl (fun acc a => a.foldl (·.insert ·) acc) {}
   }
 
+/-- A state record of hash tables (`cake_state_record`): `recRel tabs plain`,
+the accessors of its hash-map fields (in `tabs` order) and of its plain part. -/
+structure StateRecInfo where
+  tabs : Name
+  plain : Name
+  accs : Array Name
+  plainAcc : Name
+  deriving Inhabited
+
+initialize stateRecExt : SimplePersistentEnvExtension (Name × StateRecInfo) (NameMap StateRecInfo) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, v) => m.insert k v
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, v) => m.insert k v) m) {}
+  }
+
 /-- The translation needs the datatype for `ty` first. -/
 initialize needDatatypeRef : IO.Ref (Option Expr) ← IO.mkRef none
 

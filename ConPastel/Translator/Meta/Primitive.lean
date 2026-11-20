@@ -110,6 +110,68 @@ elab "cake_state_array " t:ident : command => do
   let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
   modifyEnv fun env => stateArrExt.addEntry env c
 
+/-- `cake_state_record T a₁ … aₙ with p`: computations `StateT T (Except ε) α`
+are translated over a state record (`recRel`) whose hash-map fields `aᵢ : T →
+Std.HashMap K V` are tables updated in place, and whose plain part is `p : T → P`.
+Its map operations are `hmFind`, `hmInsertD`, `hmSize`, `hmClear` and `stRead`
+(`ConPastel.Translator.StateOps`); a whole-state `get`/`set` is not translated. -/
+syntax "cake_state_record " ident (colGt term:max)+ " with " term:max : command
+
+elab_rules : command
+  | `(cake_state_record $t:ident $accs* with $p) => do
+    let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+    let info ← liftTermElabM do
+      let σ := Lean.mkConst c
+      let mut accNames : Array Name := #[]
+      let mut entries : Array (Expr × Expr × Expr × Name) := #[]
+      for a in accs, idx in [0:accs.size] do
+        let ty ← mkArrow σ (← mkFreshTypeMVar)
+        let e ← Term.elabTermEnsuringType a ty
+        Term.synthesizeSyntheticMVarsNoPostponing
+        let e ← instantiateMVars e
+        let ety ← instantiateMVars (← inferType e)
+        let hm ← forallTelescope ety fun _ b => whnfR b
+        unless hm.isAppOfArity ``Std.HashMap 4 do throwError "cake_state_record: {a} is not a hash-map field"
+        let K := hm.getArg! 0
+        let V := hm.getArg! 1
+        let nm := c ++ Name.mkSimple s!"cakeAcc{idx}"
+        addDecl (Declaration.defnDecl (mkDefinitionValEx nm [] ety e .abbrev .safe []))
+        setReducibleAttribute nm
+        accNames := accNames.push nm
+        let bkt := mkApp2 (Lean.mkConst ``Std.DHashMap.Internal.AssocList [levelZero, levelZero]) K
+          (← withLocalDeclD `x K fun x => mkLambdaFVars #[x] V)
+        let BI ← invOf bkt
+        entries := entries.push (K, V, BI, nm)
+      let pty ← mkArrow σ (← mkFreshTypeMVar)
+      let pe ← Term.elabTermEnsuringType p pty
+      Term.synthesizeSyntheticMVarsNoPostponing
+      let pe ← instantiateMVars pe
+      let pety ← instantiateMVars (← inferType pe)
+      let pnm := c ++ `cakePlainAcc
+      addDecl (Declaration.defnDecl (mkDefinitionValEx pnm [] pety pe .abbrev .safe []))
+      setReducibleAttribute pnm
+      let pT ← forallTelescope pety fun _ b => pure b
+      let PI ← invOf pT
+      -- the tables
+      let tabsTy ← mkArrow σ (← mkAppM ``List #[Lean.mkConst ``ConPastel.Translator.TEntry])
+      let tabsV ← withLocalDeclD `st σ fun st => do
+        let es ← entries.toList.mapM fun (K, V, BI, nm) => do
+          let raw ← mkAppM ``Std.DHashMap.inner #[← mkAppM ``Std.HashMap.inner #[mkApp (Lean.mkConst nm) st]]
+          pure (mkAppN (Lean.mkConst ``ConPastel.Translator.TEntry.mk) #[K, V, BI, raw])
+        mkLambdaFVars #[st] (← mkListLit (Lean.mkConst ``ConPastel.Translator.TEntry) es)
+      let tnm := c ++ `cakeTabs
+      addDecl (Declaration.defnDecl (mkDefinitionValEx tnm [] tabsTy tabsV .abbrev .safe []))
+      setReducibleAttribute tnm
+      -- the plain part
+      let plainTy ← mkArrow σ (← mkArrow (Lean.mkConst ``Value) (mkSort levelZero))
+      let plainV ← withLocalDeclD `st σ fun st => withLocalDeclD `v (Lean.mkConst ``Value) fun v => do
+        mkLambdaFVars #[st, v] (mkApp2 PI (mkApp (Lean.mkConst pnm) st) v)
+      let plnm := c ++ `cakePlain
+      addDecl (Declaration.defnDecl (mkDefinitionValEx plnm [] plainTy plainV .abbrev .safe []))
+      setReducibleAttribute plnm
+      pure ({ tabs := tnm, plain := plnm, accs := accNames, plainAcc := pnm } : StateRecInfo)
+    modifyEnv fun env => stateRecExt.addEntry env (c, info)
+
 /-- `cake_ghost T`: the closed type `T` becomes a ghost type (`GHOST T`). -/
 elab "cake_ghost " t:ident : command => do
   let c ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
