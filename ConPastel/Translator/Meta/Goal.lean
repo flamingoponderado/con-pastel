@@ -1767,7 +1767,9 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
     let (c, _, dataFlags) := d.ctors[k]!
     let cty ← instantiateForall (← instantiateTypeLevelParams (← getConstInfo c).toConstantVal lvls) params
     let m := d.cached.size
-    let cnames ← (List.range m).mapM fun _ => freshCName "c"
+    -- the stored items before the data fields: the cached fields, then the token
+    let mt := m + (if d.token then 1 else 0)
+    let cnames ← (List.range mt).mapM fun _ => freshCName "c"
     let names ← (dataFlags.toList.filter id).mapM fun _ => freshCName "f"
     let nameList ← mkListLit (mkConst ``VarN) ((cnames ++ names).map mlString)
     let hnd ← closeWith (← mkAppM ``List.Nodup #[nameList]) (← `(tactic| decide))
@@ -1777,11 +1779,12 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
       withLocalDeclD `heq (← mkEq major ctorApp) fun heq => do
       let dataAs := (as.toList.zip dataFlags.toList).filterMap fun (a, b) => if b then some a else none
       -- the cached fields' stored values come first
-      withLocalDeclsDND ((Array.range m).map fun i => (Name.mkSimple s!"z{i}", mkConst ``Value)) fun zs => do
+      withLocalDeclsDND ((Array.range mt).map fun i => (Name.mkSimple s!"z{i}", mkConst ``Value)) fun zs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i _ => (Name.mkSimple s!"w{i}", mkConst ``Value)) fun ws => do
       let invs ← dataAs.toArray.mapM fun a => do (invOf (← inferType a) : MetaM Expr)
-      withLocalDeclsDND ((Array.range m).map fun i => (Name.mkSimple s!"hz{i}",
-          mkApp2 (mkConst (d.name ++ Name.mkSimple s!"c{i}")) (mkApp (mkConst d.cached[i]!) ctorApp) zs[i]!)) fun hzs => do
+      withLocalDeclsDND ((Array.range mt).map fun i => (Name.mkSimple s!"hz{i}",
+          if i < m then mkApp2 (mkConst (d.name ++ Name.mkSimple s!"c{i}")) (mkApp (mkConst d.cached[i]!) ctorApp) zs[i]!
+          else mkApp (mkConst ``TOKEN) zs[i]!)) fun hzs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i a => (Name.mkSimple s!"hw{i}", mkApp2 invs[i]! a ws[i]!)) fun hws => do
         let wList ← mkListLit (mkConst ``Value) (zs.toList ++ ws.toList)
         let envK ← mkAppM ``clauseEnv #[env, nameList, wList]
@@ -2469,6 +2472,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             let (_, gc) ← newEvalGoal env (mkApp (mkConst (d.name ++ Name.mkSimple s!"c{c}")) rhs)
             solve gc
             cpfs := cpfs.push (← instantiateMVars (mkMVar gc))
+          -- the identity token: a fresh reference
+          if d.token then
+            cpfs := cpfs.push (← mkAppM ``Eval_tok #[env])
           let mut pfs : Array Expr := #[]
           -- recursive fields are recognised as at registration: up to `normType`
           let τn ← normType τ

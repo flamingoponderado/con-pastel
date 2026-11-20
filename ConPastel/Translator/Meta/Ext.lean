@@ -17,6 +17,8 @@ structure DatatypeInfo where
   ctors : Array (Name × String × Array Bool)
   /-- Cached computed fields (`cake_cached`): stored first in every constructor. -/
   cached : Array Name := #[]
+  /-- Identity tokens (`cake_token`): a fresh reference stored after the cached fields. -/
+  token : Bool := false
   deriving Inhabited
 
 initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap DatatypeInfo) ←
@@ -39,6 +41,15 @@ initialize cachedExt : SimplePersistentEnvExtension (Name × Array Name) (NameMa
     addEntryFn := fun m (k, fs) => m.insert k fs
     addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, fs) => m.insert k fs) m) {}
   }
+
+/-- Inductive types whose CakeML constructors carry an identity token (`cake_token T`). -/
+initialize tokenExt : SimplePersistentEnvExtension Name NameSet ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun s k => s.insert k
+    addImportedFn := fun as => as.foldl (fun s a => a.foldl (fun s k => s.insert k) s) {}
+  }
+
+def hasToken (env : Environment) (I : Name) : Bool := (tokenExt.getState env).contains I
 
 def getCached (env : Environment) (I : Name) : Array Name :=
   ((cachedExt.getState env).find? I).getD #[]
