@@ -1,5 +1,6 @@
 import ConPastel.Main.Code
 import ConPastel.Spec
+import ConPastel.Leche.StateRewrites
 
 /-!
 # Translation stage: the datatypes of the kernel's dependencies
@@ -47,9 +48,14 @@ cake_datatype (Std.DHashMap.Internal.AssocList (ConLeche.Expr × List ConLeche.E
 cake_datatype (Std.DHashMap.Raw (ConLeche.Expr × List ConLeche.Expr × Nat) fun (x : ConLeche.Expr × List ConLeche.Expr × Nat) => ConLeche.Expr)
 cake_datatype (ConLeche.Cached.ModeMemos)
 cake_datatype (ConLeche.Cached.CState)
--- the kernel's state is held in a CakeML reference: `CheckCM` computations are
--- translated as code updating it (`EvalM`), run by `declStep` on a fresh one
-cake_state_ref ConLeche.Cached.CState
+-- the kernel's state is a record of hash tables updated in place: `CheckCM`
+-- computations are translated as code updating them (`EvalM`, `recRel`), run by
+-- `declStep` on fresh ones; the eager tower's memos swap with the plain ones
+cake_state_record ConLeche.Cached.CState (·.constTyAt) (·.constValAt) (·.ruleRhsAt) (·.whnfCoreC)
+  (·.whnfCoreCheapC) (·.whnfC) (·.inferC) (·.inferIOC) (·.defeqC) (·.lsimpC) (·.lnzC) (·.eqvC) (·.instC)
+  (·.eagerMemos.whnfCoreC) (·.eagerMemos.whnfCoreCheapC) (·.eagerMemos.whnfC) (·.eagerMemos.inferC)
+  (·.eagerMemos.inferIOC) (·.eagerMemos.defeqC) with (·.maxNatSize)
+cake_state_swap ConLeche.Cached.CState [3, 4, 5, 6, 7, 8] [13, 14, 15, 16, 17, 18]
 cake_datatype (Except ConLeche.CheckError (Option ConLeche.Expr × ConLeche.Cached.CState))
 cake_datatype (Except ConLeche.CheckError (ConLeche.Name × ConLeche.Cached.CState))
 cake_datatype (Option UInt8)
@@ -170,3 +176,17 @@ theorem declStep_eq (mode : CheckMode) (pins : List NatOpPinSet) (maxNatSize : N
 end ConPastel.Leche
 
 cake_replace ConLeche.Cached.declStep ConPastel.Leche.declStepR ConPastel.Leche.declStep_eq
+
+-- con-leche's state operations, as operations on the record's fields
+cake_rewrite ConPastel.Leche.StateRw.memoEI_eq
+cake_rewrite ConPastel.Leche.StateRw.memoBI_eq
+cake_rewrite ConPastel.Leche.StateRw.whnfCoreLookupI_eq
+cake_rewrite ConPastel.Leche.StateRw.storeChainI_eq
+cake_rewrite ConPastel.Leche.StateRw.instListM_eq
+cake_rewrite ConPastel.Leche.StateRw.isEquivLM_eq
+cake_rewrite ConPastel.Leche.StateRw.constTyAtM_eq
+cake_rewrite ConPastel.Leche.StateRw.constValAtM_eq
+cake_rewrite ConPastel.Leche.StateRw.ruleRhsAtM_eq
+cake_rewrite ConPastel.Leche.StateRw.maxNatSizeM_eq
+cake_rewrite ConPastel.Leche.StateRw.flushC_eq
+cake_rewrite ConPastel.Leche.StateRw.withEagerMemos_eq
