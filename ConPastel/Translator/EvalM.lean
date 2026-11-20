@@ -462,46 +462,47 @@ theorem Runs.app_opapp_any {τ : Type} {s s₁ s₂ : State τ} {env env' : SemE
   rw [this]
   exact hb'
 
-/-- A monadic computation as a CakeML value: a thunk which, applied to `()`,
-runs the computation (`EvalM`). -/
-def MRET {σ ε β : Type} (R : StateRel σ) (A : RefInv β) (B : RefInv ε) :
+/-- A monadic computation as a CakeML value: a function of the state's handle
+(the location of the cell holding it: `RF loc` is the state relation at that
+location) which, applied to the handle, runs the computation (`EvalM`). The
+handle is passed at run time, so closures never capture a fixed location and
+the state can be allocated by the code that runs the computation. -/
+def MRET {σ ε β : Type} (RF : Nat → StateRel σ) (A : RefInv β) (B : RefInv ε) :
     RefInv (StateT σ (Except ε) β) := fun m v =>
-  ∀ (τ : Type) (s : State τ) (st : σ), R.rel st s.refs → ∃ env e, doOpApp [v, .conv none []] = some (env, e) ∧
-    ∃ refs' res, Runs s env [e] { s with refs := refs' } res ∧ Frame R s.refs refs' ∧
-      MRes R A B (m st) refs' res
+  ∀ (τ : Type) (s : State τ) (st : σ) (b : Bool) (loc : Nat), (RF loc).rel st s.refs →
+    ∃ env e, doOpApp [v, .loc b loc] = some (env, e) ∧
+    ∃ refs' res, Runs s env [e] { s with refs := refs' } res ∧ Frame (RF loc) s.refs refs' ∧
+      MRes (RF loc) A B (m st) refs' res
 
-/-- `fn u => body` is the thunk of the computation `body` runs. -/
-theorem Eval_MRET_fn {σ ε β : Type} {R : StateRel σ} {A : RefInv β} {B : RefInv ε}
-    {env : SemEnv Value} {n : VarN} {body : Exp} {m : StateT σ (Except ε) β}
-    (h : EvalM R { env with v := nsBind n (.conv none []) env.v } body A B m) :
-    Eval env (.fn n body) (MRET R A B m) := by
+/-- `fn h => body` is the computation `body` runs, the handle bound to `h`. -/
+theorem Eval_MRET_fn {σ ε β : Type} {RF : Nat → StateRel σ} {A : RefInv β} {B : RefInv ε}
+    {env : SemEnv Value} {h : VarN} {body : Exp} {m : StateT σ (Except ε) β}
+    (hb : ∀ b loc, EvalM (RF loc) { env with v := nsBind h (.loc b loc) env.v } body A B m) :
+    Eval env (.fn h body) (MRET RF A B m) := by
   apply Eval_fn
-  intro τ s st hst
-  exact ⟨_, _, rfl, h τ s st hst⟩
+  intro τ s st b loc hst
+  exact ⟨_, _, rfl, hb b loc τ s st hst⟩
 
-/-- Applying a thunk to `()` runs its computation. -/
-theorem EvalM_run {σ ε β : Type} {R : StateRel σ} {A : RefInv β} {B : RefInv ε}
-    {env : SemEnv Value} {ef : Exp} {m : StateT σ (Except ε) β}
-    (h : Eval env ef (MRET R A B m)) :
-    EvalM R env (.app .opapp [ef, .con none []]) A B m := by
+/-- Applying a computation to the handle runs it. -/
+theorem EvalM_run {σ ε β : Type} {RF : Nat → StateRel σ} {A : RefInv β} {B : RefInv ε}
+    {env : SemEnv Value} {ef : Exp} {h : Ident ModN VarN} {b : Bool} {loc : Nat}
+    {m : StateT σ (Except ε) β} (hh : nsLookup env.v h = some (.loc b loc))
+    (hf : Eval env ef (MRET RF A B m)) :
+    EvalM (RF loc) env (.app .opapp [ef, .var h]) A B m := by
   intro τ s st hst
-  obtain ⟨vf, extra, hf, hM⟩ := h τ s
+  obtain ⟨vf, extra, hfr, hM⟩ := hf τ s
   have hst₁ := StateRel.rel_append hst extra
-  obtain ⟨env', body, happ, refs', res, hrun, hfr, hm⟩ := hM τ { s with refs := s.refs ++ extra } st hst₁
-  obtain ⟨u, extra₀, hu, hU⟩ := Eval_unit env τ s
-  have hu0 : extra₀ = [] := by
-    obtain ⟨a₁, a₂, hev⟩ := hu
-    rw [Flapjack.EvaluateHOL.evaluate] at hev
-    simp [doConCheck, buildConv, Flapjack.EvaluateHOL.evaluate] at hev
-    exact hev.1.2
-  subst hu0
-  have hU' : u = .conv none [] := hU
-  subst hU'
-  have hargs : Runs s env [.con none [], ef] { s with refs := s.refs ++ extra } (.val [.conv none [], vf]) := by
-    have := Runs.cons (s₁ := { s with refs := s.refs ++ [] }) hu.runs (by simpa using hf.runs)
-    simpa using this
+  obtain ⟨env', body, happ, refs', res, hrun, hfm, hm⟩ := hM τ { s with refs := s.refs ++ extra } st b loc hst₁
+  have hargs : Runs s env [.var h, ef] { s with refs := s.refs ++ extra } (.val [.loc b loc, vf]) := by
+    have hv : Runs s env [.var h] s (.val [.loc b loc]) := ⟨0, 0, by simp [evaluate, hh]⟩
+    obtain ⟨a₁, a₂, ha⟩ := hv
+    obtain ⟨c₁, c₂, hc⟩ := hfr.runs
+    refine ⟨c₁, c₂, ?_⟩
+    have ha' : evaluate { s with clock := c₁ } env [.var h] = ({ s with clock := c₁ }, .val [.loc b loc]) := by
+      simp [evaluate, hh]
+    exact evaluate_cons_val ha' hc
   refine ⟨refs', res, Runs.app_opapp_any hargs happ (by simpa using hrun) hm.not_timeout,
-    (Frame.append hst extra).trans hfr, hm⟩
+    (Frame.append hst extra).trans hfm, hm⟩
 
 /-! ## Control -/
 
@@ -561,5 +562,86 @@ theorem Runs.handle_raise {τ : Type} {s s₁ s₂ : State τ} {env : SemEnv Val
   have hb' := evaluate_add_clock hb hr a₂
   rw [Nat.add_comm a₂ b₁]
   exact hb'
+
+/-! ## Running a computation on a fresh reference -/
+
+theorem Runs.opref {τ : Type} {s s₁ : State τ} {env : SemEnv Value} {e : Exp} {v : Value}
+    (h : Runs s env [e] s₁ (.val [v])) :
+    Runs s env [.app .opref [e]] { s₁ with refs := s₁.refs ++ [.refv v] }
+      (.val [.loc true s₁.refs.length]) := by
+  obtain ⟨a₁, a₂, ha⟩ := h
+  refine ⟨a₁, a₂, ?_⟩
+  have := evaluate_app_simple (s := { s with clock := a₁ }) (s₁ := { s₁ with clock := a₂ }) (env := env)
+    (op := .opref) (args := [e]) (vs := [v]) (refs := s₁.refs ++ [.refv v]) (ffi := s₁.ffi)
+    (r := .val (.loc true s₁.refs.length)) (by simpa using ha) rfl
+    (by simp [doApp, doAppBasic, doAppNumericCore, storeAlloc])
+  simpa [listResult] using this
+
+/-- Run `m` on a fresh reference holding `init`, as pure code: the result of
+`m init`, its value through `eok` (with `x` bound) and its exception through
+`eerr` (with `y` bound, by `handle`). -/
+theorem Eval_runRef {σ ε α β : Type} {S : RefInv σ} {A : RefInv α} {B : RefInv ε} {P : RefInv β}
+    {env : SemEnv Value} {ei em eok eerr : Exp} {h x y : VarN} {init : σ}
+    {m : StateT σ (Except ε) α} {ok : α → β} {err : ε → β}
+    (hi : Eval env ei (S init))
+    (hm : ∀ b loc, Eval { env with v := nsOptBind (some h) (.loc b loc) env.v } em (MRET (refRel S) A B m))
+    (hok : ∀ b loc a v, A a v →
+      Eval { env with v := nsOptBind (some x) v (nsOptBind (some h) (.loc b loc) env.v) } eok (P (ok a)))
+    (herr : ∀ b loc e v, B e v →
+      Eval { env with v := nsAppend (alistToNs [(y, v)]) (nsOptBind (some h) (.loc b loc) env.v) } eerr
+        (P (err e))) :
+    Eval env (.let_ (some h) (.app .opref [ei])
+      (.handle (.let_ (some x) (.app .opapp [em, .var (.short h)]) eok) [(.pvar y, eerr)]))
+      (P (match m init with | .ok (a, _) => ok a | .error e => err e)) := by
+  intro τ s
+  obtain ⟨vi, extra, hvi, hS⟩ := hi τ s
+  let s₁ : State τ := { s with refs := s.refs ++ extra }
+  let loc := s₁.refs.length
+  have href := Runs.opref (s := s) (s₁ := s₁) hvi.runs
+  let env₁ : SemEnv Value := { env with v := nsOptBind (some h) (.loc true loc) env.v }
+  let s₂ : State τ := { s₁ with refs := s₁.refs ++ [.refv vi] }
+  have hst : (refRel S loc).rel init s₂.refs := ⟨vi, by simp [s₂, loc], hS⟩
+  have hrun := EvalM_run (RF := refRel S) (env := env₁) (h := .short h) (b := true) (loc := loc)
+    (by simp [env₁, nsOptBind, nsLookup_nsBind_short]) (hm true loc)
+  obtain ⟨refs', res, hr, hfr, hres⟩ := hrun τ s₂ init hst
+  -- the cells below the new reference are unchanged: the run only appends to `s.refs`
+  have hpre : ∀ l < s₁.refs.length, refs'[l]? = s₂.refs[l]? := fun l hl =>
+    hfr.2.1 l (by simp [s₂]; omega) (fun ho => by simp [refRel] at ho; omega)
+  have hlen : s₂.refs.length ≤ refs'.length := hfr.1
+  have hext : refs' = s.refs ++ refs'.drop s.refs.length := by
+    apply List.ext_getElem?
+    intro l
+    by_cases hl : l < s.refs.length
+    · rw [List.getElem?_append_left (by simpa using hl), hpre l (by simp [s₁]; omega)]
+      simp [s₂, s₁, List.getElem?_append_left hl]
+    · rw [List.getElem?_append_right (by omega), List.getElem?_drop]
+      congr 1; omega
+  revert hres
+  cases hm' : m init with
+  | ok p =>
+    obtain ⟨a, st'⟩ := p
+    intro hres
+    obtain ⟨_, v, hv, hA⟩ := hres
+    subst hv
+    obtain ⟨w, extra₂, hw, hP⟩ := hok true loc a v hA τ { s with refs := refs' }
+    refine ⟨w, refs'.drop s.refs.length ++ extra₂, ?_, hP⟩
+    apply Runs.evalRel
+    have hlet := Runs.let_ (n := some x) (env := env₁) hr (by simpa using hw.runs) (by simp)
+    have hh := Runs.handle_val (cls := [(.pvar y, eerr)]) hlet
+    have := Runs.let_ (n := some h) (env := env) href (by simpa [s₂, env₁] using hh) (by simp)
+    rw [hext] at this
+    simpa [List.append_assoc] using this
+  | error e =>
+    intro hres
+    obtain ⟨v, hv, hB⟩ := hres
+    subst hv
+    obtain ⟨w, extra₂, hw, hP⟩ := herr true loc e v hB τ { s with refs := refs' }
+    refine ⟨w, refs'.drop s.refs.length ++ extra₂, ?_, hP⟩
+    apply Runs.evalRel
+    have hlet := Runs.let_err (n := some x) (e₂ := eok) (env := env₁) hr
+    have hh := Runs.handle_raise (x := y) (rhs := eerr) hlet (by simpa [env₁] using hw.runs) (by simp)
+    have := Runs.let_ (n := some h) (env := env) href (by simpa [s₂, env₁] using hh) (by simp)
+    rw [hext] at this
+    simpa [List.append_assoc] using this
 
 end ConPastel.Translator
