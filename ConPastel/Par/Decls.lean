@@ -92,7 +92,8 @@ theorem groups_end {σ : Type} (c : Namespace ModN ConN (Nat × Stamp)) (loc : F
     have h₁ := DeclsRun.dletrec (loc := loc) (env := flatEnv c L) s hnd hcon
     obtain ⟨r₂, h₂, hr₂, hf₂⟩ := groups_end c loc gs _ d ds s s' r hok hr h
     rw [← extend_flat] at h₂
-    refine ⟨_, ?_, hr₂.combine _, fun ev he => by rw [hf₂ ev he]; rfl⟩
+    let e₁ : SemEnv Value := { v := buildRecEnv g (flatEnv c L) nsEmpty, c := nsEmpty }
+    refine ⟨combineDecResult e₁ r₂, ?_, hr₂.combine e₁, fun ev he => by rw [hf₂ ev he]; rfl⟩
     cases gs with
     | nil => exact DeclsEnd.cons h₁ h₂ hr₂
     | cons g' gs' => exact DeclsEnd.cons h₁ h₂ hr₂
