@@ -78,6 +78,16 @@ syntax (name := cakePrimitive) "cake_primitive " term:max term:max (" assuming "
     let kind := if isFn then UnitKind.function "p" (uname ++ `body) false else .thunk "p" (uname ++ `body)
     addUnit { key, name := uname, cname, kind, cert := uname ++ `cert, datatypes := #[], deps := #[], assumes }
 
+/-- `cake_eqsound_reg thm` with `thm : EqSound inv`: `ptrSel` at `inv`'s type
+translates to CakeML's `=`. -/
+elab "cake_eqsound_reg " thm:ident : command => do
+  let tc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo thm
+  let ty ← liftTermElabM do whnfR (← inferType (mkConst tc))
+  let some inv := (if ty.isAppOfArity ``ConPastel.Translator.EqSound 2 then some ty.appArg! else none)
+    | throwError "{tc} must state EqSound inv"
+  let .const invN _ := inv.getAppFn | throwError "{inv} is not a constant"
+  modifyEnv fun env => eqSoundExt.addEntry env (invN, tc)
+
 /-- `cake_replace K K' thm` with `thm : ∀ xs, K xs = K' xs`. -/
 elab "cake_replace " k:ident r:ident thm:ident : command => do
   let kc ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo k

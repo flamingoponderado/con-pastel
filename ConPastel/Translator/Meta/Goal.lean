@@ -1767,7 +1767,9 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
     let (c, _, dataFlags) := d.ctors[k]!
     let cty ← instantiateForall (← instantiateTypeLevelParams (← getConstInfo c).toConstantVal lvls) params
     let m := d.cached.size
-    let cnames ← (List.range m).mapM fun _ => freshCName "c"
+    -- the stored items before the data fields: the cached fields, then the token
+    let mt := m + (if d.token then 1 else 0)
+    let cnames ← (List.range mt).mapM fun _ => freshCName "c"
     let names ← (dataFlags.toList.filter id).mapM fun _ => freshCName "f"
     let nameList ← mkListLit (mkConst ``VarN) ((cnames ++ names).map mlString)
     let hnd ← closeWith (← mkAppM ``List.Nodup #[nameList]) (← `(tactic| decide))
@@ -1777,11 +1779,12 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
       withLocalDeclD `heq (← mkEq major ctorApp) fun heq => do
       let dataAs := (as.toList.zip dataFlags.toList).filterMap fun (a, b) => if b then some a else none
       -- the cached fields' stored values come first
-      withLocalDeclsDND ((Array.range m).map fun i => (Name.mkSimple s!"z{i}", mkConst ``Value)) fun zs => do
+      withLocalDeclsDND ((Array.range mt).map fun i => (Name.mkSimple s!"z{i}", mkConst ``Value)) fun zs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i _ => (Name.mkSimple s!"w{i}", mkConst ``Value)) fun ws => do
       let invs ← dataAs.toArray.mapM fun a => do (invOf (← inferType a) : MetaM Expr)
-      withLocalDeclsDND ((Array.range m).map fun i => (Name.mkSimple s!"hz{i}",
-          mkApp2 (mkConst (d.name ++ Name.mkSimple s!"c{i}")) (mkApp (mkConst d.cached[i]!) ctorApp) zs[i]!)) fun hzs => do
+      withLocalDeclsDND ((Array.range mt).map fun i => (Name.mkSimple s!"hz{i}",
+          if i < m then mkApp2 (mkConst (d.name ++ Name.mkSimple s!"c{i}")) (mkApp (mkConst d.cached[i]!) ctorApp) zs[i]!
+          else mkApp (mkConst ``TOKEN) zs[i]!)) fun hzs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i a => (Name.mkSimple s!"hw{i}", mkApp2 invs[i]! a ws[i]!)) fun hws => do
         let wList ← mkListLit (mkConst ``Value) (zs.toList ++ ws.toList)
         let envK ← mkAppM ``clauseEnv #[env, nameList, wList]
@@ -2193,6 +2196,29 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
         return ← solveRunRec g env inv args info
       if (← stateRefMonad? (← inferType args[4]!)).isSome then
         return ← solveRunRef g env inv args
+  -- the pointer test `ptrSel a b t e h`: CakeML's `=` on `a` and `b` (sound at a
+  -- type registered with `cake_eqsound_reg`), then `t` or `e`
+  if fn.isConstOf ``ptrSel && args.size == 7 then
+    let a := args[2]!; let b := args[3]!; let tf := args[4]!; let ev := args[5]!
+    let invA ← invOf args[0]!
+    let envS := eqSoundExt.getState (← getEnv)
+    let some thm := (match invA.getAppFn with | .const n _ => envS.find? n | _ => none)
+      | throwError "ptrSel: no EqSound theorem for {invA} (cake_eqsound_reg)"
+    let (_, ga) ← newEvalGoal env (mkApp invA a)
+    solve ga
+    let (_, gb) ← newEvalGoal env (mkApp invA b)
+    solve gb
+    let ht ← withLocalDeclD `p (← mkEq a b) fun p => do
+      let (_, gt) ← newEvalGoal env (mkApp inv (mkApp tf p).headBeta)
+      solve gt
+      mkLambdaFVars #[p] (← instantiateMVars (mkMVar gt))
+    let (_, ge) ← newEvalGoal env (mkApp inv ev)
+    solve ge
+    let pf ← mkAppOptM ``Eval_ptrSel #[none, none, none, none, some (mkConst thm), none, none, none, none, none,
+      some a, some b, some tf, some ev, some args[6]!, some (← instantiateMVars (mkMVar ga)), some (← instantiateMVars (mkMVar gb)),
+      some ht, some (← instantiateMVars (mkMVar ge))]
+    assignProof g pf
+    return
   -- registered replacements `K xs = K' xs`
   if let .const c us := fn then
     if let some (rc, thm) := (replaceExt.getState (← getEnv)).find? c then
@@ -2469,6 +2495,9 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             let (_, gc) ← newEvalGoal env (mkApp (mkConst (d.name ++ Name.mkSimple s!"c{c}")) rhs)
             solve gc
             cpfs := cpfs.push (← instantiateMVars (mkMVar gc))
+          -- the identity token: a fresh reference
+          if d.token then
+            cpfs := cpfs.push (← mkAppM ``Eval_tok #[env])
           let mut pfs : Array Expr := #[]
           -- recursive fields are recognised as at registration: up to `normType`
           let τn ← normType τ

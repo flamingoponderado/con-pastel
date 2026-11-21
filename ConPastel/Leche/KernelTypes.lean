@@ -24,6 +24,9 @@ namespace ConPastel.Leche
 cake_cached ConLeche.Name ConLeche.Name.hashData
 cake_cached ConLeche.Level ConLeche.Level.hashData
 cake_cached ConLeche.Expr ConLeche.Expr.data ConLeche.Expr.depthP
+-- every `Expr` node carries an identity token: CakeML's `=` on expressions is a
+-- pointer test (`ConPastel.Leche.Sharing`)
+cake_token ConLeche.Expr
 
 cake_datatype (ConLeche.Name)
 cake_datatype (ConLeche.Level)

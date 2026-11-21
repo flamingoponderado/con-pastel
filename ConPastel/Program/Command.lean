@@ -290,7 +290,7 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   let mut tdParts : Array (Expr × Expr × Expr × Array String) := #[]
   for d in dts do
     let ctors ← d.ctors.toList.mapM fun (_, cn, flags) => do
-      mkAppM ``Prod.mk #[mlString cn, ← mkListLit astT (List.replicate (d.cached.size + (flags.toList.filter id).length) tyVar)]
+      mkAppM ``Prod.mk #[mlString cn, ← mkListLit astT (List.replicate (d.cached.size + (if d.token then 1 else 0) + (flags.toList.filter id).length) tyVar)]
     let tv ← mkListLit (mkConst ``TvarN) []
     let tn := mlString d.name.toString
     let cs ← mkListLit ctorTy ctors
@@ -330,7 +330,7 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
     let i := dts.size - 1 - i'
     let d := dts[i]!
     for (_, cn, flags) in d.ctors.reverse do
-      let n := d.cached.size + (flags.toList.filter id).length
+      let n := d.cached.size + (if d.token then 1 else 0) + (flags.toList.filter id).length
       let ce := mlString cn
       clEntries := clEntries.push (← mkAppM ``Prod.mk #[ce, ← mkAppM ``Prod.mk #[mkRawNatLit n,
         mkApp2 (mkConst ``Stamp.typeStamp) ce (mkRawNatLit (2 + i))]])
