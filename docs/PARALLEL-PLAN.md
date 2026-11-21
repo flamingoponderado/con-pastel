@@ -227,7 +227,50 @@ Pancake with a Lean proof is an option for it.
    (`verdictCode`, proved).
 5. Done: `par_correct : ParImplements parProg` under `HarnessRun`.
    The assumptions are listed in `docs/SOUNDNESS.md` (items 16 to 21).
-6. In progress: measurements (heap per worker, THP, speed-up).
+6. Done (first round): measurements below. `MADV_NOHUGEPAGE` at `spawn`
+   was measured to be worse and is not used.
+
+**Measurements** (2026-11-21, shared 32-core machine, wall times from
+single runs unless stated, so ±0.1 s noise; memory is the peak over time
+of the summed PSS of the process tree). Reference: the default
+`con-pastel` binary, from a nearby commit of `main`.
+
+| input | ref | `--jobs=1` | 2 | 4 | 8 |
+|---|---|---|---|---|---|
+| `init-prelude` (3.7 MB) | 2.25 s, 4.1 GiB | 3.97 s, 7.0 GiB | | 2.66 s, 9.7 GiB | |
+| `c04a` (9.1 MB, 13 jobs) | 7.63 s, 4.3 GiB | 10.35 s, 8.4 GiB | 8.73 s | 8.56 s, 12.3 GiB | 9.39 s |
+| `grind-ring-5` (10.2 MB, 2,187 jobs) | 16.50 s, 4.3 GiB | 19.37 s, 8.5 GiB | 15.80 s | 14.14 s, 20.3 GiB | 13.62 s, 28.0 GiB |
+
+(`init-prelude` and `grind-ring-5` are from con-leche's arena tarball,
+`c04a` is `complete_c04a_restart_70` from its e2e fixtures; all are
+accepted by every configuration.)
+
+What limits the speed-up on these inputs:
+
+* **Phase 1 is sequential**: 2.5 s (`grind-ring-5`) to 3.2 s (`c04a`).
+* **Copy-on-write of the heap after `fork`.** Phase 1 already touches the
+  whole CakeML heap (the copying collector), and each worker's collector
+  then writes all of it: about 263k minor faults and 0.5 s of system time
+  per GiB of `CML_HEAP_SIZE`, per worker (in parallel across workers).
+  `--jobs=1` on `init-prelude`: 2.0 s system time, against 0.17 s for the
+  in-order jobs program; its user time is not higher. Keeping the heap's
+  huge-page advice is better than `MADV_NOHUGEPAGE` (742k against 1.05M
+  faults, 3.97 s against 4.50 s). A 1 GiB heap cuts the faults by 4 but
+  makes the collector run more often (reference on `grind-ring-5`: 27.6 s
+  instead of 16.5 s).
+* **The longest job.** `c04a` has 13 jobs, one of them about 5 s.
+  `grind-ring-5` with 4 workers: three finish by 6.6 to 7.9 s, the fourth
+  at 14.5 s on a heavy job near the end of the stream (jobs are claimed in
+  stream order).
+* **Memory** grows by about one heap per worker: with the default 4 GiB
+  heap, 8 workers peak at 28 GiB.
+
+Possible next steps, none of them affecting the proofs (the claim answers
+are oracle data, any order is allowed by the model): hand out indices
+from the end of the stream first or interleaved, so that late heavy
+declarations start early; size `CML_HEAP_SIZE` for the parallel binary
+separately; measure on a large real-world export (Mathlib), where the jobs
+outnumber the workers by far.
 
 **Files.** `ConPastel/Par/`: `Jobs` (the decomposition), `Entry` (phase 1,
 job codes, verdict), `Spec` (FFI model), `Code` (main declarations),

@@ -102,8 +102,11 @@ void ffispawn(unsigned char *c, long clen, unsigned char *a, long alen) {
   if (children == NULL) harness_error("out of memory");
   /* no buffered output may be duplicated into the workers */
   if (fflush(stdout) != 0 || fflush(stderr) != 0) harness_error("flush before fork failed");
-  /* copy-on-write after fork: do not copy 2 MiB per written huge page */
-  madvise(cml_heap, (size_t)((char *)cml_stackend - (char *)cml_heap), MADV_NOHUGEPAGE);
+  /* The heap keeps its huge-page advice. After fork, a worker's copying GC
+     writes into the whole heap, so it copies it on write; measured on
+     init-prelude, MADV_NOHUGEPAGE here made that slower (1.05M faults,
+     4.5 s) than keeping huge pages (742k faults, 4.0 s). The cost scales with
+     CML_HEAP_SIZE. */
   pid_t parent = getpid();
   for (long i = 0; i < jobs; i++) {
     pid_t pid = fork();
