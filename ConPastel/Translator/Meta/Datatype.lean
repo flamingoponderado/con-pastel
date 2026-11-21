@@ -98,6 +98,17 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
   let some (.inductInfo ii) := env.find? I | throwError "{τ} is not an inductive type"
   let np := ii.numParams
   let ctors ← liftTermElabM (ctorFields τ)
+  -- lazy fields (`cake_lazy`): fields of a structure, stored as closures
+  let lazyNames := getLazy env I
+  let lazy : Array (Nat × Nat) ← if lazyNames.isEmpty then pure #[] else do
+    unless isStructure env I do throwError "cake_lazy: {I} is not a structure"
+    let fns := getStructureFields env I
+    if np != 0 then throwError "lazy fields of the parameterized type {τ} are not supported"
+    lazyNames.mapM fun f => do
+      let some j := fns.idxOf? (Name.mkSimple f.toString) | throwError "cake_lazy: {f} is not a field of {I}"
+      unless (ctors[0]!.2)[j]!.2 do throwError "cake_lazy: {f} is not a data field"
+      if (ctors[0]!.2)[j]!.1 == τ then throwError "cake_lazy: {f} is recursive"
+      pure (0, j)
   -- the type and the field invariants
   liftTermElabM do
     addAbbrev (N ++ `ty) (← inferType τ) τ
@@ -106,7 +117,9 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
       for j in [0:fs.size] do
         let (fty, data) := fs[j]!
         if data && fty != τ then
-          addAbbrev (N ++ Name.mkSimple s!"f{i}_{j}") (← mkAppM ``ConPastel.Translator.RefInv #[fty]) (← invOf fty)
+          let fi ← invOf fty
+          let fi ← if lazy.contains (i, j) then mkAppM ``ConPastel.Translator.LAZY #[fi] else pure fi
+          addAbbrev (N ++ Name.mkSimple s!"f{i}_{j}") (← mkAppM ``ConPastel.Translator.RefInv #[fty]) fi
   -- cached computed fields (`cake_cached`): stored first in every constructor
   let cfs := getCached env I
   if !cfs.isEmpty && np != 0 then throwError "cached fields of the parameterized type {τ} are not supported"
@@ -251,7 +264,7 @@ theorem _root_.{N}.cake_cf{c} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons
     Eval env (.mat e (conClauses [{", ".intercalate casesC.toList}])) ({N}.c{c} ({escName cfs[c]!} x)) :=
   {N}.cake_mat (Q := fun x => {N}.c{c} ({escName cfs[c]!} x)) hc he {" ".intercalate args.toList}"
   modifyEnv fun env => datatypeExt.addEntry env
-    { ty := τ, name := N, stamp, ctors := ctors.map fun (c, fs) => (c, cname c, fs.map (·.2)), cached := cfs, token := tok }
+    { ty := τ, name := N, stamp, ctors := ctors.map fun (c, fs) => (c, cname c, fs.map (·.2)), cached := cfs, token := tok, lazy }
 
 /-- Translate `key` (and what it needs), registering the datatypes it needs. -/
 partial def cakeUnitCmd (key : Expr) : CommandElabM Unit := do
@@ -359,6 +372,16 @@ elab "cake_token " t:ident : command => do
   if (allDatatypes (← getEnv)).any (fun d => d.ty.getAppFn.constName? == some I) then
     throwError "cake_token: {I} is already translated"
   modifyEnv fun env => tokenExt.addEntry env I
+
+/-- `cake_lazy S f₁ … fₘ`: store the fields `fᵢ` of the structure `S` lazily, as
+closures computing them when read (registered before `S` is translated). A read
+recomputes the field: for large constant data read rarely. -/
+elab "cake_lazy " t:ident fs:(colGt ident)+ : command => do
+  let I ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+  if (allDatatypes (← getEnv)).any (fun d => d.ty.getAppFn.constName? == some I) then
+    throwError "cake_lazy: {I} is already translated"
+  let fns := fs.map fun f => f.getId
+  modifyEnv fun env => lazyExt.addEntry env (I, fns)
 
 /-- `cake_cached T f₁ … fₘ`: store the computed fields `fᵢ : T → _` in every
 CakeML constructor of `T` (registered before `T` is translated). -/
