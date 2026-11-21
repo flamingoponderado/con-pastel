@@ -120,6 +120,11 @@ def shr8 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 8⟩
 def shr16 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 16⟩
 def shr32 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 32⟩
 def shr47 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 47⟩
+def shl33 (a : UInt64) : UInt64 := ⟨a.toBitVec <<< 33⟩
+def shl48 (a : UInt64) : UInt64 := ⟨a.toBitVec <<< 48⟩
+def shl63 (a : UInt64) : UInt64 := ⟨a.toBitVec <<< 63⟩
+def shr49 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 49⟩
+def shr63 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 63⟩
 
 def sl32 (k : Nat) (a : UInt64) : UInt64 := if k / 32 % 2 = 1 then shl32 a else a
 def sl16 (k : Nat) (a : UInt64) : UInt64 := if k / 16 % 2 = 1 then shl16 a else a
@@ -380,6 +385,21 @@ cake_primitive ConPastel.Impl.shr16 (.app (.shift .w64 .lsr 16) [V "p"]) by
 cake_primitive ConPastel.Impl.shr32 (.app (.shift .w64 .lsr 32) [V "p"]) by
   intro envC funs hnodup hfind _ _ _
   exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 32 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shl33 (.app (.shift .w64 .lsl 33) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shl 33 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shl48 (.app (.shift .w64 .lsl 48) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shl 48 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shl63 (.app (.shift .w64 .lsl 63) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shl 63 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shr49 (.app (.shift .w64 .lsr 49) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 49 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shr63 (.app (.shift .w64 .lsr 63) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 63 (Eval_u64_w ha)) rfl
 cake_primitive ConPastel.Impl.shr47 (.app (.shift .w64 .lsr 47) [V "p"]) by
   intro envC funs hnodup hfind _ _ _
   exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 47 (Eval_u64_w ha)) rfl
