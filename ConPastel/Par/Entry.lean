@@ -43,6 +43,9 @@ def phase1 (bs : List Nat) : Phase1 :=
   | .ok ds => ⟨true, ds, buildIndex ds⟩
   | .error _ => ⟨false, #[], {}⟩
 
+/-- Whether the first phase succeeded. -/
+def phase1Ok (p : Phase1) : Bool := p.ok
+
 /-- **Job `k`'s code**: `1` passes, `2` fails, `3` no such job. -/
 def runJob (p : Phase1) (k : Nat) : Nat :=
   match p.ds[k]? with
