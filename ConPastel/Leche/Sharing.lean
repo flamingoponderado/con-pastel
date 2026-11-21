@@ -1,5 +1,6 @@
 import ConPastel.Leche.KernelTypes
 import ConPastel.Translator.EqType
+import ConPastel.Translator.EqSound
 
 /-!
 # Sharing: con-leche's pointer-first equality in CakeML
@@ -15,9 +16,9 @@ CakeML has no pointer test, but its `=` is structural equality whose compiled
 code (`Equal_code`, `data_to_wordScript.sml`) returns at once on identical
 pointers, at every level of the descent. So here:
 
-* `exprEqB` and its siblings are primitives compiled to CakeML's `=`;
-* a pointer test is the cached hash comparison followed by `=` (equal terms
-  have equal hashes, so `=` only ever runs on likely-equal pairs);
+* `nameEqB` and its siblings are primitives compiled to CakeML's `=`;
+* an `Expr` node carries an identity token (`cake_token`), so `=` on
+  expressions is a pointer test (`ptrSel`), after the cached hash comparison;
 * an address is the cached hash (`withPtrAddr` allows any value);
 * the `@[csimp]` swaps to the pointer-first equalities are replacements.
 
@@ -31,10 +32,8 @@ set_option maxRecDepth 200000
 set_option linter.all false
 
 namespace ConPastel.Impl
-open ConLeche
+open ConLeche ConPastel.Translator
 
-/-- CakeML's `=` on expressions (a primitive): structural equality. -/
-def exprEqB (a b : Expr) : Bool := @decide (a = b) (Expr.decEq a b)
 /-- CakeML's `=` on names. -/
 def nameEqB (a b : Name) : Bool := @decide (a = b) (Name.decEq a b)
 /-- CakeML's `=` on levels. -/
@@ -42,7 +41,6 @@ def levelEqB (a b : Level) : Bool := @decide (a = b) (Level.decEq a b)
 /-- CakeML's `=` on literals. -/
 def literalEqB (a b : Literal) : Bool := @decide (a = b) (Literal.decEq a b)
 
-theorem exprEqB_sound {a b : Expr} (h : exprEqB a b = true) : a = b := of_decide_eq_true h
 theorem nameEqB_sound {a b : Name} (h : nameEqB a b = true) : a = b := of_decide_eq_true h
 theorem levelEqB_sound {a b : Level} (h : levelEqB a b = true) : a = b := of_decide_eq_true h
 theorem literalEqB_sound {a b : Literal} (h : literalEqB a b = true) : a = b := of_decide_eq_true h
@@ -52,53 +50,38 @@ theorem literalEqB_sound {a b : Literal} (h : literalEqB a b = true) : a = b := 
 theorem data_ne {a b : Expr} (h : (a.data == b.data) = false) : a ≠ b := by
   intro e; subst e; simp at h
 
-/-! ### Equality on deep terms
+/-! ### Equality with identity tokens
 
-CakeML's `=` returns at once on identical pointers, but on two equal terms
-built separately it walks the whole *tree*: exponential in the depth of a
-DAG.  So `=` runs only on shallow terms (`depthP ≤ eqSmall`, whose trees are
-small); a deep pair goes through con-leche's own memoised descent
-(`Expr.beqDec`), whose child step (`enterBeqD` below) applies the same gate.
-The descent's memo entries are verified by `=` against the stored pair: both
-sides of such a test are nodes of the same term. -/
+Every `Expr` node carries an identity token (`cake_token`, a reference
+allocated when the node is built), so CakeML's `=` on two expressions is a
+*pointer test*: it returns at once (the data words or the tokens differ, or
+the two are the same object), and `true` means equal (`eqSound_expr`). It is
+used only where any sound answer will do (`ptrSel`): con-leche's pointer
+tests, the descent's memo probe, and the parse's interning. A complete
+equality is con-leche's own memoised descent (`Expr.beqDec`). -/
 
-/-- The depth up to which CakeML's `=` decides expression equality. -/
-def eqSmall : Nat := 8
-
-/-- Expression equality as the pointer tests run it: the cached words, then
-`=` on a shallow pair and the memoised descent on a deep one. -/
+/-- Expression equality as the pointer tests run it: the cached words, the
+pointer test, then the memoised descent. -/
 def exprEqD (a b : Expr) : Bool :=
-  a.data == b.data && (if a.depthP ≤ eqSmall then exprEqB a b else @decide (a = b) (Expr.beqDec a b))
+  a.data == b.data && ptrSel a b (fun _ => true) (@decide (a = b) (Expr.beqDec a b))
+    (fun p => by subst p; simp)
 
 theorem exprEqD_iff (a b : Expr) : exprEqD a b = true ↔ a = b := by
-  unfold exprEqD
+  unfold exprEqD ptrSel
   constructor
   · intro h
     simp only [Bool.and_eq_true] at h
-    obtain ⟨_, h⟩ := h
-    by_cases hs : a.depthP ≤ eqSmall
-    · rw [if_pos hs] at h; exact exprEqB_sound h
-    · rw [if_neg hs] at h; exact @of_decide_eq_true _ (Expr.beqDec a b) h
+    exact @of_decide_eq_true _ (Expr.beqDec a b) h.2
   · intro e; subst e
-    simp only [beq_self_eq_true, Bool.true_and]
-    by_cases hs : a.depthP ≤ eqSmall
-    · rw [if_pos hs]; simp [exprEqB]
-    · rw [if_neg hs]; simp
+    simp
 
-/-- The pointer test at `Expr`: the depth-gated equality (a complete
-decision, so the continuation is never needed). -/
+/-- The pointer test at `Expr`, then con-leche's continuation. -/
 theorem ptrDecEq_expr (a b : Expr) (k : Unit → Decidable (a = b)) :
-    ConLeche.ptrDecEq a b k =
-      if h : exprEqD a b = true then isTrue ((exprEqD_iff a b).mp h)
-      else isFalse (fun e => h ((exprEqD_iff a b).mpr e)) :=
+    ConLeche.ptrDecEq a b k = ptrSel a b (fun p => isTrue p) (k ()) (fun _ => Subsingleton.elim _ _) :=
   Subsingleton.elim _ _
 
 theorem withPtrEq_expr (a b : Expr) (k : Unit → Bool) (h : a = b → k () = true) :
-    withPtrEq a b k h = (exprEqD a b || k ()) := by
-  show k () = _
-  by_cases he : exprEqD a b = true
-  · rw [h ((exprEqD_iff a b).mp he)]; simp
-  · simp [he]
+    withPtrEq a b k h = ptrSel a b (fun _ => true) (k ()) (fun p => (h p).symm) := rfl
 
 /-- The memo key of a pair of data words, with native word operations only
 (con-leche's `beqKey` packs the addresses with `USize` arithmetic, which is
@@ -107,45 +90,42 @@ sound: a probe verifies the stored pair. -/
 def beqKeyD (x y : UInt64) : Nat :=
   ((x ^^^ shr16 y ^^^ shl16 y ^^^ shl1 y) &&& 0x0FFFFFFFFFFFFFFF).toNat
 
-/-- `probeHit` with the stored pair verified by its data words, then CakeML's
-`=`. -/
-def probeHitD (m : Expr.BeqMap) (key : Nat) (a b : Expr) : { h : Bool // h = true → a = b } :=
-  match m[key]? with
-  | none => ⟨false, fun h => Bool.noConfusion h⟩
-  | some p =>
-    if p.fst.data == a.data && p.snd.data == b.data then
-      if h1 : exprEqB p.fst a = true then
-        if h2 : exprEqB p.snd b = true then
-          ⟨true, fun _ => (exprEqB_sound h1).symm.trans (p.eq.trans (exprEqB_sound h2))⟩
-        else ⟨false, fun h => Bool.noConfusion h⟩
-      else ⟨false, fun h => Bool.noConfusion h⟩
-    else ⟨false, fun h => Bool.noConfusion h⟩
+/-- The descent on a pair the memo does not answer, recording a proved-equal
+pair under `key`. -/
+def enterBeqMiss (st : Expr.BeqOk) (a b : Expr) (key : Nat) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
+    Expr.BeqOutX a b :=
+  Squash.lift (rec st) fun r =>
+    if h : r.1.ok then
+      .yes ⟨r.1.record key ⟨a, b, USize.ofNatLT 0 USize.size_pos, USize.ofNatLT 0 USize.size_pos,
+        r.2.mp h⟩, Expr.BeqSt.record_ok ..⟩ (r.2.mp h)
+    else Quot.mk _ r
 
-/-- The child step of con-leche's memoised descent (`Expr.enterBeq`), with
-identity read as above: the cached words, `=` on a shallow pair, and on a deep
-one the memo probe and the descent.  (con-leche's own step reads an address
-match as identity; here an address is the hash, so that would be `=` on every
-equal pair.) The memo is keyed on the data words (`beqKeyD`); the entries'
-address fields are unused. -/
+/-- The memo probe: a stored pair is a hit when its two nodes are, by the
+pointer test, the pair's own. -/
+def enterBeqProbe (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
+    Expr.BeqOutX a b :=
+  let key := beqKeyD a.data b.data
+  match st.1 with
+  | .table m =>
+    match m[key]? with
+    | some p =>
+      ptrSel p.fst a
+        (fun h1 => ptrSel p.snd b (fun h2 => .yes st (h1.symm.trans (p.eq.trans h2)))
+          (enterBeqMiss st a b key rec) (fun _ => Subsingleton.elim _ _))
+        (enterBeqMiss st a b key rec) (fun _ => Subsingleton.elim _ _)
+    | none => enterBeqMiss st a b key rec
+  | _ => enterBeqMiss st a b key rec
+
+/-- The child step of con-leche's memoised descent (`Expr.enterBeq`): the
+cached words, the pointer test, then (on a node with children) the memo probe
+and the descent. The memo is keyed on the data words (`beqKeyD`); the
+entries' address fields are unused. -/
 def enterBeqD (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
     Expr.BeqOutX a b :=
   if h : a.data != b.data then .no (fun e => by subst e; simp at h)
-  else if a.depthP ≤ eqSmall then
-    .mk (if h : exprEqB a b = true then isTrue (exprEqB_sound h)
-         else isFalse (fun e => h (by subst e; exact decide_eq_true rfl))) st
-  else if !Expr.beqRecursive a then rec st
-  else
-    let key := beqKeyD a.data b.data
-    let hit : { h : Bool // h = true → a = b } :=
-      match st.1 with
-      | .table m => probeHitD m key a b
-      | _ => ⟨false, fun h => Bool.noConfusion h⟩
-    if hh : hit.1 then .yes st (hit.2 hh)
-    else Squash.lift (rec st) fun r =>
-      if h : r.1.ok then
-        .yes ⟨r.1.record key ⟨a, b, USize.ofNatLT 0 USize.size_pos, USize.ofNatLT 0 USize.size_pos,
-          r.2.mp h⟩, Expr.BeqSt.record_ok ..⟩ (r.2.mp h)
-      else Quot.mk _ r
+  else ptrSel a b (fun p => .yes st p)
+    (if !Expr.beqRecursive a then rec st else enterBeqProbe st a b rec)
+    (fun _ => Subsingleton.elim _ _)
 
 theorem enterBeq_eq_D (st : Expr.BeqOk) (a b : Expr) (rec : Expr.BeqOk → Expr.BeqOutX a b) :
     Expr.enterBeq st a b rec = enterBeqD st a b rec := Subsingleton.elim _ _
@@ -213,16 +193,12 @@ example : ConPastel.CakeT.t5.ty = ConLeche.Expr := rfl
 theorem eqType_name : EqType ConPastel.CakeT.t2.cakeInv := by cake_eqtype
 theorem eqType_level : EqType ConPastel.CakeT.t3.cakeInv := by cake_eqtype [eqType_name]
 theorem eqType_literal : EqType ConPastel.CakeT.t4.cakeInv := by cake_eqtype
-theorem eqType_expr : EqType ConPastel.CakeT.t5.cakeInv := by
-  cake_eqtype [eqType_name, eqType_level, eqType_literal]
+theorem eqSound_expr : EqSound ConPastel.CakeT.t5.cakeInv := by
+  cake_eqsound [eqType_name, eqType_level, eqType_literal]
 
 end ConPastel.Impl
 
-open ConPastel.Translator Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL
-open Flapjack.Basis.Pure.MlString in
-cake_primitive ConPastel.Impl.exprEqB (Exp.fn (ofString "b") (.app .equality [V "p", V "b"])) by
-  intro envC funs hnodup hfind _ _ _
-  exact primEq_cert ConPastel.Impl.eqType_expr (fun x y => by simp [ConPastel.Impl.exprEqB]) envC funs _ hnodup hfind
+cake_eqsound_reg ConPastel.Impl.eqSound_expr
 
 open ConPastel.Translator Flapjack Flapjack.AstHOL Flapjack.SemanticPrimitivesHOL Flapjack.NamespaceHOL
 open Flapjack.Basis.Pure.MlString in

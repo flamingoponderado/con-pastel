@@ -16,53 +16,122 @@ expression table, so they are already interned, and comparing the new node
 with a stored candidate costs `O(1)` per child (equal children are the same
 pointer). `parseChunksI` is `parseChunks` with an intern table threaded
 through the serial parse: every expression-table entry is replaced by the
-stored equal node, if there is one. The table only ever returns a node that
-`exprEqB` found equal, so every function here returns the same value as its
-original (`parseChunksI_eq`), with no invariant on the table.
+stored equal node, if there is one. A stored node is taken only when it is
+proved equal (`findXL`'s subtype), so every function here returns the same
+value as its original (`parseChunksI_eq`), with no invariant on the table.
 -/
 
 namespace ConPastel.Impl
-open ConLeche ConLeche.Frontend
+open ConLeche ConLeche.Frontend ConPastel.Translator
 
 /-- The intern table: nodes by hash (the stored flag is unused). -/
 abbrev ITab := ExprMemo Bool
 
-/-- A stored node equal to `e`. -/
-def findXL (e : Expr) : List (Expr × Bool) → Option Expr
-  | [] => none
-  | (x, _) :: t => if x.data == e.data && exprEqB x e then some x else findXL e t
+/-- The fields of two nodes other than their child expressions agree (and so do
+their constructors). -/
+def headEq : Expr → Expr → Bool
+  | .bvar i, .bvar j => i == j
+  | .fvar i _, .fvar j _ => i == j
+  | .sort u, .sort v => decide (u = v)
+  | .const n us, .const m vs => decide (n = m) && decide (us = vs)
+  | .app .., .app .. => true
+  | .lam .., .lam .. => true
+  | .forallE .., .forallE .. => true
+  | .letE .., .letE .. => true
+  | .lit l, .lit l' => decide (l = l')
+  | .proj s i _, .proj s' i' _ => decide (s = s') && i == i'
+  | _, _ => false
 
-def findX (e : Expr) : ITab → Nat → Option Expr
+/-- A node's number of child expressions, and its children (`.bvar 0` past them). -/
+def nkids : Expr → Nat
+  | .fvar .. => 1
+  | .app .. => 2
+  | .lam .. => 2
+  | .forallE .. => 2
+  | .letE .. => 3
+  | .proj .. => 1
+  | _ => 0
+
+def kid0 : Expr → Expr
+  | .fvar _ t => t
+  | .app f _ => f
+  | .lam t _ => t
+  | .forallE t _ => t
+  | .letE t _ _ => t
+  | .proj _ _ e => e
+  | _ => .bvar 0
+
+def kid1 : Expr → Expr
+  | .app _ a => a
+  | .lam _ b => b
+  | .forallE _ b => b
+  | .letE _ v _ => v
+  | _ => .bvar 0
+
+def kid2 : Expr → Expr
+  | .letE _ _ b => b
+  | _ => .bvar 0
+
+theorem eq_kids0 {x e : Expr} (hh : headEq x e = true) (hn : nkids x = 0) : x = e := by
+  cases x <;> cases e <;> simp_all [headEq, nkids]
+
+theorem eq_kids1 {x e : Expr} (hh : headEq x e = true) (hn : nkids x = 1) (h0 : kid0 x = kid0 e) :
+    x = e := by
+  cases x <;> cases e <;> simp_all [headEq, nkids, kid0]
+
+theorem eq_kids2 {x e : Expr} (hh : headEq x e = true) (hn : nkids x = 2) (h0 : kid0 x = kid0 e)
+    (h1 : kid1 x = kid1 e) : x = e := by
+  cases x <;> cases e <;> simp_all [headEq, nkids, kid0, kid1]
+
+theorem eq_kids3 {x e : Expr} (hh : headEq x e = true) (h0n : nkids x ≠ 0) (h1n : nkids x ≠ 1)
+    (h2n : nkids x ≠ 2) (h0 : kid0 x = kid0 e) (h1 : kid1 x = kid1 e) (h2 : kid2 x = kid2 e) :
+    x = e := by
+  cases x <;> cases e <;> simp_all [headEq, nkids, kid0, kid1, kid2]
+
+instance subsingleton_eqSub (e : Expr) : Subsingleton { y : Expr // y = e } :=
+  ⟨fun ⟨_, ha⟩ ⟨_, hb⟩ => Subtype.ext (ha.trans hb.symm)⟩
+
+/-- The stored node `x`, when its fields are `e`'s and its children are `e`'s
+by the pointer test; otherwise `k` (equal to `e`). -/
+def nodeSel (x e k : Expr) (hk : k = e) : { y : Expr // y = e } :=
+  if hh : headEq x e = true then
+    if h0n : nkids x = 0 then ⟨x, eq_kids0 hh h0n⟩
+    else if h1n : nkids x = 1 then
+      ptrSel (kid0 x) (kid0 e) (fun p0 => ⟨x, eq_kids1 hh h1n p0⟩) ⟨k, hk⟩ (fun _ => Subsingleton.elim _ _)
+    else if h2n : nkids x = 2 then
+      ptrSel (kid0 x) (kid0 e)
+        (fun p0 => ptrSel (kid1 x) (kid1 e) (fun p1 => ⟨x, eq_kids2 hh h2n p0 p1⟩) ⟨k, hk⟩
+          (fun _ => Subsingleton.elim _ _))
+        ⟨k, hk⟩ (fun _ => Subsingleton.elim _ _)
+    else
+      ptrSel (kid0 x) (kid0 e)
+        (fun p0 => ptrSel (kid1 x) (kid1 e)
+          (fun p1 => ptrSel (kid2 x) (kid2 e) (fun p2 => ⟨x, eq_kids3 hh h0n h1n h2n p0 p1 p2⟩) ⟨k, hk⟩
+            (fun _ => Subsingleton.elim _ _))
+          ⟨k, hk⟩ (fun _ => Subsingleton.elim _ _))
+        ⟨k, hk⟩ (fun _ => Subsingleton.elim _ _)
+  else ⟨k, hk⟩
+
+/-- A stored node equal to `e` (its fields equal, its children the same objects
+by the pointer test), or `e`. -/
+def findXL (e : Expr) : List (Expr × Bool) → { y : Expr // y = e }
+  | [] => ⟨e, rfl⟩
+  | (x, _) :: t =>
+    let r := findXL e t
+    if x.data == e.data then nodeSel x e r.1 r.2 else r
+
+def findX (e : Expr) : ITab → Nat → { y : Expr // y = e }
   | .leaf l, _ => findXL e l
   | .node a b, k => if k % 2 = 0 then findX e a (k / 2) else findX e b (k / 2)
 
-theorem findXL_eq {e x : Expr} : ∀ {l : List (Expr × Bool)}, findXL e l = some x → x = e
-  | [], h => by simp [findXL] at h
-  | (y, _) :: t, h => by
-    simp only [findXL] at h
-    split at h
-    · rename_i hy; cases h; exact exprEqB_sound (Bool.and_eq_true _ _ ▸ hy).2
-    · exact findXL_eq h
-
-theorem findX_eq {e x : Expr} : ∀ {t : ITab} {k : Nat}, findX e t k = some x → x = e
-  | .leaf _, _, h => findXL_eq h
-  | .node a b, k, h => by
-    simp only [findX] at h
-    split at h
-    · exact findX_eq h
-    · exact findX_eq h
-
-/-- The interned `e`: a stored equal node, or `e` itself, then stored. -/
+/-- The interned `e`: a stored equal node, or `e` itself; stored either way (a
+stored equal node again, so later lookups find it first). -/
 def internE (it : ITab) (e : Expr) : Expr × ITab :=
-  match findX e it (ExprMemo.key e) with
-  | some x => (x, it)
-  | none => (e, ExprMemo.insert e true 16 it (ExprMemo.key e))
+  let x := (findX e it (ExprMemo.key e)).1
+  (x, ExprMemo.insert x true 16 it (ExprMemo.key e))
 
-theorem internE_fst (it : ITab) (e : Expr) : (internE it e).1 = e := by
-  unfold internE
-  split
-  · rename_i x h; exact findX_eq h
-  · rfl
+theorem internE_fst (it : ITab) (e : Expr) : (internE it e).1 = e :=
+  (findX e it (ExprMemo.key e)).2
 
 /-! ## The serial parse, with the table -/
 

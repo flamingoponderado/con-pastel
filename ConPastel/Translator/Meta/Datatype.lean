@@ -111,6 +111,8 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
   let cfs := getCached env I
   if !cfs.isEmpty && np != 0 then throwError "cached fields of the parameterized type {τ} are not supported"
   let m := cfs.size
+  let tok := hasToken env I
+  if tok && np != 0 then throwError "identity tokens of the parameterized type {τ} are not supported"
   liftTermElabM do
     for k in [0:m] do
       let cty ← inferType (mkConst cfs[k]!)
@@ -130,6 +132,7 @@ partial def registerDatatype (τ : Expr) (stack : List Expr := []) : CommandElab
   -- each with the invariant its value satisfies
   let items (i : Nat) : List (String × String) :=
     (List.range m).map (fun k => (s!"z{k}", s!"{N}.c{k} ({escName cfs[k]!} ({pat i}))")) ++
+    (if tok then [("t", "ConPastel.Translator.TOKEN")] else []) ++
     (dataIdx i).map (fun j => (s!"{j}", s!"{fieldInv i j} a{j}"))
   let convText (i : Nat) : String :=
     s!".conv (some (.typeStamp {ms (cname ctors[i]!.1)} {stamp})) [{", ".intercalate ((items i).map (s!"w{·.1}"))}]"
@@ -248,7 +251,7 @@ theorem _root_.{N}.cake_cf{c} {"{"}env : SemEnv Value{"}"} (hc : {N}.cakeHasCons
     Eval env (.mat e (conClauses [{", ".intercalate casesC.toList}])) ({N}.c{c} ({escName cfs[c]!} x)) :=
   {N}.cake_mat (Q := fun x => {N}.c{c} ({escName cfs[c]!} x)) hc he {" ".intercalate args.toList}"
   modifyEnv fun env => datatypeExt.addEntry env
-    { ty := τ, name := N, stamp, ctors := ctors.map fun (c, fs) => (c, cname c, fs.map (·.2)), cached := cfs }
+    { ty := τ, name := N, stamp, ctors := ctors.map fun (c, fs) => (c, cname c, fs.map (·.2)), cached := cfs, token := tok }
 
 /-- Translate `key` (and what it needs), registering the datatypes it needs. -/
 partial def cakeUnitCmd (key : Expr) : CommandElabM Unit := do
@@ -347,6 +350,15 @@ end ConPastel.Translator.Meta
 
 namespace ConPastel.Translator.Meta
 open Lean Meta Elab Command
+
+/-- `cake_token T`: store a fresh identity token (a reference, `ConPastel.Translator.Token`)
+in every CakeML constructor of `T`, after its cached fields (registered before `T` is
+translated). CakeML's `=` on `T` is then a pointer test, not a decision of equality. -/
+elab "cake_token " t:ident : command => do
+  let I ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo t
+  if (allDatatypes (← getEnv)).any (fun d => d.ty.getAppFn.constName? == some I) then
+    throwError "cake_token: {I} is already translated"
+  modifyEnv fun env => tokenExt.addEntry env I
 
 /-- `cake_cached T f₁ … fₘ`: store the computed fields `fᵢ : T → _` in every
 CakeML constructor of `T` (registered before `T` is translated). -/
