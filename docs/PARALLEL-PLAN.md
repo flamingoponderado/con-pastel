@@ -195,6 +195,47 @@ Pancake with a Lean proof is an option for it.
 6. Tuning (heap per worker, THP), and benchmarks: `release/test.sh` with and
    without `--jobs`, and the large fixtures.
 
+## 8. Status and changes to the design
+
+**Changes made while implementing.**
+
+* **A separate executable.** CakeML compiles one program per executable, and
+  the default program's FFI model has only `read` and `write`, so the
+  parallel mode is `release/build/con-pastel-par [--jobs=N]` (default 1
+  worker), built from its own program `parProg` (`make -C release par`).
+  `release/build/con-pastel`, `conPastelProg` and `conPastel_correct` are
+  unchanged.
+* **No numbers in CakeML strings** (§3): `spawn` does not get `K`; workers
+  report code 3 past the last job, and the parent reads the table with
+  `read`'s protocol.
+* **One FFI model per process with a script** (`ConPastel/Par/Spec.lean`),
+  and the per-process theorem states exactly what each process does
+  (`ProcOk`), rather than only "a report of ok".
+* `cake_program` assembles every unit in scope, so the jobs' units live in
+  modules the default program does not import (`ConPastel.Leche.Jobs`,
+  `SeqJobsProgram`, `ParProgram`), and their datatypes are registered in
+  `Jobs` before its `cake_module` tag.
+
+**Milestones.**
+
+1. Done: `checkDecls_error_of_jobs`, `walkJobs_eq` (`ConPastel/Par/Jobs.lean`).
+2. Done: `seqJobs_correct : Implements seqJobsProg`; on the fixture suite
+   `con-pastel-seqjobs` gives `pass=553 fail=8`, the same 8 known failures
+   as the default program.
+3. Done: `parOracle`, `par_process : ParProcess parProg`.
+4. Done: `con_pastel_par_ffi.c`, `--jobs=N`, the parent's verdict walk
+   (`verdictCode`, proved).
+5. Done: `par_correct : ParImplements parProg` under `HarnessRun`.
+   The assumptions are listed in `docs/SOUNDNESS.md` (items 16 to 21).
+6. In progress: measurements (heap per worker, THP, speed-up).
+
+**Files.** `ConPastel/Par/`: `Jobs` (the decomposition), `Entry` (phase 1,
+job codes, verdict), `Spec` (FFI model), `Code` (main declarations),
+`Ffi`, `Work`, `Main`, `Run`, `Decls`, `Assemble` (per-process proof),
+`Final` (composition). `ConPastel/Leche/`: `Jobs`, `SeqJobsProgram`,
+`ParProgram`. `release/`: `con_pastel_par_ffi.c`, `EmitPar.lean`,
+`EmitSeqJobs.lean`.
+
 ## Working notes for this repository
 
 - **Repository rules.**
