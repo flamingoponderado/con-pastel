@@ -1,6 +1,7 @@
 import ConPastel.Main.Code
 import ConPastel.Spec
 import ConPastel.Leche.StateRewrites
+import ConPastel.Leche.DataWord
 
 /-!
 # Translation stage: the datatypes of the kernel's dependencies
