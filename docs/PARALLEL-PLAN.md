@@ -72,6 +72,22 @@ This is the most important design rule.
   `write` do today). The FFI model then stays a pure oracle per process, and no
   CakeML value ever lives in shared memory.
 
+### The FFI contract
+
+The design stays inside CakeML's FFI model:
+
+- An FFI call may change only the bytes of the byte array it is passed (keeping
+  its length) and the abstract oracle state. It must not write the CakeML heap,
+  stack or registers in any other way.
+- So the shared memory stays outside the CakeML heap, is only copied in or out
+  by FFI calls, and no pointer is ever passed back to CakeML.
+- `fork` is fine as an FFI call: in each process, memory is unchanged except
+  the array, and the parent/worker answer is ordinary oracle nondeterminism.
+- Workers never write to stdout; only the parent writes the verdict.
+  `ffiwrite` already flushes on every write, but the harness also checks that
+  no buffered output exists at `fork` time (it flushes stdout and stderr in
+  `spawn`, before forking).
+
 ## 3. FFI surface (new oracle calls)
 
 | call | caller | conf / buffer | result |
@@ -122,10 +138,13 @@ Thin C stubs next to `release/con_pastel_ffi.c` (about 100 lines):
 `mmap(MAP_SHARED|MAP_ANONYMOUS)`, `fork`, `__atomic_fetch_add` for `claim`, a
 store for `report`, `waitpid` for `collect`, and `--jobs=N` parsing in `main`.
 
-Pancake was considered. It has no atomics and makes syscalls only through FFI
-stubs in C, and there is no Pancake semantics in Lean, so it would neither
-shrink the trusted part nor enter the theorem. Keep the claim loop and the
-verdict walk inside the proved CakeML program instead.
+Pancake was considered. flapjack does port Pancake to Lean
+(`deps/flapjack/Flapjack/Pancake`: `PanLang`, its semantics, `PanToTarget`
+and the passes below it), but Pancake has no atomics and makes syscalls only
+through FFI, so the C stubs for `fork`, `mmap`, the atomic add and `waitpid`
+stay either way. For now the claim loop and the verdict walk stay inside the
+proved CakeML program. If harness logic beyond those stubs is ever written,
+Pancake with a Lean proof is an option for it.
 
 ## 6. Practical risks (check early)
 
