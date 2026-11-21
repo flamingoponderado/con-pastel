@@ -22,6 +22,8 @@ cake_datatype (ConLeche.QuotKind)
 cake_datatype (ConLeche.Declaration)
 cake_datatype (Except (ConLeche.CheckError × Nat) ConLeche.Env)
 cake_datatype (Except (ConLeche.CheckError × Nat) (Nat × ConLeche.FEnv))
+-- the pin variants are decoded only when a pinned operation is checked
+cake_lazy ConLeche.NatOpPinSet divPin modPin gcdPin landPin lorPin xorPin shiftLeftPin shiftRightPin divProofs modProofs gcdProofs landProofs lorProofs xorProofs shiftLeftProofs shiftRightProofs divTypePins modTypePins gcdTypePins landTypePins lorTypePins xorTypePins shiftLeftTypePins shiftRightTypePins
 cake_datatype (ConLeche.NatOpPinSet)
 cake_datatype (Except ConLeche.CheckError (ConLeche.FEnv × ConLeche.Cached.CState))
 cake_datatype (Except ConLeche.CheckError (ConLeche.ConstantInfo × ConLeche.Cached.CState))

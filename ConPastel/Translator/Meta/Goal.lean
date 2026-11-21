@@ -24,6 +24,9 @@ structure GLVar where
   cname : String
   value : Expr
   rel : Expr
+  /-- A lazy field (`cake_lazy`): `rel` is `LAZY A x value`, and reading the
+  variable applies it to `()`. -/
+  lazy : Bool := false
 
 /-- The function whose body is being translated, when it is recursive. -/
 structure RecFn where
@@ -460,6 +463,12 @@ def recAsCasesOn? (recN : Name) (lvls : List Level) (args : Array Expr) : MetaM 
   let rest := args[np + 1 + nm + ni + 1:].toArray
   return some (mkAppN (mkConst (I ++ `casesOn) lvls) (params ++ #[motive] ++ indices ++ #[major] ++ minors ++ rest))
 
+/-- `Eval env (var n) (P x)` for a local whose relation is `P x v`. -/
+def evalLocal (env : Expr) (lv : GLVar) (hl : Expr) : MetaM Expr := do
+  let rty ← whnfR (← instantiateMVars (← inferType lv.rel))
+  let .app P _ := rty | throwError "bad local relation {rty}"
+  mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, P, hl, lv.rel]
+
 -- the solver block compiles past the default limit (LCNF)
 set_option maxHeartbeats 1000000 in
 mutual
@@ -498,6 +507,11 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
       return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- ghost values: `()`, whatever the term
   let invW ← whnfR inv
+  -- a lazy field (`cake_lazy`): the closure `fun _ : Unit => t`
+  if invW.isAppOfArity ``LAZY 2 then
+    let lam ← withLocalDeclD `u (mkConst ``Unit) fun u => mkLambdaFVars #[u] t
+    let arr ← mkAppM ``Arrow #[mkConst ``UNIT, invW.appArg!]
+    return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp arr lam]))
   if invW.isAppOfArity ``GHOST 1 then
     assignProof g (← mkAppOptM ``Eval_ghost #[env, invW.appArg!, t])
     return
@@ -522,7 +536,10 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
   if t.isFVar then
     let some lv := st.locals.find? (·.fvar == t) | throwError "unknown local {t}"
     let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
-    assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, p, hl, lv.rel])
+    if lv.lazy then
+      assignProof g (← mkAppM ``Eval_force #[← evalLocal env lv hl])
+    else
+      assignProof g (← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, p, hl, lv.rel])
     return
   -- `decide (b = true)` is `b` (avoids unfolding the `Bool` decidable-equality instance)
   if inv.isConstOf ``BOOL then
@@ -1757,7 +1774,8 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
   let some hc := ctx.hasCons.find? d.name | throwError "no constructor environment for {τ}"
   let invT := mkConst (d.name ++ `cakeInv)
   let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
-  let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invT major, hl, lv.rel]
+  let he ← if lv.lazy then mkAppM ``Eval_force #[← evalLocal env lv hl]
+    else mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invT major, hl, lv.rel]
   let qfun ← withLocalDeclD `x τ fun x => do
     mkLambdaFVars #[x] (mkApp (← invAt x) (mkAppN fn (args[:np].toArray ++ #[motive, x] ++ alts)))
   let mut lemArgs : Array (Option Expr) := #[some env, some hc, none, some major, some he, some qfun]
@@ -1781,7 +1799,11 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
       -- the cached fields' stored values come first
       withLocalDeclsDND ((Array.range mt).map fun i => (Name.mkSimple s!"z{i}", mkConst ``Value)) fun zs => do
       withLocalDeclsDND (dataAs.toArray.mapIdx fun i _ => (Name.mkSimple s!"w{i}", mkConst ``Value)) fun ws => do
-      let invs ← dataAs.toArray.mapM fun a => do (invOf (← inferType a) : MetaM Expr)
+      let dataJs := (List.range dataFlags.size).filter fun j => dataFlags[j]!
+      let lazyF := dataJs.toArray.map fun j => d.lazy.contains (k, j)
+      let invs ← (dataAs.toArray.zip lazyF).mapM fun (a, lz) => do
+        let i ← invOf (← inferType a)
+        if lz then mkAppM ``LAZY #[i] else pure i
       withLocalDeclsDND ((Array.range mt).map fun i => (Name.mkSimple s!"hz{i}",
           if i < m then mkApp2 (mkConst (d.name ++ Name.mkSimple s!"c{i}")) (mkApp (mkConst d.cached[i]!) ctorApp) zs[i]!
           else mkApp (mkConst ``TOKEN) zs[i]!)) fun hzs => do
@@ -1792,7 +1814,7 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
         let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envK, bk, mkApp (← invAt ctorApp) branchT])
         let saved := (← get).locals
         for i in [0:dataAs.length] do
-          let lv : GLVar := { fvar := dataAs[i]!, cname := names[i]!, value := ws[i]!, rel := hws[i]! }
+          let lv : GLVar := { fvar := dataAs[i]!, cname := names[i]!, value := ws[i]!, rel := hws[i]!, lazy := lazyF[i]! }
           modify fun s => { s with locals := s.locals.push lv }
         solve gb.mvarId!
         modify fun s => { s with locals := saved }
@@ -1820,7 +1842,8 @@ partial def solveListCases (g : MVarId) (env inv fn : Expr) (args : Array Expr) 
   let invA ← invOf α
   let invL ← mkAppM ``LIST #[invA]
   let hl ← proveLookupG env lv.cname lv.value ctx.unfoldRec
-  let he ← mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invL major, hl, lv.rel]
+  let he ← if lv.lazy then mkAppM ``Eval_force #[← evalLocal env lv hl]
+    else mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, mkApp invL major, hl, lv.rel]
   let qfun ← withLocalDeclD `x listTy fun x => do
     mkLambdaFVars #[x] (mkApp inv (mkAppN fn #[α, motive, x, nilAlt, consAlt]))
   -- nil branch

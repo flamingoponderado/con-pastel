@@ -33,6 +33,17 @@ theorem Eval_tok (env : SemEnv Value) : Eval env tokExp TOKEN := by
   have := Runs.opref hu
   exact ⟨_, [.refv (.conv none [])], this.evalRel, _, rfl⟩
 
+/-! ## Lazy fields (`cake_lazy`) -/
+
+/-- A lazy representation: a closure that, applied to `()`, returns a
+representation of `x`. -/
+def LAZY {α : Type} (a : RefInv α) : RefInv α := fun x v => Arrow UNIT a (fun _ : Unit => x) v
+
+/-- Forcing a lazy representation: apply it to `()`. -/
+theorem Eval_force {α : Type} {a : RefInv α} {env : SemEnv Value} {e : Exp} {x : α}
+    (h : Eval env e (LAZY a x)) : Eval env (.app .opapp [e, .con none []]) (a x) :=
+  Eval_app_arrow (f := fun _ : Unit => x) (x := ()) h (Eval_unit env)
+
 /-! ## Sound equality, and the pointer test -/
 
 /-- The outcome of CakeML's `=` on two values: `false`, or `true` and `P`. -/

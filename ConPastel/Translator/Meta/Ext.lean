@@ -19,6 +19,8 @@ structure DatatypeInfo where
   cached : Array Name := #[]
   /-- Identity tokens (`cake_token`): a fresh reference stored after the cached fields. -/
   token : Bool := false
+  /-- Lazy fields (`cake_lazy`): (constructor index, field index), stored as closures. -/
+  lazy : Array (Nat × Nat) := #[]
   deriving Inhabited
 
 initialize datatypeExt : SimplePersistentEnvExtension DatatypeInfo (NameMap DatatypeInfo) ←
@@ -50,6 +52,15 @@ initialize tokenExt : SimplePersistentEnvExtension Name NameSet ←
   }
 
 def hasToken (env : Environment) (I : Name) : Bool := (tokenExt.getState env).contains I
+
+/-- Structures some of whose fields are stored lazily, as closures (`cake_lazy T f₁ … fₘ`). -/
+initialize lazyExt : SimplePersistentEnvExtension (Name × Array Name) (NameMap (Array Name)) ←
+  registerSimplePersistentEnvExtension {
+    addEntryFn := fun m (k, fs) => m.insert k fs
+    addImportedFn := fun as => as.foldl (fun m a => a.foldl (fun m (k, fs) => m.insert k fs) m) {}
+  }
+
+def getLazy (env : Environment) (I : Name) : Array Name := ((lazyExt.getState env).find? I).getD #[]
 
 /-- `EqSound inv` theorems by invariant (`cake_eqsound_reg thm`): the pointer
 test `ptrSel` at that invariant's type is CakeML's `=`. -/
