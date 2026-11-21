@@ -17,3 +17,5 @@ import ConPastel.Main.Proof
 import ConPastel.Program.Assemble
 import ConPastel.Translator.Prims
 import ConPastel.Leche.Program
+import ConPastel.Leche.SeqJobsProgram
+import ConPastel.Leche.ParProgram
