@@ -35,17 +35,28 @@ def mkIdxSlow (sz : Nat) (h : 0 < sz) (hash : UInt64) : { u : USize // u.toNat <
     unfold mkIdx at this
     exact this⟩
 
+/-- `scrambleHash` with its two shifts native (a shift by a numeral otherwise
+tests the amount against words built from numerals). -/
+def scrambleHashF (hash : UInt64) : UInt64 :=
+  let h := hash ^^^ shr32 hash
+  h ^^^ shr16 h
+theorem scrambleHash_eq_F (hash : UInt64) : Std.DHashMap.Internal.scrambleHash hash = scrambleHashF hash := by
+  unfold Std.DHashMap.Internal.scrambleHash scrambleHashF
+  have h32 : ∀ x : UInt64, x >>> 32 = shr32 x := fun x => by apply UInt64.toBitVec_inj.mp; simp [shr32]
+  have h16 : ∀ x : UInt64, x >>> 16 = shr16 x := fun x => by apply UInt64.toBitVec_inj.mp; simp [shr16]
+  simp only [h32, h16]
+
 /-- `mkIdx` on 64-bit words. -/
 def mkIdxF (sz : Nat) (h : 0 < sz) (hash : UInt64) : { u : USize // u.toNat < sz } :=
   if hs : sz < 4294967296 then
-    ⟨USize.ofNatLT ((scrambleHash hash) &&& UInt64.ofNat (sz - 1)).toNat (by
-        have h1 : ((scrambleHash hash) &&& UInt64.ofNat (sz - 1)).toNat ≤ sz - 1 := by
+    ⟨USize.ofNatLT ((scrambleHashF hash) &&& UInt64.ofNat (sz - 1)).toNat (by
+        have h1 : ((scrambleHashF hash) &&& UInt64.ofNat (sz - 1)).toNat ≤ sz - 1 := by
           rw [UInt64.toNat_and, UInt64.toNat_ofNat', Nat.mod_eq_of_lt (by omega)]
           exact Nat.and_le_right
         have := USize.le_size
         omega),
       by
-        have h1 : ((scrambleHash hash) &&& UInt64.ofNat (sz - 1)).toNat ≤ sz - 1 := by
+        have h1 : ((scrambleHashF hash) &&& UInt64.ofNat (sz - 1)).toNat ≤ sz - 1 := by
           rw [UInt64.toNat_and, UInt64.toNat_ofNat', Nat.mod_eq_of_lt (by omega)]
           exact Nat.and_le_right
         have := USize.le_size
