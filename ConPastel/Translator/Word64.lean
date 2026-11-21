@@ -119,6 +119,7 @@ def shr4 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 4⟩
 def shr8 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 8⟩
 def shr16 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 16⟩
 def shr32 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 32⟩
+def shr47 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 47⟩
 
 def sl32 (k : Nat) (a : UInt64) : UInt64 := if k / 32 % 2 = 1 then shl32 a else a
 def sl16 (k : Nat) (a : UInt64) : UInt64 := if k / 16 % 2 = 1 then shl16 a else a
@@ -379,6 +380,9 @@ cake_primitive ConPastel.Impl.shr16 (.app (.shift .w64 .lsr 16) [V "p"]) by
 cake_primitive ConPastel.Impl.shr32 (.app (.shift .w64 .lsr 32) [V "p"]) by
   intro envC funs hnodup hfind _ _ _
   exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 32 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shr47 (.app (.shift .w64 .lsr 47) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 47 (Eval_u64_w ha)) rfl
 
 cake_replace UInt64.shiftLeft ConPastel.Impl.shiftLeftW ConPastel.Impl.shiftLeft_eq_B
 cake_replace UInt64.decEq ConPastel.Impl.u64DecEq ConPastel.Impl.u64_decEq_eq
@@ -397,12 +401,15 @@ namespace ConPastel.Impl
 
 theorem u64EqB_true {a b : UInt64} (h : u64EqB a b = true) : a = b := of_decide_eq_true h
 
-/-- `UInt64.shiftRight`, the amounts `scrambleHash` uses as one native shift. -/
+/-- `UInt64.shiftRight`, the amounts `mixHash` and `scrambleHash` use as one native shift. -/
 def shiftRightF (a b : UInt64) : UInt64 :=
-  if u64EqB b 32 then shr32 a else if u64EqB b 16 then shr16 a else shiftRightW a b
+  if u64EqB b 47 then shr47 a else if u64EqB b 32 then shr32 a else if u64EqB b 16 then shr16 a else shiftRightW a b
 
 theorem shiftRight_eq_F (a b : UInt64) : a.shiftRight b = shiftRightF a b := by
   unfold shiftRightF
+  split
+  · rename_i h; cases u64EqB_true h
+    apply UInt64.toBitVec_inj.mp; simp [shr47, UInt64.shiftRight]; rfl
   split
   · rename_i h; cases u64EqB_true h
     apply UInt64.toBitVec_inj.mp; simp [shr32, UInt64.shiftRight]; rfl
@@ -436,10 +443,63 @@ def u64mulP (a b : UInt64) : UInt64 := a * b
 def u64divP (a b : UInt64) : UInt64 := a / b
 def u64modP (a b : UInt64) : UInt64 := a % b
 
+/-! Multiplication of words without bignums: CakeML has no word
+multiplication, and the product of two words as integers is a bignum. On
+22-bit limbs every partial product is a small integer. -/
+
+def shr22 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 22⟩
+def shr44 (a : UInt64) : UInt64 := ⟨a.toBitVec >>> 44⟩
+def shl22 (a : UInt64) : UInt64 := ⟨a.toBitVec <<< 22⟩
+def shl44 (a : UInt64) : UInt64 := ⟨a.toBitVec <<< 44⟩
+
+/-- Multiplication on 22-bit limbs: the limb products stay small integers. -/
+def mulL (a b : UInt64) : UInt64 :=
+  let a0 := (a &&& 4194303).toNat
+  let a1 := (shr22 a &&& 4194303).toNat
+  let a2 := (shr44 a).toNat
+  let b0 := (b &&& 4194303).toNat
+  let b1 := (shr22 b &&& 4194303).toNat
+  let b2 := (shr44 b).toNat
+  UInt64.ofNat (a0 * b0) + shl22 (UInt64.ofNat (a0 * b1 + a1 * b0)) +
+    shl44 (UInt64.ofNat (a0 * b2 + a1 * b1 + a2 * b0))
+
+theorem ring3 (K a0 a1 a2 b0 b1 b2 : Nat) : (a0 + K * a1 + K * K * a2) * (b0 + K * b1 + K * K * b2) =
+    (a0 * b0 + (a0 * b1 + a1 * b0) * K + (a0 * b2 + a1 * b1 + a2 * b0) * (K * K))
+      + K * K * K * ((a1 * b2 + a2 * b1) + K * (a2 * b2)) := by
+  grind
+
+theorem nat_limbs (A B : Nat) :
+    (A % 2^22 * (B % 2^22) + (A % 2^22 * (B / 2^22 % 2^22) + A / 2^22 % 2^22 * (B % 2^22)) * 2^22
+      + (A % 2^22 * (B / 2^44) + A / 2^22 % 2^22 * (B / 2^22 % 2^22) + A / 2^44 * (B % 2^22)) * 2^44) % 2^64
+    = A * B % 2^64 := by
+  have hA : A = A % 2^22 + 2^22 * (A / 2^22 % 2^22) + 2^22 * 2^22 * (A / 2^44) := by omega
+  have hB : B = B % 2^22 + 2^22 * (B / 2^22 % 2^22) + 2^22 * 2^22 * (B / 2^44) := by omega
+  generalize A % 2^22 = a0, A / 2^22 % 2^22 = a1, A / 2^44 = a2 at hA ⊢
+  generalize B % 2^22 = b0, B / 2^22 % 2^22 = b1, B / 2^44 = b2 at hB ⊢
+  subst hA hB
+  rw [ring3, show (2:Nat)^22 * 2^22 * 2^22 = 2^64 * 4 by decide, show (2:Nat)^22 * 2^22 = 2^44 by decide,
+    Nat.mul_assoc, Nat.add_mul_mod_self_left]
+
+theorem mulL_eq (a b : UInt64) : u64mulP a b = mulL a b := by
+  apply UInt64.toNat_inj.mp
+  unfold u64mulP
+  have h1 : (4194303 : UInt64).toNat = 2^22 - 1 := rfl
+  have e22 : ∀ x : UInt64, (shr22 x).toNat = x.toNat / 2^22 := fun x => by
+    show (x.toBitVec >>> 22).toNat = _; rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]; rfl
+  have e44 : ∀ x : UInt64, (shr44 x).toNat = x.toNat / 2^44 := fun x => by
+    show (x.toBitVec >>> 44).toNat = _; rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]; rfl
+  have s22 : ∀ x : UInt64, (shl22 x).toNat = x.toNat * 2^22 % 2^64 := fun x => by
+    show (x.toBitVec <<< 22).toNat = _; rw [BitVec.toNat_shiftLeft, Nat.shiftLeft_eq]; rfl
+  have s44 : ∀ x : UInt64, (shl44 x).toNat = x.toNat * 2^44 % 2^64 := fun x => by
+    show (x.toBitVec <<< 44).toNat = _; rw [BitVec.toNat_shiftLeft, Nat.shiftLeft_eq]; rfl
+  simp only [mulL, UInt64.toNat_add, UInt64.toNat_mul, UInt64.toNat_and, UInt64.toNat_ofNat', h1, e22, e44,
+    s22, s44, Nat.and_two_pow_sub_one_eq_mod]
+  rw [← nat_limbs a.toNat b.toNat]
+  simp only [Nat.mod_mul_mod, Nat.add_mod_mod, Nat.mod_add_mod]
 /-- Multiplication: by the powers of two con-leche packs data words with, a shift. -/
 def mulF (a b : UInt64) : UInt64 :=
   if u64EqB b 2 then shl1 a else if u64EqB b 65536 then shl16 a
-  else if u64EqB b 4294967296 then shl32 a else u64mulP a b
+  else if u64EqB b 4294967296 then shl32 a else mulL a b
 
 /-- Division: by those powers of two, a shift. -/
 def divF (a b : UInt64) : UInt64 :=
@@ -462,7 +522,7 @@ theorem mul_eq_F (a b : UInt64) : UInt64.mul a b = mulF a b := by
   split
   · rename_i h; cases u64EqB_true h
     exact (pow2_mul_eq a 32 (by decide)).symm
-  · rfl
+  · exact mulL_eq a b
 
 theorem div_eq_F (a b : UInt64) : UInt64.div a b = divF a b := by
   unfold divF
@@ -497,6 +557,19 @@ theorem instDecidableEqUInt64_eq : instDecidableEqUInt64 = u64DecEqI :=
   funext fun _ => funext fun _ => Subsingleton.elim _ _
 
 end ConPastel.Impl
+
+cake_primitive ConPastel.Impl.shr22 (.app (.shift .w64 .lsr 22) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 22 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shr44 (.app (.shift .w64 .lsr 44) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shr 44 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shl22 (.app (.shift .w64 .lsl 22) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shl 22 (Eval_u64_w ha)) rfl
+cake_primitive ConPastel.Impl.shl44 (.app (.shift .w64 .lsl 44) [V "p"]) by
+  intro envC funs hnodup hfind _ _ _
+  exact prim1g_cert envC funs _ hnodup hfind fun x xv _ ha => Eval_w_u64 (Eval_w64_shl 44 (Eval_u64_w ha)) rfl
 
 cake_primitive ConPastel.Impl.u64mulP
   (Exp.fn (ofString "b") (i2w (.app (.arith .mul .intT) [w2i (V "p"), w2i (V "b")]))) by
