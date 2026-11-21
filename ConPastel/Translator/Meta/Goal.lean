@@ -658,6 +658,12 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
     let t' := mkApp2 (mkConst ``String.ofByteArray) ba (mkApp (mkConst ``String.isValidUTF8) t)
     let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
     return ← solve g'
+  -- `UInt64` numerals: `UInt64.ofNat n` (the conversion primitive), not a call of
+  -- the generic `OfNat.ofNat` unit with its instance
+  if t.isAppOfArity ``OfNat.ofNat 3 && t.appFn!.appFn!.appArg!.isConstOf ``UInt64 then
+    if let some n := t.appFn!.appArg!.rawNatLit? then
+      let t' := mkApp (mkConst ``UInt64.ofNat) (mkNatLit n)
+      return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- literals
   if let some n := t.nat? then
     if inv.isConstOf ``NAT then
