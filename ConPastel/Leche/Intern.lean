@@ -1,5 +1,6 @@
 import ConPastel.Leche.Keys
 import ConLeche.Verify.Frontend.Local
+import ConLeche.Verify.Frontend.Chunks
 
 /-!
 # Hash-consing the parsed expressions
@@ -656,5 +657,19 @@ def parseChunksI (chunks : List ByteArray) : Except (CheckError × Nat) ParseRes
 
 theorem parseChunks_eq_I (chunks : List ByteArray) : parseChunks chunks = parseChunksI chunks :=
   (parseChunksGoI_eq .init (.leaf []) .empty 0 0 chunks).symm
+
+/-- `parseBytes` (the built-in prelude's parse), through the interning chunk
+parser: con-leche's `parseBytes` rescans the unread input at every line. -/
+def parseBytesI (b : ByteArray) : Except (CheckError × Nat) ParseResultD :=
+  if b.size ≥ USize.size then throw sizeError else parseChunksI [b]
+
+theorem parseBytes_eq_I (b : ByteArray) : parseBytes b = parseBytesI b := by
+  unfold parseBytesI
+  split
+  · rename_i h; unfold parseBytes; simp [h]; rfl
+  · rename_i h
+    rw [← parseChunks_eq_I, parseChunks_eq_parseBytes]
+    · simp [concatBytes, ByteArray.append_empty]
+    · simp [concatBytes, ByteArray.append_empty]; omega
 
 end ConPastel.Impl

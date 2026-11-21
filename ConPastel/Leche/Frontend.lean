@@ -27,5 +27,7 @@ namespace ConPastel.Leche
 cake_module "Frontend"
 -- the export is parsed with interning (`ConPastel.Leche.Intern`)
 cake_replace ConLeche.Frontend.parseChunks ConPastel.Impl.parseChunksI ConPastel.Impl.parseChunks_eq_I
+-- and so is the built-in prelude
+cake_replace ConLeche.Frontend.parseBytes ConPastel.Impl.parseBytesI ConPastel.Impl.parseBytes_eq_I
 cake_unit ConLeche.Frontend.builtinPreludeE ConPastel.Impl.parseChunksI ConLeche.Frontend.preparePrelude
 end ConPastel.Leche
