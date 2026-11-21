@@ -199,7 +199,7 @@ theorem parMainRun (p1N okN jcN vN revN : String) (E : SemEnv Value) (v1 vok vjc
   have hstD : s₃.refs[ℓ]? = some (.w8array [cI, dI]) := by
     simp only [s₃, s₂]; exact refs_append_get (refs_append_get hbufI rp) _
   have hjbD : s₃.refs[ℓj]? = some (.w8array (List.replicate 9 0)) := by simp [s₃, ℓj]
-  obtain ⟨s', r, evs, hrun, hend, hevs, hwb, hrep⟩ := runs_dispatch hd s₃ cI dI hstD hjbD hor
+  obtain ⟨s', r, evs, hrun, hend, hevs, hwb, hrep, hspawn⟩ := runs_dispatch hd s₃ cI dI hstD hjbD hor
   obtain ⟨r', d₇, hr', -⟩ := DeclsEnd.dlet_ended (loc := Flapjack.Misc.Location.unknownLoc)
     (tbl _ hc₆ _ (by
       simp +decide [dispatch, parentBody, conOk, conOkList, conHeadOk, nilE, ffiCall, intEq, strE, var]))
@@ -207,7 +207,8 @@ theorem parMainRun (p1N okN jcN vN revN : String) (E : SemEnv Value) (v1 vok vjc
   have hD := DeclsEnd.cons d₁ (DeclsEnd.cons d₂ (DeclsEnd.cons d₃ (DeclsEnd.cons d₄ (DeclsEnd.cons d₅
     (DeclsEnd.cons d₆ d₇ hr') (hr'.combine _)) ((hr'.combine _).combine _)) (((hr'.combine _).combine _).combine _))
     ((((hr'.combine _).combine _).combine _).combine _)) (((((hr'.combine _).combine _).combine _).combine _).combine _)
-  refine ⟨s', _, reads ++ evs, hD, (((((hr'.combine _).combine _).combine _).combine _).combine _).combine _, ?_, ?_, ?_⟩
+  refine ⟨s', _, reads ++ evs, hD, (((((hr'.combine _).combine _).combine _).combine _).combine _).combine _, ?_, ?_, ?_,
+    fun hP => ?_⟩
   · rw [hevs]; simp [s₃, s₂, sI, s₁]
   · have hr0 : writtenBytes reads = [] := writtenBytes_nowrite _ fun e he => isCall_ne (hreads e he) (by decide)
     rw [writtenBytes_append, hr0, List.nil_append, hwb]
@@ -216,6 +217,8 @@ theorem parMainRun (p1N okN jcN vN revN : String) (E : SemEnv Value) (v1 vok vjc
     rcases List.mem_append.mp he with he | he
     · exact absurd hr (isCall_ne (hreads e he) (by decide))
     · exact hrep e he hr
+  · obtain ⟨e, he, hs⟩ := hspawn hP
+    exact ⟨e, List.mem_append_right _ he, hs⟩
 end
 
 end ConPastel.Par

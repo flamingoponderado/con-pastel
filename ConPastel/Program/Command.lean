@@ -271,7 +271,7 @@ partial def buildTree (P : Name) (fty : Expr) (leaves : Array FTree) (chunk lo h
   addDef n (← mkAppM ``List #[fty]) (← mkAppM ``HAppend.hAppend #[l.const, r.const])
   return .node (mkConst n) l r (m * chunk)
 
-def cakeProgram (P entry : Name) : MetaM Unit := do
+def cakeProgram (P entry : Name) (par : Option (Name × Name × Name) := none) : MetaM Unit := do
   let env ← getEnv
   let us := unitsInOrder env
   let some eu := us.find? (·.key == mkConst entry) | throwError "{entry} is not a unit"
@@ -645,26 +645,73 @@ def cakeProgram (P entry : Name) : MetaM Unit := do
   addThmT (P ++ `hok) (mkApp2 (mkConst ``GroupsOk) envCc gs) hok
   let hLmTy ← mkEq (mkApp3 (mkConst ``bindsAfter) envCc gs (mkConst (P ++ `L_0))) lConsts[m]!
   addThmT (P ++ `hLm) hLmTy (← mkEqRefl lConsts[m]!)
-  let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
   let loc := mkConst ``Flapjack.Misc.Location.unknownLoc
   let dletrecs ← mkAppM ``List.map #[mkApp (mkConst ``Dec.dletrec) loc, gs]
-  let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dtype #[loc, tds], ← mkAppM ``HAppend.hAppend #[dletrecs, mainDecs]]
-  addDef (P ++ `prog) (← mkAppM ``List #[mkConst ``Dec]) prog
   let lookupFinal (u : UnitInfo) : MetaM Expr := do
     return mkAppN (mkConst ``lookup_flat) #[lConsts[m]!, mlString u.cname, ← valueOf u, nodupL[m]!, ← memL u m]
-  let ne (a b : String) : MetaM Expr := do closeWith (mkNot (← mkEq (mlString a) (mlString b))) (← `(tactic| decide))
-  let some ce := certs.get? eu.name | unreachable!
-  let some cr := certs.get? ru.name | unreachable!
-  let pf ← mkAppOptM ``program_completes_groups #[tds, gs, lConsts[m]!, mkConst (P ++ `hLm),
-    toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup, mkConst (P ++ `hok),
-    ← valueOf eu, ← valueOf ru, ← lookupFinal eu, ce, ← lookupFinal ru, cr, hlist,
-    ← ne eu.cname ConPastel.Main.bufName, ← ne eu.cname ConPastel.Main.readAllName,
-    ← ne ru.cname ConPastel.Main.bufName, ← ne ru.cname ConPastel.Main.readAllName]
-  addThm (P ++ `correct) (← mkLambdaFVars #[hrt] pf)
-  tick "correct"
+  match par with
+  | none =>
+    let mainDecs ← mkAppM ``ConPastel.Main.mainDecs #[toExpr eu.cname, toExpr ru.cname]
+    let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dtype #[loc, tds], ← mkAppM ``HAppend.hAppend #[dletrecs, mainDecs]]
+    addDef (P ++ `prog) (← mkAppM ``List #[mkConst ``Dec]) prog
+    let ne (a b : String) : MetaM Expr := do closeWith (mkNot (← mkEq (mlString a) (mlString b))) (← `(tactic| decide))
+    let some ce := certs.get? eu.name | unreachable!
+    let some cr := certs.get? ru.name | unreachable!
+    let pf ← mkAppOptM ``program_completes_groups #[tds, gs, lConsts[m]!, mkConst (P ++ `hLm),
+      toExpr eu.cname, toExpr ru.cname, mkConst entry, hdup, mkConst (P ++ `hok),
+      ← valueOf eu, ← valueOf ru, ← lookupFinal eu, ce, ← lookupFinal ru, cr, hlist,
+      ← ne eu.cname ConPastel.Main.bufName, ← ne eu.cname ConPastel.Main.readAllName,
+      ← ne ru.cname ConPastel.Main.bufName, ← ne ru.cname ConPastel.Main.readAllName]
+    addThm (P ++ `correct) (← mkLambdaFVars #[hrt] pf)
+    tick "correct"
+  | some (okC, jcC, vdC) =>
+    -- the parallel program: `entry` is the first phase; the main declarations are
+    -- `ConPastel.Par.parMainDecs`, and `P.correct` is `ConPastel.Par.ParProcess P.prog`
+    let unitOf (c : Name) : MetaM UnitInfo := do
+      let some u := us.find? (·.key == mkConst c) | throwError "{c} is not a unit"
+      return u
+    let ou ← unitOf okC
+    let ju ← unitOf jcC
+    let vu ← unitOf vdC
+    let mainDecs ← mkAppM `ConPastel.Par.parMainDecs
+      #[toExpr eu.cname, toExpr ou.cname, toExpr ju.cname, toExpr vu.cname, toExpr ru.cname]
+    let prog ← mkAppM ``List.cons #[← mkAppM ``Dec.dtype #[loc, tds], ← mkAppM ``HAppend.hAppend #[dletrecs, mainDecs]]
+    addDef (P ++ `prog) (← mkAppM ``List #[mkConst ``Dec]) prog
+    let certOf (u : UnitInfo) : MetaM Expr := do
+      let some c := certs.get? u.name | throwError "{u.key} has no certificate"
+      return c
+    let names := [eu, ou, ju, vu, ru].map (·.cname)
+    let strT := mkConst ``String
+    let namesL ← mkListLit strT (names.map toExpr)
+    let freshTy ← withLocalDeclD `n strT fun n => do
+      let ty ← withLocalDeclD `m strT fun m => do
+        mkForallFVars #[m] (← mkArrow (← mkAppM ``Membership.mem #[mkConst `ConPastel.Par.mainNames, m])
+          (mkNot (← mkEq (← mkAppM ``Flapjack.Basis.Pure.MlString.ofString #[n]) (← mkAppM ``Flapjack.Basis.Pure.MlString.ofString #[m]))))
+      mkForallFVars #[n] (← mkArrow (← mkAppM ``Membership.mem #[namesL, n]) ty)
+    let hfresh ← closeWith freshTy (← `(tactic| decide))
+    let invP ← invOf (mkConst `ConPastel.Par.Phase1)
+    let pf ← mkAppOptM `ConPastel.Par.par_program_end #[tds, gs, lConsts[m]!, mkConst (P ++ `hLm),
+      toExpr eu.cname, toExpr ou.cname, toExpr ju.cname, toExpr vu.cname, toExpr ru.cname,
+      hdup, mkConst (P ++ `hok), invP,
+      ← valueOf eu, ← valueOf ou, ← valueOf ju, ← valueOf vu, ← valueOf ru,
+      ← lookupFinal eu, ← certOf eu, ← lookupFinal ou, ← certOf ou, ← lookupFinal ju, ← certOf ju,
+      ← lookupFinal vu, ← certOf vu, ← lookupFinal ru, ← certOf ru, hlist, hfresh]
+    addThm (P ++ `correct) (← mkLambdaFVars #[hrt] pf)
+    tick "correct"
 
 elab "cake_program " P:ident entry:ident : command => do
   let e ← liftCoreM <| realizeGlobalConstNoOverloadWithInfo entry
   liftTermElabM <| cakeProgram P.getId e
+
+/-- `cake_program_par P phase1 phase1Ok jobCode verdictCode`: the parallel checker's program
+(`ConPastel.Par.parMainDecs`) and its per-process theorem, `P.correct : RuntimeAssumptions →
+ConPastel.Par.ParProcess P.prog` (`ConPastel.Par.par_program_end`). -/
+elab "cake_program_par " P:ident p1:ident ok:ident jc:ident vd:ident : command => do
+  let r (i : Ident) := liftCoreM <| realizeGlobalConstNoOverloadWithInfo i
+  let e ← r p1
+  let o ← r ok
+  let j ← r jc
+  let v ← r vd
+  liftTermElabM <| cakeProgram P.getId e (some (o, j, v))
 
 end ConPastel.Program

@@ -32,7 +32,8 @@ def expectedOut (io : ParIO) : List (BitVec 8) :=
 
 /-- **The specification of one process's events.** -/
 def ProcOk (io : ParIO) (evs : List HolIoEvent) : Prop :=
-  writtenBytes evs = expectedOut io ∧ ∀ e ∈ evs, IsCall "report" e → ReportOk (phase1Of io) e
+  writtenBytes evs = expectedOut io ∧ (∀ e ∈ evs, IsCall "report" e → ReportOk (phase1Of io) e) ∧
+    ((phase1Of io).ok = true → ∃ e ∈ evs, IsCall "spawn" e)
 
 /-! ## The oracle on the other calls -/
 
@@ -325,7 +326,7 @@ theorem runs_dispatch {okName jobCodeName verdictName revName : String} {P : Pha
     ∃ s' r evs, Runs s E [dispatch okName verdictName revName] s' r ∧ Ended r ∧
       s'.ffi.ioEvents = s.ffi.ioEvents ++ evs ∧
       writtenBytes evs = expectedOutP P s.ffi.ffiState ∧
-      ∀ e ∈ evs, IsCall "report" e → ReportOk P e := by
+      (∀ e ∈ evs, IsCall "report" e → ReportOk P e) ∧ (P.ok = true → ∃ e ∈ evs, IsCall "spawn" e) := by
   -- `phase1Ok p`
   obtain ⟨bv, rok, hokRun, hbv⟩ := Runs.app_returns
     (Runs.cons (Runs.var s E pName pv h.p) (Runs.var s E okName vok h.ok)) (h.okinv P pv h.pinv)
@@ -341,11 +342,12 @@ theorem runs_dispatch {okName jobCodeName verdictName revName : String} {P : Pha
       (fun ck => eval_strLit _ _ _) h.buf hst₁ ne_write (by rw [hor]; exact parOracle_write _ _ _) rfl
     refine ⟨_, _, [ffiEvent "write" (ofString "rejected\n").explode [c, d] [c, d]],
       Runs.if_ (hP ▸ hokRun) (by simp only [Bool.false_eq_true, ite_false]; exact hw) (by simp),
-      .inl rfl, rfl, ?_, ?_⟩
+      .inl rfl, rfl, ?_, ?_, ?_⟩
     · rw [writtenBytes_write]; simp [expectedOutP, hP]; decide
     · intro e he hr
       simp only [List.mem_singleton] at he; subst he
       exact absurd hr (by intro h'; exact absurd (HolFfiName.extCall.inj h') (by decide))
+    · intro h'; exact absurd h' (by simp)
   · -- spawn
     have hlt : ℓj < s₁.refs.length := by
       rcases Nat.lt_or_ge ℓj s₁.refs.length with h' | h'
@@ -373,7 +375,7 @@ theorem runs_dispatch {okName jobCodeName verdictName revName : String} {P : Pha
     · -- the parent
       have hw0 : decide (w = 0) = true := by simp [w, hW]
       obtain ⟨s', r, evs, hrun, hend, hevs, hwb, hnr⟩ := runs_parent h s₂ c d hst₂ hor
-      refine ⟨s', r, evS :: evs, ?_, hend, ?_, ?_, ?_⟩
+      refine ⟨s', r, evS :: evs, ?_, hend, ?_, ?_, ?_, fun _ => ⟨evS, List.mem_cons_self .., hS⟩⟩
       · refine Runs.if_ (hP ▸ hokRun) ?_ hend.not_timeout
         simp only [ite_true]
         refine Runs.let_ hsp (Runs.if_ htest ?_ hend.not_timeout) hend.not_timeout
@@ -397,7 +399,7 @@ theorem runs_dispatch {okName jobCodeName verdictName revName : String} {P : Pha
       have hcall : Runs s₂ E [.app .opapp [var workName, .con none []]] s' r :=
         Runs.app_opapp_any (Runs.cons (runs_unit s₂ E) (Runs.var s₂ E workName _ h.work)) happ hrun
           hend.not_timeout
-      refine ⟨s', r, evS :: evs, ?_, hend, ?_, ?_, ?_⟩
+      refine ⟨s', r, evS :: evs, ?_, hend, ?_, ?_, ?_, fun _ => ⟨evS, List.mem_cons_self .., hS⟩⟩
       · refine Runs.if_ (hP ▸ hokRun) ?_ hend.not_timeout
         simp only [ite_true]
         refine Runs.let_ hsp (Runs.if_ htest ?_ hend.not_timeout) hend.not_timeout
