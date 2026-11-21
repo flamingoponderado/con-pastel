@@ -177,6 +177,99 @@ that item 1 is the largest gap.
     accepts correct proofs is con-leche's claim (`no_False_declaration`,
     `main_no_False`), with con-leche's own trust base.
 
+## The parallel mode (`con-pastel-par --jobs=N`)
+
+The parallel checker is a separate executable, `release/build/con-pastel-par`
+(`make -C release par`), built from a separate CakeML program, `parProg`,
+and linked with `release/con_pastel_par_ffi.c`. The default executable,
+`conPastelProg` and `conPastel_correct` are unchanged by it, and everything
+above applies to the parallel mode as well (links B to F, items 1 to 15),
+for `parProg` and its own S-expression instead of `conPastelProg`'s. The
+design is in `docs/PARALLEL-PLAN.md`.
+
+**What is proved** (each depends only on `[propext, Classical.choice,
+Quot.sound]`):
+
+* `ConPastel.Par.walkJobs_eq` (pure Lean, `ConPastel/Par/Jobs.lean`):
+  con-leche's fold `checkDecls` is decided by its jobs (`recordJob` at
+  `buildIndex ds`), the first failing job giving the fold's error. The
+  accept direction is con-leche's `checkDecls_of_jobs`; the reject
+  direction, `checkDecls_error_of_jobs`, is proved here.
+* `ConPastel.seqJobs_correct : RuntimeAssumptions → Implements seqJobsProg`
+  (`ConPastel/Leche/SeqJobsProgram.lean`): a program that runs the first
+  phase and then every job in order, on one process with only `read` and
+  `write`, satisfies the same statement as `conPastel_correct`. It is not
+  the parallel program; it validates the translation of the jobs.
+* `ConPastel.par_process : RuntimeAssumptions → ParProcess parProg`
+  (`ConPastel/Leche/ParProgram.lean`): **one process** of the parallel
+  program, run under the FFI model `parOracle` with any script of answers
+  to `spawn`, `claim` and `results`, has exactly one behaviour. It
+  terminates (normally, or by an FFI call that ends the run), writes
+  `rejected` if the input does not parse, nothing if it is a worker, and
+  otherwise the verdict on the table it read (or nothing, after `abort`,
+  if that table is not a table of its jobs); and every `report` it makes
+  carries the code of the job at the reported index (`ProcOk`).
+* `ConPastel.par_correct : RuntimeAssumptions → ParImplements parProg`:
+  under the harness assumptions below, the parent process writes
+  con-leche's verdict.
+
+**What the parallel mode assumes, in addition to the default program's
+trust base:**
+
+16. **The harness assumptions (`ConPastel.Par.HarnessRun`, not proved).**
+    The parent process is a run of `parProg` on the input, with `spawn`
+    answering "parent". If the parent spawned workers, then the table that
+    `results` served it holds only the codes 1 and 2, the entry at each
+    index `i` was reported (`report`) for job `i` by some worker, and some
+    worker reported code 3 for the index just past the table. A *worker*
+    is a run of the same program on the same input bytes, with `spawn`
+    answering "worker". `con_pastel_par_ffi.c` is meant to establish this:
+    the table lives in one shared mapping written only by `report`; the
+    parent's first `results` call waits for every worker and stops with
+    exit code 3 if one did not exit with status 0; it serves entries in
+    index order up to the first 3, and stops with exit code 3 at an entry
+    that was never reported. This correspondence is checked by reading the
+    C code, not by proof.
+
+17. **One FFI model per process, and `fork` as an FFI call.** Each process
+    is modelled as its own run of the CakeML semantics, whose oracle
+    (`parOracle`) answers from a script. The process's actual run is its
+    run under the script of the answers it actually received; this relies
+    on the semantics being deterministic apart from the oracle (proved in
+    flapjack, `semanticsProg_deterministic`) and on the C functions obeying
+    CakeML's FFI contract: a call changes only the bytes of the array it is
+    given (keeping its length) and the oracle state, and writes no other
+    CakeML memory, stack or register. `spawn` relies on `fork` giving the
+    child an exact copy of the CakeML heap, stack and registers, so that
+    the child continues the same run from the return of `spawn`, differing
+    only in the answer byte. The shared mapping is outside the CakeML heap
+    and stack and is reached only by copying bytes in `claim`, `report`
+    and `results`; no pointer is passed to CakeML. The OS (`fork`, `mmap`,
+    `waitpid`), the C11 atomics, and the memory model that makes a
+    worker's reports visible to the parent after `waitpid` are trusted.
+
+18. **Exit status 0 means a complete run.** The harness accepts a
+    worker's reports only if every worker exited with status 0. This
+    relies on CakeML's compiler theorem for each process (item 8): a
+    process that runs out of heap or stack exits with code 1 or 2, so a
+    worker that exits with 0 completed its run. Signals and other non-zero
+    statuses also stop the parent with exit code 3 and no verdict.
+
+19. **Only the parent writes.** Proved for the model: a worker's run
+    writes nothing (`ProcOk`). In the C code, `write` in a worker is an FFI
+    failure, and `spawn` flushes stdout and stderr before forking, so no
+    buffered output is duplicated into the workers.
+
+20. **No liveness claim.** If the harness never answers, or the shared
+    counter overflows the table capacity (2^32 jobs), there is no verdict.
+    The theorems exclude a wrong verdict, not the absence of one. Only exit
+    code 0 with `accepted` or `rejected` on stdout is a verdict.
+
+21. **Resource use is outside the theorems.** Each worker inherits the
+    parent's heap copy-on-write and has its own CakeML heap of
+    `CML_HEAP_SIZE` MiB; N workers can use up to N times that memory.
+    Running out is a non-zero exit, never a verdict.
+
 ## Not trusted (checked by Lean)
 
 * The translator (`ConPastel/Translator`, `ConPastel/Program`). It is a
@@ -185,8 +278,11 @@ that item 1 is the largest gap.
   produce a false theorem.
 * The I/O wrapper (`ConPastel/Main`): hand-written CakeML with a Lean proof.
 * Axioms: `#print axioms ConPastel.conPastel_correct` gives
-  `[propext, Classical.choice, Quot.sound]`. The Lean kernel itself is
-  trusted.
+  `[propext, Classical.choice, Quot.sound]`, and so do
+  `ConPastel.seqJobs_correct`, `ConPastel.par_process` and
+  `ConPastel.par_correct`. The Lean kernel itself is trusted.
+* The parallel mode's main program and its proofs (`ConPastel/Par`):
+  hand-written CakeML with a Lean proof, like `ConPastel/Main`.
 
 ## Evidence beyond proofs
 

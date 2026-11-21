@@ -6,6 +6,8 @@
 # skipped).
 #
 # usage: release/test.sh [checker] [max-fixture-bytes] [timeout-seconds]
+# CHECKER_ARGS, if set, is passed to the checker (e.g. CHECKER_ARGS=--jobs=8
+# for build/con-pastel-par).
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 bin=${1:-$here/build/con-pastel}
@@ -21,7 +23,8 @@ while read -r code file; do
   if [ "$code" = 124 ] || [ "${file%.gz}" != "$file" ] || [ "$(stat -c %s "$f")" -gt "$maxsize" ]; then
     skip=$((skip+1)); continue
   fi
-  out=$(timeout "$tmo" "$bin" < "$f" 2>/dev/null)
+  # shellcheck disable=SC2086
+  out=$(timeout "$tmo" "$bin" ${CHECKER_ARGS:-} < "$f" 2>/dev/null)
   st=$?
   if [ "$code" = 0 ]; then want=accepted; else want=rejected; fi
   if [ $st -eq 0 ] && [ "$out" = "$want" ]; then

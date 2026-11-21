@@ -78,7 +78,47 @@ $(B)/con-pastel: $(B)/con-pastel.S con_pastel_ffi.c
 test: $(B)/con-pastel
 	./test.sh $(B)/con-pastel
 
+# The parallel checker (docs/PARALLEL-PLAN.md): `build/con-pastel-par --jobs=N`.
+# Same pipeline, for `ConPastel.parProg` (theorem `ConPastel.par_correct`),
+# linked with con_pastel_par_ffi.c. Not part of `all`.
+$(B)/par.sexp: EmitPar.lean | $(B)
+	cd $(ROOT) && ulimit -s 8388608 && lake build ConPastel.Leche.ParProgram Flapjack.CakeParser.ToSexp
+	cd $(ROOT) && ulimit -s 8388608 && \
+	  CON_PASTEL_SEXP=release/$@.tmp lake lean release/EmitPar.lean
+	mv $@.tmp $@
+
+$(B)/par.S: $(B)/par.sexp $(B)/cake
+	CML_HEAP_SIZE=$(CAKE_HEAP) CML_STACK_SIZE=$(CAKE_STACK) \
+	  $(B)/cake $(CAKEFLAGS) < $< > $@.tmp
+	mv $@.tmp $@
+
+$(B)/con-pastel-par: $(B)/par.S con_pastel_par_ffi.c con_pastel_ffi.c
+	$(CC) $(CFLAGS) -o $@ $(B)/par.S con_pastel_par_ffi.c
+
+par: $(B)/con-pastel-par
+
+test-par: $(B)/con-pastel-par
+	CHECKER_ARGS=--jobs=$${JOBS:-4} ./test.sh $(B)/con-pastel-par
+
+# The in-order jobs program (the parallel checker's jobs on one process, with
+# only `read`/`write`; theorem `ConPastel.seqJobs_correct`, statement `Implements`).
+$(B)/seqjobs.sexp: EmitSeqJobs.lean | $(B)
+	cd $(ROOT) && ulimit -s 8388608 && lake build ConPastel.Leche.SeqJobsProgram Flapjack.CakeParser.ToSexp
+	cd $(ROOT) && ulimit -s 8388608 && \
+	  CON_PASTEL_SEXP=release/$@.tmp lake lean release/EmitSeqJobs.lean
+	mv $@.tmp $@
+
+$(B)/seqjobs.S: $(B)/seqjobs.sexp $(B)/cake
+	CML_HEAP_SIZE=$(CAKE_HEAP) CML_STACK_SIZE=$(CAKE_STACK) \
+	  $(B)/cake $(CAKEFLAGS) < $< > $@.tmp
+	mv $@.tmp $@
+
+$(B)/con-pastel-seqjobs: $(B)/seqjobs.S con_pastel_ffi.c
+	$(CC) $(CFLAGS) -o $@ $(B)/seqjobs.S con_pastel_ffi.c
+
+seqjobs: $(B)/con-pastel-seqjobs
+
 clean:
 	rm -rf $(B)
 
-.PHONY: all sexp cake check-sexp test clean
+.PHONY: all sexp cake check-sexp test clean par test-par seqjobs
