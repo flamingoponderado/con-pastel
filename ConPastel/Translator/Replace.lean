@@ -302,3 +302,49 @@ cake_rewrite ConPastel.Impl.arrayMapIdx_eq
 cake_rewrite ConPastel.Impl.dite_app
 cake_rewrite ConPastel.Impl.ite_app
 cake_rewrite ConPastel.Impl.cond_app
+
+/-! ## `mixHash` without bignums
+
+`leanMixHash` multiplies by `0xc6a4a7935bd1e995`, above the small-integer
+range: as a literal it is a bignum converted to a word at every call.
+`leanMixHashF` multiplies by its 22-bit limbs and builds it from two 32-bit
+halves for the `xor`. -/
+
+namespace ConPastel.Impl
+
+/-- `mulL` with the second operand given by its limbs. -/
+def mulLc (a : UInt64) (b0 b1 b2 : Nat) : UInt64 :=
+  let a0 := (a &&& UInt64.ofNat 4194303).toNat
+  let a1 := (shr22 a &&& UInt64.ofNat 4194303).toNat
+  let a2 := (shr44 a).toNat
+  UInt64.ofNat (a0 * b0) + shl22 (UInt64.ofNat (a0 * b1 + a1 * b0)) +
+    shl44 (UInt64.ofNat (a0 * b2 + a1 * b1 + a2 * b0))
+
+/-- Multiplication by `0xc6a4a7935bd1e995`, by its limbs (small integers). -/
+def mulMix (a : UInt64) : UInt64 := mulLc a 1173909 1985903 813642
+
+theorem mulMix_eq (a : UInt64) : a * 0xc6a4a7935bd1e995 = mulMix a := by
+  rw [show a * 0xc6a4a7935bd1e995 = u64mulP a 0xc6a4a7935bd1e995 from rfl, mulL_eq]
+  rfl
+
+/-- `leanMixHash` without materialising its constant as a bignum: the
+multiplications by its limbs, the `xor` with it built from two 32-bit halves,
+the shift by 47 native. -/
+def leanMixHashF (h k : UInt64) : UInt64 :=
+  let m : UInt64 := shl32 (UInt64.ofNat 3332679571) + UInt64.ofNat 1540483477
+  let k := mulMix k
+  let k := k ^^^ shr47 k
+  let k := k ^^^ m
+  mulMix (h ^^^ k)
+
+theorem leanMixHash_eq_F (h k : UInt64) : ConPastel.leanMixHash h k = leanMixHashF h k := by
+  unfold ConPastel.leanMixHash leanMixHashF
+  simp only [← mulMix_eq]
+  have hm : shl32 (UInt64.ofNat 3332679571) + UInt64.ofNat 1540483477 = 0xc6a4a7935bd1e995 := by decide
+  have h47 : ∀ x : UInt64, x >>> 47 = shr47 x := fun x => by
+    apply UInt64.toBitVec_inj.mp; simp [shr47]
+  rw [hm, h47]
+
+end ConPastel.Impl
+
+cake_replace ConPastel.leanMixHash ConPastel.Impl.leanMixHashF ConPastel.Impl.leanMixHash_eq_F
