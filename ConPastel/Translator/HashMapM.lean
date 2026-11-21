@@ -1,4 +1,4 @@
-import ConPastel.Translator.Table
+import ConPastel.Translator.TableRead
 import Batteries.Tactic.OpenPrivate
 
 /-!
@@ -63,7 +63,7 @@ termination_by n - i
 /-- Double the buckets and reinsert every entry (`expand`). -/
 def expandM : StateT (TRaw K V) (Except ε) Unit := do
   let n ← tNB
-  let olds ← readFromM n 0
+  let olds ← tReadAll
   tRealloc (n * 2)
   reinsertAllM olds
 
@@ -234,9 +234,8 @@ theorem expand_go_eq (source : Array (Bkt K V)) : ∀ (i : Nat) (target : { d : 
 theorem expandM_eq (raw : TRaw K V) (h : 0 < raw.buckets.size) :
     (expandM : StateT (TRaw K V) (Except ε) Unit) raw =
       .ok ((), { raw with buckets := (Raw₀.expand ⟨raw.buckets, h⟩).1 }) := by
-  simp only [expandM, bind, StateT.bind, Except.bind, tNB]
-  rw [readFromM_eq raw 0]
-  simp only [List.drop_zero, tRealloc]
+  simp only [expandM, bind, StateT.bind, Except.bind, tNB, tReadAll]
+  simp only [tRealloc]
   have h2 : 0 < (Array.replicate (raw.buckets.size * 2) (AssocList.nil : Bkt K V)).size := by simp; omega
   rw [reinsertAllM_eq _ _ h2]
   simp only [Raw₀.expand]
