@@ -48,6 +48,10 @@ end ConPastel.Leche
 cake_replace ConLeche.Cached.recordJob ConPastel.Leche.recordJobR ConPastel.Leche.recordJob_eq
 
 namespace ConPastel.Leche
+-- the datatypes only the jobs use, registered before the module is tagged
+cake_datatype (ConLeche.Cached.StreamIndex)
+cake_datatype (ConPastel.Par.Phase1)
+cake_datatype (Except (ConLeche.CheckError × Nat) (Array ConLeche.Declaration))
 cake_module "Jobs"
 cake_unit ConPastel.Par.phase1 ConPastel.Par.phase1Ok ConPastel.Par.jobCode ConPastel.Par.verdictCode ConPastel.Par.seqEntry
 end ConPastel.Leche
