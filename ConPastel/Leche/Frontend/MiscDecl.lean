@@ -1,4 +1,4 @@
-import ConPastel.Leche.Datatypes
+import ConPastel.Leche.Keys
 
 /-!
 # Frontend stage, part: the string, opaque, axiom and theorem line parsers

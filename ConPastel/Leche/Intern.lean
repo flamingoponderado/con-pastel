@@ -1,4 +1,4 @@
-import ConPastel.Leche.Datatypes
+import ConPastel.Leche.Keys
 import ConLeche.Verify.Frontend.Local
 
 /-!

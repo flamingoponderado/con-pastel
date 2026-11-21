@@ -1,4 +1,4 @@
-import ConPastel.Leche.Datatypes
+import ConPastel.Leche.Keys
 
 /-!
 # Frontend stage, part: the name, level and expression entry parsers
