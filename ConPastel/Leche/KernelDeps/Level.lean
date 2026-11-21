@@ -17,5 +17,5 @@ set_option linter.all false
 
 namespace ConPastel.Leche
 cake_module "KernelDepsLevel"
-cake_unit ConPastel.leanMixHash ConLeche.Level.leqCore ConLeche.Cached.isEquivListLM
+cake_unit ConPastel.Impl.leanMixHashF ConLeche.Level.leqCore ConLeche.Cached.isEquivListLM
 end ConPastel.Leche
