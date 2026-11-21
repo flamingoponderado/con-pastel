@@ -90,17 +90,36 @@ The design stays inside CakeML's FFI model:
 
 ## 3. FFI surface (new oracle calls)
 
-| call | caller | conf / buffer | result |
-|---|---|---|---|
-| `spawn` | phase 1 end | conf: `K`, `N` | buffer byte: `0` parent, `1` worker |
-| `claim` | worker | — | next index (e.g. 8 bytes little-endian) or a `done` flag |
-| `report` | worker | conf: `k`, result code | — |
-| `collect` | parent | buffer of `K` result bytes | table filled; per-child status |
+The translator has no CakeML strings as values, so CakeML never encodes a
+number into an FFI configuration. Numbers travel in the 9-byte job buffer
+`jb` instead, and the harness never needs `K`:
 
-In the per-process semantics these answers are arbitrary oracle data.
-Extend the FFI model in `ConPastel/Spec.lean` (`Stdio`, `stdioOracle`) to a
-parallel oracle whose answers to the new calls are unconstrained, or come from
-an oracle script per process.
+| call | caller | conf | buffer | effect |
+|---|---|---|---|---|
+| `spawn` | after phase 1 | `""` | `jb` | forks the workers; `jb[0] = 0` in the parent, `1` in a worker |
+| `claim` | worker | `""` | `jb` | `jb[1..8]` = the next index `k`, little-endian |
+| `report` | worker | `"1"`, `"2"` or `"3"` | `jb` (still holding `k`) | records the code of job `k` |
+| `results` | parent | `""` | `buf` (2 bytes) | the table, one entry per call, with `read`'s protocol |
+| `abort` | parent | `""` | `buf` | the harness exits with code 3 |
+
+* Job codes (`ConPastel/Par/Entry.lean`, `runJob`): `1` the job passes,
+  `2` it fails, `3` there is no job `k` (`k ≥ K`). A worker loops
+  `claim`, `report` until it reports `3`, then ends.
+* The harness serves `results` only after every worker exited with status 0
+  (else it exits with code 3), and serves the table entries `1`/`2` in index
+  order up to the first `3` (an entry never reported makes it exit with code 3).
+* The parent decides with `verdictCode` on the list it read: `0` writes
+  `accepted`, `1` writes `rejected`, `2` (not a table of its jobs: wrong
+  length, or a code other than `1`/`2`) calls `abort`.
+* If phase 1 fails (the input does not parse), the parent writes `rejected`
+  without spawning.
+
+In the per-process semantics these answers are oracle data. The FFI model
+(`ParIO`) is a script per process: the input, the `spawn` answer, the list of
+`claim` answers, and the table `results` serves. A process's actual run is its
+run under the script of the answers it actually got, so a theorem for every
+script covers every harness behaviour. Running out of `claim` answers is an
+FFI failure (`.final`), as is `abort`.
 
 ## 4. Proof plan
 
