@@ -348,3 +348,102 @@ theorem leanMixHash_eq_F (h k : UInt64) : ConPastel.leanMixHash h k = leanMixHas
 end ConPastel.Impl
 
 cake_replace ConPastel.leanMixHash ConPastel.Impl.leanMixHashF ConPastel.Impl.leanMixHash_eq_F
+
+/-! ## String hashing in linear time
+
+`leanStringHash s` (MurmurHash64A of the UTF-8 bytes) read the bytes with
+`ByteArray.toList`, which appends one byte at a time (quadratic); every name
+built hashes its string, and con-leche's name constants are rebuilt at each use
+in the translation (`NatBinOp.ofName?` builds fourteen per call). Here the bytes
+are the byte array's own list, and the hash runs on the constant's limbs and
+native shifts. -/
+
+namespace ConPastel.Impl
+
+/-- `leWord` of eight bytes, by native shifts. -/
+def leWord8 (b₀ b₁ b₂ b₃ b₄ b₅ b₆ b₇ : UInt8) : UInt64 :=
+  0 ^^^ u8toU64 b₀ ^^^ shl8 (u8toU64 b₁) ^^^ shl16 (u8toU64 b₂) ^^^ shl24 (u8toU64 b₃) ^^^
+    shl32 (u8toU64 b₄) ^^^ shl40 (u8toU64 b₅) ^^^ shl48 (u8toU64 b₆) ^^^ shl56 (u8toU64 b₇)
+
+theorem leWord8_eq (b₀ b₁ b₂ b₃ b₄ b₅ b₆ b₇ : UInt8) :
+    ConPastel.leWord [b₀, b₁, b₂, b₃, b₄, b₅, b₆, b₇] = leWord8 b₀ b₁ b₂ b₃ b₄ b₅ b₆ b₇ := by
+  simp only [ConPastel.leWord, leWord8, List.zipIdx, List.foldl, ← u8_toUInt64_eq]
+  have e : ∀ (x : UInt64) (k : Nat), k < 64 → x <<< (UInt64.ofNat k) = ⟨x.toBitVec <<< k⟩ := by
+    intro x k hk; apply UInt64.toBitVec_inj.mp
+    simp [Nat.mod_eq_of_lt hk]
+  simp only [Nat.zero_add, Nat.reduceAdd, Nat.reduceMul, Nat.toUInt64]
+  rw [e _ 0 (by decide), e _ 8 (by decide), e _ 16 (by decide), e _ 24 (by decide), e _ 32 (by decide),
+    e _ 40 (by decide), e _ 48 (by decide), e _ 56 (by decide)]
+  simp only [BitVec.shiftLeft_zero]; rfl
+
+/-- The block loop with the constant's limbs (`mulMix`) and native shifts. -/
+def murmurBlocksF (h : UInt64) : List UInt8 → UInt64 × List UInt8
+  | b₀ :: b₁ :: b₂ :: b₃ :: b₄ :: b₅ :: b₆ :: b₇ :: rest =>
+    let k := mulMix (leWord8 b₀ b₁ b₂ b₃ b₄ b₅ b₆ b₇)
+    let k := mulMix (k ^^^ shr47 k)
+    murmurBlocksF (mulMix (h ^^^ k)) rest
+  | tail => (h, tail)
+theorem mulMix_eq' (a : UInt64) : a * 0xc6a4a7935bd1e995 = mulMix a := mulMix_eq a
+theorem shr47_eq (x : UInt64) : x >>> 47 = shr47 x := by
+  apply UInt64.toBitVec_inj.mp; simp [shr47]
+
+theorem murmurBlocks_eq_F : ∀ (h : UInt64) (l : List UInt8),
+    ConPastel.murmurBlocks 0xc6a4a7935bd1e995 h l = murmurBlocksF h l
+  | h, b₀ :: b₁ :: b₂ :: b₃ :: b₄ :: b₅ :: b₆ :: b₇ :: rest => by
+    rw [ConPastel.murmurBlocks, murmurBlocksF]
+    simp only [leWord8_eq, mulMix_eq', shr47_eq]
+    exact murmurBlocks_eq_F _ rest
+  | _, [] => rfl
+  | _, [_] => rfl
+  | _, [_, _] => rfl
+  | _, [_, _, _] => rfl
+  | _, [_, _, _, _] => rfl
+  | _, [_, _, _, _, _] => rfl
+  | _, [_, _, _, _, _, _] => rfl
+  | _, [_, _, _, _, _, _, _] => rfl
+
+/-- MurmurHash64A with the constant's limbs and native shifts. -/
+def murmurHash64AF (bytes : List UInt8) (seed : UInt64) : UInt64 :=
+  let h := seed ^^^ mulMix (UInt64.ofNat bytes.length)
+  let p := murmurBlocksF h bytes
+  let h := if p.2.isEmpty then p.1 else mulMix (p.1 ^^^ ConPastel.leWord p.2)
+  let h := mulMix (h ^^^ shr47 h)
+  h ^^^ shr47 h
+
+theorem murmurHash64A_eq_F (bytes : List UInt8) (seed : UInt64) :
+    ConPastel.murmurHash64A bytes seed = murmurHash64AF bytes seed := by
+  unfold ConPastel.murmurHash64A murmurHash64AF
+  simp only [murmurBlocks_eq_F, mulMix_eq', shr47_eq]
+
+theorem byteArray_toList' (bs : ByteArray) : bs.toList = bs.data.toList := by
+  suffices h : ∀ (i : Nat) (r : List UInt8),
+      ByteArray.toList.loop bs i r = r.reverse ++ bs.data.toList.drop i by
+    simp [ByteArray.toList, h]
+  intro i r
+  induction h : bs.size - i generalizing i r with
+  | zero =>
+    unfold ByteArray.toList.loop
+    have : ¬ i < bs.size := by omega
+    simp only [this, ite_false]
+    have : bs.data.toList.length ≤ i := by
+      rw [Array.length_toList]; exact Nat.le_of_not_lt this
+    simp [List.drop_eq_nil_of_le this]
+  | succ n ih =>
+    unfold ByteArray.toList.loop
+    have hi : i < bs.size := by omega
+    simp only [hi, ite_true]
+    rw [ih (i+1) _ (by omega)]
+    have hi2 : i < bs.data.size := hi
+    have hi' : i < bs.data.toList.length := by rw [Array.length_toList]; exact hi2
+    simp [ByteArray.get!, List.drop_eq_getElem_cons hi', getElem!_def, Array.getElem?_eq_getElem hi2]
+
+/-- `leanStringHash`, in linear time. -/
+def leanStringHashF (s : String) : UInt64 := murmurHash64AF s.toByteArray.data.toList 11
+
+theorem leanStringHash_eq_F (s : String) : ConPastel.leanStringHash s = leanStringHashF s := by
+  unfold ConPastel.leanStringHash leanStringHashF
+  rw [byteArray_toList', murmurHash64A_eq_F]
+
+end ConPastel.Impl
+
+cake_replace ConPastel.leanStringHash ConPastel.Impl.leanStringHashF ConPastel.Impl.leanStringHash_eq_F
