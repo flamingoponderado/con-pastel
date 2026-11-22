@@ -80,6 +80,10 @@ void cml_clear(void) {
   __builtin___clear_cache(&cake_codebuffer_begin, &cake_codebuffer_end);
 }
 
+#ifndef CON_PASTEL_HEAP_MIB
+#define CON_PASTEL_HEAP_MIB 8192
+#endif
+
 static unsigned long env_mib(const char *name, unsigned long dflt) {
   const char *s = getenv(name);
   if (s == NULL) return dflt;
@@ -95,10 +99,14 @@ static unsigned long env_mib(const char *name, unsigned long dflt) {
 int main(int argc, char **argv) {
   (void)argc; (void)argv;
   const unsigned long mib = 1024UL * 1024UL;
-  /* defaults: 4 GiB heap, 4 GiB stack. The copying collector first runs
-     when the heap is full, so every run touches the whole heap: a larger
-     default costs memory and page faults on every input. */
-  unsigned long heap_sz = env_mib("CML_HEAP_SIZE", 4096) * mib;
+  /* defaults: CON_PASTEL_HEAP_MIB heap (8 GiB), 4 GiB stack. The copying
+     collector runs when a semispace is full, so a run touches as much of the
+     heap as it allocates, up to all of it. The cost of a collection is the
+     live data, and their number grows sharply as the live data approach the
+     semispace: natmul_deep_major (1.6 GB live) spends 63 s of 74 s collecting
+     with 4 GiB, and runs in 37 s with 8 GiB. Runs that allocate little are
+     unaffected (the mapping is MAP_NORESERVE). */
+  unsigned long heap_sz = env_mib("CML_HEAP_SIZE", CON_PASTEL_HEAP_MIB) * mib;
   unsigned long stack_sz = env_mib("CML_STACK_SIZE", 4096) * mib;
   if (heap_sz < mib || stack_sz < mib) {
     fprintf(stderr, "con-pastel: heap and stack must be at least 1 MiB each\n");
