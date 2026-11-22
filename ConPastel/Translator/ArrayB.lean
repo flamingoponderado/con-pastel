@@ -43,14 +43,17 @@ theorem getInternal_eq (a : Array α) (i : Nat) (h : i < a.size) : a.getInternal
   rfl
 
 /-- `Array.get!Internal`: the tree lookup, the default out of range. -/
-def arrGetBang [Inhabited α] (a : Array α) (i : Nat) : α := ((toA a).get? i).getD default
+def arrGetBang [Inhabited α] (a : Array α) (i : Nat) : α :=
+  match (toA a).get? i with
+  | some x => x
+  | none => default
 
 theorem getBang_eq [Inhabited α] (a : Array α) (i : Nat) : a.get!Internal i = arrGetBang a i := by
   unfold arrGetBang; rw [toA_get?]
   unfold Array.get!Internal Array.getD
   split
   · rename_i h; rw [Array.getElem?_eq_getElem h]; rfl
-  · rename_i h; rw [Array.getElem?_eq_none (by omega)]; rfl
+  · rename_i h; rw [Array.getElem?_eq_none (by omega)]
 
 theorem canon_set (a : Array α) (i : Nat) (y : α) :
     A.ofList ((toA a).set i y).toList = (toA a).set i y := by
