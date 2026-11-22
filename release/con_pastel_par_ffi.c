@@ -37,6 +37,9 @@
 */
 #define main con_pastel_sequential_main
 #define ffiwrite con_pastel_base_ffiwrite
+/* Each worker's collector writes into its whole heap (copy on write after
+   fork), so the parallel checker keeps the smaller 4 GiB default heap. */
+#define CON_PASTEL_HEAP_MIB 4096
 #include "con_pastel_ffi.c"
 #undef main
 #undef ffiwrite
