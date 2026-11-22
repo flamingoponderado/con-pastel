@@ -228,12 +228,13 @@ def u64DecEq (a b : UInt64) : Decidable (a = b) :=
 theorem u64_decEq_eq (a b : UInt64) : UInt64.decEq a b = u64DecEq a b := Subsingleton.elim _ _
 
 /-- `UInt64.toBitVec` from the word's value. -/
-/- `BitVec.ofNatLT`, not `BitVec.ofNat`: no reduction modulo `2 ^ 64` (a bignum),
-so a `UInt64` comparison is a word-to-integer conversion and an integer test. -/
-def u64toBV (a : UInt64) : BitVec 64 := BitVec.ofNatLT a.toNat a.toNat_lt
+def u64toBV (a : UInt64) : BitVec 64 := BitVec.ofNat 64 a.toNat
 
 theorem u64_toBitVec_eq (a : UInt64) : a.toBitVec = u64toBV a := by
-  apply BitVec.eq_of_toNat_eq; simp [u64toBV]
+  unfold u64toBV
+  apply BitVec.eq_of_toNat_eq
+  rw [BitVec.toNat_ofNat]
+  exact (Nat.mod_eq_of_lt a.toBitVec.isLt).symm
 
 /-- `UInt8.toUInt64` through `UInt64.ofNat`. -/
 def u8toU64 (a : UInt8) : UInt64 := UInt64.ofNat a.toNat
