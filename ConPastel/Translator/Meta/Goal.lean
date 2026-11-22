@@ -598,6 +598,23 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
       let motive ← withLocalDeclD `x α fun x => do mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp inv x])
       g.assign (← mkEqMP (← mkCongrArg motive (← mkEqSymm heq)) (← instantiateMVars gb))
       return
+  -- `Option.getD o d` as `match o with | some x => x | none => d`: the default
+  -- is evaluated only when needed (an argument of a call would be evaluated
+  -- first; a default `Expr` is a node built and hashed at every lookup)
+  if t.isAppOfArity ``Option.getD 3 then
+    let α := t.appFn!.appFn!.appArg!
+    let o := t.appFn!.appArg!
+    let d := t.appArg!
+    let motive ← withLocalDeclD `_o (← mkAppM ``Option #[α]) fun x => mkLambdaFVars #[x] α
+    let idf ← withLocalDeclD `x α fun x => mkLambdaFVars #[x] x
+    let t' ← mkAppOptM ``Option.casesOn #[α, motive, o, d, idf]
+    return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
+  -- `List.getD l i d` likewise, through `l[i]?`
+  if t.isAppOfArity ``List.getD 4 then
+    if let some t' ← unfoldDefinition? t then
+      if t'.headBeta.isAppOfArity ``Option.getD 3 then
+        let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'.headBeta])
+        return ← solve g'
   -- `Option.get o h` as `Option.getD o default` for inhabited types
   if let (``Option.get, #[α, o, h]) := t.getAppFnArgs then
     if let some dflt ← defaultOf? α then
