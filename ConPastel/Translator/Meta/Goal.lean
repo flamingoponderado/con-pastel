@@ -104,6 +104,12 @@ structure GSt where
   /-- The next monadic goal is solved as a plain value (the inside of a
   pushed application, `solveMonadic`). -/
   skipMonadic : Bool := false
+  /-- Inside a constructor branch of a match on the local `major`: the
+  constructor applied to the branch's fields, the local, and `major = C fields`.
+  Lean writes a wildcard arm `| e => … e …` as `C fields` in each constructor's
+  branch; that term is translated as `major`'s value, not rebuilt (a rebuilt
+  node recomputes its cached fields and gets a fresh identity token). -/
+  aliases : Array (Expr × GLVar × Expr) := #[]
 
 abbrev GoalM := StateRefT GSt (ReaderT GCtx MetaM)
 
@@ -507,6 +513,21 @@ partial def solveCore (g : MVarId) : GoalM Unit := do
       return ← solve (← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t']))
   -- ghost values: `()`, whatever the term
   let invW ← whnfR inv
+  -- the scrutinee of an enclosing match, rebuilt from its fields: its own value
+  if !(← get).aliases.isEmpty && t.isApp then
+    if let some (_, lv, heq) := (← get).aliases.find? (fun (c, _, _) => c == t) then
+      if !lv.lazy then
+        let hl ← proveLookupG env lv.cname lv.value (← read).unfoldRec
+        let pf ← evalLocal env lv hl
+        let pfTy ← inferType pf
+        let (``Eval, #[_, ce, pP]) := pfTy.getAppFnArgs | throwError "alias: {pfTy}"
+        let .app P major := pP | throwError "alias: {pP}"
+        let motive ← withLocalDeclD `x (← inferType major) fun x => do
+          mkLambdaFVars #[x] (← mkAppM ``Eval #[env, ce, mkApp P x])
+        let pf' ← mkEqNDRec motive pf heq
+        if ← isDefEq (← inferType pf') (← g.getType) then
+          g.assign pf'
+          return
   -- a lazy field (`cake_lazy`): the closure `fun _ : Unit => t`
   if invW.isAppOfArity ``LAZY 2 then
     let lam ← withLocalDeclD `u (mkConst ``Unit) fun u => mkLambdaFVars #[u] t
@@ -1826,11 +1847,13 @@ partial def solveCases (g : MVarId) (env inv : Expr) (d : DatatypeInfo) (fn : Ex
         let branchT := (mkAppN alts[k]! as).headBeta
         let gb ← mkFreshExprMVar (← mkAppM ``Eval #[envK, bk, mkApp (← invAt ctorApp) branchT])
         let saved := (← get).locals
+        let savedA := (← get).aliases
+        modify fun s => { s with aliases := s.aliases.push (ctorApp, lv, heq) }
         for i in [0:dataAs.length] do
           let lv : GLVar := { fvar := dataAs[i]!, cname := names[i]!, value := ws[i]!, rel := hws[i]!, lazy := lazyF[i]! }
           modify fun s => { s with locals := s.locals.push lv }
         solve gb.mvarId!
-        modify fun s => { s with locals := saved }
+        modify fun s => { s with locals := saved, aliases := savedA }
         mkLambdaFVars (as ++ #[heq] ++ zs ++ ws ++ hzs ++ hws) (← instantiateMVars gb)
     lemArgs := lemArgs ++ (cnames ++ names).toArray.map (some ∘ mlString) ++ #[some hnd, some bk, some hk]
   assignProof g (← mkAppOptM (d.name ++ `cake_mat) lemArgs)
