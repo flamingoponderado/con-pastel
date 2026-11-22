@@ -475,6 +475,128 @@ def evalLocal (env : Expr) (lv : GLVar) (hl : Expr) : MetaM Expr := do
   let .app P _ := rty | throwError "bad local relation {rty}"
   mkAppOptM ``Eval_var #[env, shortIdent lv.cname, lv.value, P, hl, lv.rel]
 
+/-! ## Cached fields of closed constructor terms, as literals
+
+A constructor application whose arguments are closed (a name such as
+`Nat.zero`, built from literals) has cached fields that are constants. They are
+computed here and stored as literals, so that the program does not hash the
+same name at every use. The proof: the field, with the stored fields of its
+closed children unfolded, is `M K₁ … Kₙ` for the runtime-assumed functions
+`Kᵢ` (`mixHash`, `String.hash`); by the assumptions (`funext`) it is
+`M K'₁ … K'ₙ`, whose value the kernel computes (`decide`). -/
+
+private unsafe def evalU64Unsafe (e : Expr) : MetaM UInt64 :=
+  Lean.Meta.evalExpr UInt64 (mkConst ``UInt64) e
+
+@[implemented_by evalU64Unsafe]
+private opaque evalU64 (e : Expr) : MetaM UInt64
+
+private unsafe def evalNatUnsafe (e : Expr) : MetaM Nat :=
+  Lean.Meta.evalExpr Nat (mkConst ``Nat) e
+
+@[implemented_by evalNatUnsafe]
+private opaque evalNat (e : Expr) : MetaM Nat
+
+/-- `h : ∀ xs, K xs = K' xs` as `K = K'`. -/
+partial def funextAll (h : Expr) : MetaM Expr := do
+  match ← whnf (← inferType h) with
+  | .forallE n d _ _ => withLocalDeclD n d fun x => do
+      let inner ← funextAll (mkApp h x)
+      mkAppM ``funext #[← mkLambdaFVars #[x] inner]
+  | _ => pure h
+
+/-- `e` with the cached fields of closed constructor terms unfolded (the
+children's stored fields, recursively) and `Hashable.hash` instances unfolded;
+definitionally equal to `e`. -/
+partial def expandCached (e : Expr) : MetaM Expr := do
+  let env ← getEnv
+  let budget ← IO.mkRef (64 : Nat)
+  Meta.transform e (post := fun x => do
+    if (← budget.get) == 0 then throwError "expandCached: budget exhausted"
+    if let .const f _ := x.getAppFn then
+      if (cachedFieldOf? env f).isSome && x.getAppNumArgs ≥ 1 then
+        let a := x.appArg!
+        if !a.hasFVar && !a.hasMVar then
+          let a' ← whnf a
+          if let some r ← unfoldDefinition? (mkApp x.appFn! a') then
+            budget.modify (· - 1)
+            return .visit (← whnfCore r)
+      if f == ``Hashable.hash then
+        if let some r ← unfoldProjInst? x then
+          return .visit r.headBeta
+    return .done x)
+
+/-- The literal value of the closed `UInt64` or `Nat` term `rhs`, with a proof
+`rhs = lit`, by the runtime assumptions in scope. -/
+def foldClosed? (assumed : Array (Name × Name × Expr)) (rhs : Expr) : MetaM (Option (Expr × Expr)) := do
+  let rz ← instantiateMVars (← zetaReduce (← instantiateMVars rhs))
+  if rz.hasFVar || rz.hasMVar then return none
+  if rz.isAppOf ``OfNat.ofNat || rz.isAppOf ``UInt64.ofNat || rz.isRawNatLit then return none
+  let ty ← whnfR (← inferType rz)
+  let isU64 := ty.isConstOf ``UInt64
+  unless isU64 || ty.isConstOf ``Nat do return none
+  try
+    let lit ← if isU64 then do
+        let n := (← evalU64 rz).toNat
+        pure (mkApp (mkConst ``UInt64.ofNat) (mkRawNatLit n))
+      else pure (mkRawNatLit (← evalNat rz))
+    let e0 ← expandCached rz
+    -- replace each assumed function by its specification, with `e₀ = eₙ`
+    let mut cur := e0
+    let mut pf ← mkEqRefl e0
+    for (k, k', h) in assumed do
+      if !cur.containsConst (· == k) then continue
+      let kty ← inferType (mkConst k)
+      let next := cur.replace fun x => if x.isConstOf k then some (mkConst k') else none
+      let m ← withLocalDeclD `k kty fun kv => do
+        mkLambdaFVars #[kv] (cur.replace fun x => if x.isConstOf k then some kv else none)
+      let step ← mkAppM ``congrArg #[m, ← funextAll h]
+      let step ← mkExpectedTypeHint step (← mkEq cur next)
+      pf ← mkEqTrans pf step
+      cur := next
+    let goal ← mkEq cur lit
+    let inst ← synthInstance (mkApp (mkConst ``Decidable) goal)
+    let dec := mkApp2 (mkConst ``Decidable.decide) goal inst
+    unless ← ofExceptKernelException (Kernel.isDefEq (← getEnv) {} dec (mkConst ``Bool.true)) do
+      return none
+    let pdec := mkApp3 (mkConst ``of_decide_eq_true) goal inst
+      (mkApp2 (mkConst ``Eq.refl [1]) (mkConst ``Bool) (mkConst ``Bool.true))
+    let full ← mkEqTrans pf pdec
+    return some (lit, ← mkExpectedTypeHint full (← mkEq rhs lit))
+  catch _ => return none
+
+/-- `Eval env ?ce (cI rhs)` for a closed `rhs`, through its literal value
+(`foldClosed?`); `solveLit` solves the literal's goal. -/
+def foldCachedEval (env cI rhs : Expr) (fold : Expr × Expr)
+    (solveLit : MVarId → GoalM Unit) : GoalM Expr := do
+  let (lit, h) := fold
+  let (code, gc) ← newEvalGoal env (mkApp cI lit)
+  solveLit gc
+  let plit ← instantiateMVars (mkMVar gc)
+  let code ← instantiateMVars code
+  let motive ← withLocalDeclD `x (← inferType rhs) fun x => do
+    mkLambdaFVars #[x] (← mkAppM ``Eval #[env, code, mkApp cI x])
+  mkEqNDRec motive plit (← mkEqSymm h)
+
+/-- The literal values of all cached fields of the closed constructor term `t`
+(`foldClosed?`), if each has one. -/
+def foldAllCached? (assumed : Array (Name × Name × Expr)) (cached : Array Name) (t : Expr) :
+    MetaM (Option (Array (Expr × Expr))) := do
+  if t.hasFVar || t.hasMVar then return none
+  let mut out := #[]
+  for f in cached do
+    let some rhs ← unfoldDefinition? (mkApp (mkConst f) t) | return none
+    let rhs ← whnfCore rhs
+    -- bounded: a field that does not compute quickly is left to the program
+    let r ← tryCatchRuntimeEx
+      (withTheReader Core.Context (fun c => { c with maxHeartbeats := 2000 * 1000 }) do
+        Core.withCurrHeartbeats (foldClosed? assumed rhs))
+      fun _ => pure none
+    let some r := r | return none
+    out := out.push r
+  cakeLog s!"[fold] {((← ppExpr t).pretty.replace "\n" " ").take 120}"
+  return some out
+
 -- the solver block compiles past the default limit (LCNF)
 set_option maxHeartbeats 1000000 in
 mutual
@@ -2582,7 +2704,13 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           let fields := args[ci.numParams:].toArray
           -- cached fields: bind the data fields first (each is evaluated once, and the
           -- cached values read the children's stored fields)
-          if !d.cached.isEmpty then
+          -- a closed term whose cached fields are all constants: literals, no binding
+          -- (not on types with identity tokens: the node is built at every use anyway,
+          -- and for con-leche's `Expr` the proof of the folded term does not
+          -- check in reasonable time)
+          let folds ← if d.cached.isEmpty || d.token then pure none
+            else foldAllCached? ctx.assumed d.cached t
+          if !d.cached.isEmpty && folds.isNone then
             let pending := (List.range fields.size).filter fun j => dataFlags[j]! && !fields[j]!.isFVar
             if !pending.isEmpty then
               let rec bindAll (js : List Nat) (fs : Array Expr) (acc : Array Expr) : MetaM Expr := do
@@ -2597,9 +2725,14 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
             let some rhs ← unfoldDefinition? (mkApp (mkConst d.cached[c]!) t)
               | throwError "cannot unfold cached field {d.cached[c]!}"
             let rhs ← whnfCore rhs
-            let (_, gc) ← newEvalGoal env (mkApp (mkConst (d.name ++ Name.mkSimple s!"c{c}")) rhs)
-            solve gc
-            cpfs := cpfs.push (← instantiateMVars (mkMVar gc))
+            let cI := mkConst (d.name ++ Name.mkSimple s!"c{c}")
+            if let some fs := folds then
+              -- a closed term's cached field: its value, as a literal
+              cpfs := cpfs.push (← foldCachedEval env cI rhs fs[c]! solve)
+            else
+              let (_, gc) ← newEvalGoal env (mkApp cI rhs)
+              solve gc
+              cpfs := cpfs.push (← instantiateMVars (mkMVar gc))
           -- the identity token: a fresh reference
           if d.token then
             cpfs := cpfs.push (← mkAppM ``Eval_tok #[env])
