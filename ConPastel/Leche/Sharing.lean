@@ -1193,6 +1193,18 @@ theorem replaceFVarsP_rw (f : Nat → Option Expr) (e : Expr) :
         (fun _ idx ty _ => some ((f idx).getD (.fvar idx ty))) id e 0 := by
   induction e <;> (rw [Expr.replaceFVarsP, rwP]; simp_all)
 
+def scaLeaf (n : Name) (r : Expr) (e : Expr) (_ : Nat) : Expr :=
+  match e with
+  | .const c us .. => if c = n ∧ us = [] then r else e
+  | _ => e
+
+/-- `Expr.substConstAll` is the plain walk: free variables are not entered,
+constants are the leaves. -/
+theorem substConstAll_rw (n : Name) (r : Expr) (e : Expr) :
+    Expr.substConstAll n r e =
+      rwP (fun _ _ => false) (scaLeaf n r) (fun e _ _ _ => some e) id e 0 := by
+  induction e <;> (unfold Expr.substConstAll; rw [rwP]; simp_all [scaLeaf])
+
 theorem instLevelParamsP_rw (ks : List Name) (us : List Level) (e : Expr) :
     Expr.instLevelParamsP ks us e =
       rwP (fun e _ => !e.hasLP) (ilpLeaf ks us) (fun _ _ _ _ => none) id e 0 := by
@@ -1245,6 +1257,15 @@ theorem abstractRangeP_eq_M (d k : Nat) (e : Expr) (c : Nat) :
 theorem replaceFVarsP_eq_M (f : Nat → Option Expr) (e : Expr) :
     Expr.replaceFVarsP f e = replaceFVarsM f e := by
   rw [replaceFVarsP_rw, replaceFVarsM, rwM_eq]
+/-- `Expr.substConstAll`, memoised (the certificate proofs it substitutes into
+are shared DAGs: the plain walk re-traverses every shared subterm). -/
+def substConstAllM (n : Name) (r : Expr) (e : Expr) : Expr :=
+  (rwM (fun _ _ => false) (scaLeaf n r) (fun e _ _ _ => some e) id (.leaf []) e 0).1
+
+theorem substConstAll_eq_M (n : Name) (r : Expr) (e : Expr) :
+    Expr.substConstAll n r e = substConstAllM n r e := by
+  rw [substConstAll_rw, substConstAllM, rwM_eq]
+
 theorem instLevelParamsP_eq_M (ks : List Name) (us : List Level) (e : Expr) :
     Expr.instLevelParamsP ks us e = instLevelParamsM ks us e := by
   rw [instLevelParamsP_rw, instLevelParamsM, rwM_eq]
@@ -1647,3 +1668,4 @@ end ConPastel.Leche
 
 cake_replace ConLeche.Expr.hasLooseBVarB ConPastel.Impl.hasLooseBVarBM ConPastel.Impl.hasLooseBVarB_eq_M
 cake_replace ConLeche.Expr.hasLooseBVarInP ConPastel.Impl.hasLooseBVarInM ConPastel.Impl.hasLooseBVarInP_eq_M
+cake_replace ConLeche.Expr.substConstAll ConPastel.Impl.substConstAllM ConPastel.Impl.substConstAll_eq_M
