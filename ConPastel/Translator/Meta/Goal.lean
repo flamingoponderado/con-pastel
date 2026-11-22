@@ -1011,6 +1011,12 @@ partial def applyEvalM (g : MVarId) (thm : Name) (hname : String) (named : List 
     unless ← isProp ty do continue
     let isEvalGoal ← forallTelescope ty fun _ b => do return (← whnfR b).isAppOf ``Eval
     if !isEvalGoal then
+      if ty.isAppOf ``HasListCons then
+        -- the list constructors, from the translation's context
+        unless ← isDefEq (← inferType (← read).hlist) ty do
+          throwError "applyEvalM: {thm}: list constructors {ty}"
+        g'.assign (← read).hlist
+      else
       -- side conditions on literals (disequalities, bounds, distinctness)
       g'.assign (← closeWith ty (← `(tactic| decide)))
     else
@@ -1286,7 +1292,8 @@ partial def solveMonadic (g : MVarId) (env inv t : Expr) : GoalM Bool := do
     (``ConPastel.Translator.tGetB, ``ConPastel.Translator.EvalM_tGetB),
     (``ConPastel.Translator.tSetB, ``ConPastel.Translator.EvalM_tSetB),
     (``ConPastel.Translator.tSetSize, ``ConPastel.Translator.EvalM_tSetSize),
-    (``ConPastel.Translator.tRealloc, ``ConPastel.Translator.EvalM_tRealloc)]
+    (``ConPastel.Translator.tRealloc, ``ConPastel.Translator.EvalM_tRealloc),
+    (``ConPastel.Translator.tReadAll, ``ConPastel.Translator.EvalM_tReadAll)]
   if isTbl then
     if let some (_, thm) := tblPrims.find? (·.1 == cn) then
       let hname ← freshCName "h"
