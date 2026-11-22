@@ -271,8 +271,9 @@ namespace ExprMemo
 variable {α : Type}
 
 /-- The trie's key bits for `e`: low bits of its hash (the top half of the
-packed `data` word; the low half holds the variable ranges). -/
-def key (e : Expr) : Nat := (e.data.toNat / 4294967296) % 65536
+packed `data` word; the low half holds the variable ranges), by word operations
+(the word as an integer is a bignum when its top bits are set). -/
+def key (e : Expr) : Nat := (ConPastel.Impl.shr32 e.data &&& UInt64.ofNat 65535).toNat
 
 def findL (e : Expr) : List (Expr × α) → Option α
   | [] => none
