@@ -2490,9 +2490,19 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           -- registered datatypes have their own `casesOn` (and projections become `casesOn`)
           if !(← isProp (← inferType major)) && (mty.hasFVar || (← findDatatype? mty).isNone) then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
-            let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
-            let t' := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
-              args[ii.numParams + 3:].toArray).headBeta
+            -- a scrutinee that is not a variable is bound first: projecting it
+            -- directly would evaluate it once per projection (exponential in a
+            -- recursion such as `let (bs, e) := f b; …`)
+            let mtyO ← inferType major
+            let t' ← if major.isFVar then do
+                let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
+                pure (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
+                  args[ii.numParams + 3:].toArray).headBeta
+              else withLocalDeclD `z mtyO fun z => do
+                let projs := (List.range ci.numFields).map fun i => Expr.proj tn i z
+                let b := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
+                  args[ii.numParams + 3:].toArray).headBeta
+                pure (Expr.letE `z mtyO major (b.abstract #[z]) false)
             let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
             return ← solve g'
   -- lists
