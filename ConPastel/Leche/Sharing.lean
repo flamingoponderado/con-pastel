@@ -285,13 +285,37 @@ def find? (e : Expr) : ExprMemo α → Nat → Option α
   | .leaf l, _ => findL e l
   | .node a b, k => if k % 2 = 0 then find? e a (k / 2) else find? e b (k / 2)
 
-/-- Store `v` for `e` (at depth `d`, the key's next bit choosing the branch). -/
+/-- `k` shifted right by `n` bits. -/
+def kshift (k : Nat) : Nat → Nat
+  | 0 => k
+  | n + 1 => kshift (k / 2) n
+
+/-- Whether `l` has fewer than `n` entries. -/
+def shortL {β : Type} : List β → Nat → Bool
+  | _, 0 => false
+  | [], _ + 1 => true
+  | _ :: t, n + 1 => shortL t n
+
+/-- A full leaf's entries, split on their key bit at depth `d` (the bit
+`15 - d` of the key: `insert` is called at depth 16 and halves the key at
+each level). -/
+def splitL (d : Nat) : List (Expr × α) → List (Expr × α) × List (Expr × α)
+  | [] => ([], [])
+  | p :: t =>
+    let r := splitL d t
+    if kshift (key p.1) (15 - d) % 2 = 0 then (p :: r.1, r.2) else (r.1, p :: r.2)
+
+/-- Store `v` for `e` (at depth `d`, the key's next bit choosing the branch).
+A leaf holds up to 8 entries before it is split, so a small table stays
+shallow. -/
 def insert (e : Expr) (v : α) : Nat → ExprMemo α → Nat → ExprMemo α
   | 0, .leaf l, _ => .leaf ((e, v) :: l)
   | 0, t@(.node ..), _ => t
   | d + 1, .leaf l, k =>
-    if k % 2 = 0 then .node (insert e v d (.leaf l) (k / 2)) (.leaf [])
-    else .node (.leaf l) (insert e v d (.leaf []) (k / 2))
+    if shortL l 8 then .leaf ((e, v) :: l) else
+    let s := splitL d l
+    if k % 2 = 0 then .node (insert e v d (.leaf s.1) (k / 2)) (.leaf s.2)
+    else .node (.leaf s.1) (insert e v d (.leaf s.2) (k / 2))
   | d + 1, .node a b, k =>
     if k % 2 = 0 then .node (insert e v d a (k / 2)) b
     else .node a (insert e v d b (k / 2))
@@ -320,6 +344,16 @@ theorem find?_sound {P : Expr → α → Prop} {e : Expr} :
     · exact find?_sound ht.1 h
     · exact find?_sound ht.2 h
 
+theorem splitL_mem {d : Nat} {p : Expr × α} :
+    ∀ {l : List (Expr × α)}, (p ∈ (splitL d l).1 → p ∈ l) ∧ (p ∈ (splitL d l).2 → p ∈ l)
+  | [] => by simp [splitL]
+  | q :: t => by
+    have ih := @splitL_mem d p t
+    simp only [splitL]
+    split
+    · exact ⟨fun h => by simp at h; rcases h with h | h <;> simp [h, ih.1], fun h => by simp [ih.2 h]⟩
+    · exact ⟨fun h => by simp [ih.1 h], fun h => by simp at h; rcases h with h | h <;> simp [h, ih.2]⟩
+
 theorem insert_all {P : Expr → α → Prop} {e : Expr} {v : α} (hv : P e v) :
     ∀ {d : Nat} {t : ExprMemo α} {k : Nat}, All P t → All P (insert e v d t k)
   | 0, .leaf l, _, ht => by
@@ -331,8 +365,15 @@ theorem insert_all {P : Expr → α → Prop} {e : Expr} {v : α} (hv : P e v) :
   | d + 1, .leaf l, k, ht => by
     unfold insert
     split
-    · exact ⟨insert_all hv ht, by simp [All]⟩
-    · exact ⟨ht, insert_all hv (by simp [All])⟩
+    · intro p hp; simp at hp
+      rcases hp with rfl | hp
+      · exact hv
+      · exact ht _ hp
+    · have h1 : All P (.leaf (splitL d l).1) := fun p hp => ht p (splitL_mem.1 hp)
+      have h2 : All P (.leaf (splitL d l).2) := fun p hp => ht p (splitL_mem.2 hp)
+      split
+      · exact ⟨insert_all hv h1, h2⟩
+      · exact ⟨h1, insert_all hv h2⟩
   | d + 1, .node a b, k, ht => by
     unfold insert
     split
