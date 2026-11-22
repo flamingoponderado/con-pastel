@@ -993,6 +993,8 @@ def rwM (cut : Expr → Nat → Bool) (leaf : Expr → Nat → Expr)
     (lf : Expr → Nat → Expr → Nat → Option Expr) (bump : Nat → Nat)
     (t : RMemo) (e : Expr) (c : Nat) : Expr × RMemo :=
   if cut e c then (e, t) else
+  -- small nodes: the plain walk, no memo (the memo pays only on shared subterms)
+  if Expr.depthP e < 6 then (rwP cut leaf lf bump e c, t) else
   match e with
   | .bvar .. | .sort .. | .const .. | .lit .. => (leaf e c, t)
   | .fvar idx ty .. =>
@@ -1063,12 +1065,16 @@ theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump 
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
+    · split
+      · exact ⟨rfl, ht⟩
+      · rename_i hcut _; exact ⟨by rw [rwP]; simp [hcut], ht⟩
   | fvar idx ty ih =>
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut
+    · split
+      · exact ⟨rfl, ht⟩
+      rename_i hcut _
       split
       · rename_i r hlf; exact ⟨by rw [rwP]; simp [hcut, hlf], ht⟩
       · rename_i hlf
@@ -1080,7 +1086,9 @@ theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump 
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut
+    · split
+      · exact ⟨rfl, ht⟩
+      rename_i hcut _
       split
       · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
       · obtain ⟨h1, h2⟩ := ihf c t ht
@@ -1090,7 +1098,9 @@ theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump 
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut
+    · split
+      · exact ⟨rfl, ht⟩
+      rename_i hcut _
       split
       · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
       · obtain ⟨h1, h2⟩ := iht c t ht
@@ -1100,7 +1110,9 @@ theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump 
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut
+    · split
+      · exact ⟨rfl, ht⟩
+      rename_i hcut _
       split
       · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
       · obtain ⟨h1, h2⟩ := iht c t ht
@@ -1110,7 +1122,9 @@ theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump 
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut
+    · split
+      · exact ⟨rfl, ht⟩
+      rename_i hcut _
       split
       · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
       · obtain ⟨h1, h2⟩ := iht c t ht
@@ -1121,7 +1135,9 @@ theorem rwM_spec : ∀ (e : Expr) (c : Nat) (t : RMemo), RGood cut leaf lf bump 
     intro c t ht; rw [rwM]
     split
     · rename_i hcut; exact ⟨by rw [rwP]; simp [hcut], ht⟩
-    · rename_i hcut
+    · split
+      · exact ⟨rfl, ht⟩
+      rename_i hcut _
       split
       · rename_i r hr; exact ⟨RMemo.find?_sound (P := fun x p => p.2 = rwP cut leaf lf bump x p.1) ht hr, ht⟩
       · obtain ⟨h1, h2⟩ := ih c t ht
