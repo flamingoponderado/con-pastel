@@ -2024,7 +2024,23 @@ partial def solveSparseCases (g : MVarId) (env inv t : Expr) : GoalM Unit := do
     let f := t'.getAppFn
     let .const _ lv := f | pure t'
     let _ := lv
-    pure (← whnfCore (mkAppN (← instantiateValueLevelParams ci lvls) t'.getAppArgs).headBeta)
+    -- without structure eta: `whnfCore` would otherwise go on into the branch and
+    -- turn a `match` on a pair-valued call into one call per projection
+    -- (exponential in a recursion such as `let (bs, e) := piBinders b; …`)
+    let r ← withConfig (fun c => { c with etaStruct := .none }) do
+      whnfCore (mkAppN (← instantiateValueLevelParams ci lvls) t'.getAppArgs).headBeta
+    -- stuck on a structure's recursor (the scrutinee is not a constructor): back to
+    -- `S.casesOn` (`motive, minor, major` becomes `motive, major, minor`)
+    if let .const rn rlvls := r.getAppFn then
+      if let some (.recInfo ri) := (← getEnv).find? rn then
+        let rargs := r.getAppArgs
+        if ri.numMotives == 1 && ri.numMinors == 1 && ri.numIndices == 0 &&
+            rargs.size ≥ ri.numParams + 3 then
+          let I := rn.getPrefix
+          let np := ri.numParams
+          return mkAppN (mkConst (I ++ `casesOn) rlvls)
+            (rargs[:np].toArray ++ #[rargs[np]!, rargs[np + 2]!, rargs[np + 1]!] ++ rargs[np + 3:].toArray)
+    pure r
 
 /-- A `match`: reduce it if the discriminants decide it; use its compiled
 `casesOn` tree when that is supported; otherwise case split on a
@@ -2042,7 +2058,10 @@ partial def solveMatcher (g : MVarId) (env inv t : Expr) : GoalM Unit := do
       if d.isLit || d.nat?.isSome || d.rawNatLit?.isSome then return true
       let d ← whnfR d
       -- variables, projections etc. are fine (structure eta); applications of
-      -- defined functions are not (whnf would unfold them)
+      -- defined functions are not (whnf would unfold them), nor applications of
+      -- local functions (a recursive call: structure eta would evaluate it once
+      -- per projection, exponentially in the recursion)
+      if d.isApp && d.getAppFn.isFVar then return false
       let .const c _ := d.getAppFn | return true
       return (← getEnv).find? c matches some (.ctorInfo _)
   if discrsCtor then
@@ -2490,9 +2509,19 @@ partial def solveApp (g : MVarId) (env inv t : Expr) : GoalM Unit := do
           -- registered datatypes have their own `casesOn` (and projections become `casesOn`)
           if !(← isProp (← inferType major)) && (mty.hasFVar || (← findDatatype? mty).isNone) then
             let some (.ctorInfo ci) := (← getEnv).find? ii.ctors.head! | unreachable!
-            let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
-            let t' := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
-              args[ii.numParams + 3:].toArray).headBeta
+            -- a scrutinee that is not a variable is bound first: projecting it
+            -- directly would evaluate it once per projection (exponential in a
+            -- recursion such as `let (bs, e) := f b; …`)
+            let mtyO ← inferType major
+            let t' ← if major.isFVar then do
+                let projs := (List.range ci.numFields).map fun i => Expr.proj tn i major
+                pure (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
+                  args[ii.numParams + 3:].toArray).headBeta
+              else withLocalDeclD `z mtyO fun z => do
+                let projs := (List.range ci.numFields).map fun i => Expr.proj tn i z
+                let b := (mkAppN (mkAppN args[ii.numParams + 2]! projs.toArray)
+                  args[ii.numParams + 3:].toArray).headBeta
+                pure (Expr.letE `z mtyO major (b.abstract #[z]) false)
             let g' ← g.replaceTargetDefEq (← mkAppM ``Eval #[env, ← evalGoalCe g, mkApp inv t'])
             return ← solve g'
   -- lists
