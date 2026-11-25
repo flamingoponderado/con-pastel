@@ -1,3 +1,9 @@
+> **Notice.** I think [con-panqueque](https://github.com/flamingoponderado/con-panqueque) is more promising.
+> Pancake (which shares some compiler passes with CakeML) provides finer control over when to touch memory,
+> and what to put there.
+> This repository contains some interesting technique for translating Lean to CakeML (with correctness proofs).
+> That can be seen read only. 
+
 # con-pastel
 
 > **Warning.** con-pastel is young, and nobody has reviewed it carefully. Its
